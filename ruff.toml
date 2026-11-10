@@ -1,0 +1,132 @@
+# Ruff configuration file.
+# DOCUMENTATION: https://docs.astral.sh/ruff/configuration/
+
+# Exclude a variety of commonly ignored directories.
+exclude = [
+  ".bzr",
+  ".direnv",
+  ".eggs",
+  ".git",
+  ".git-rewrite",
+  ".hg",
+  ".mypy_cache",
+  ".nox",
+  ".pants.d",
+  ".pytype",
+  ".ruff_cache",
+  ".svn",
+  ".tox",
+  ".venv",
+  ".cache",
+  ".trunk",
+  ".vscode",
+  ".pio",
+  "__pypackages__",
+  "_build",
+  "buck-out",
+  "build",
+  "dist",
+  "node_modules",
+  "venv",
+]
+
+# Set the files and types to discover
+include = ["pyproject.toml", "*.py"]
+#extend-include = ["*.ipynb"]
+
+# Set the source directories
+src = ["core", "tests", "tools"]
+
+# Set indentation to 4 spaces.
+indent-width = 4
+
+# Set the maximum line length to 80 characters.
+line-length = 80
+
+# Allow autofix for all enabled rules
+fix = true
+
+[lint]
+select = [
+  "W",    # pycodestyle Warnings
+  "E",    # pycodestyle Errors
+  "F",    # Pyflakes
+  "B",    # flake8-bugbear
+  "D",    # flake8-docstrings/pydocstyle
+  "UP",   # pyupgrade
+  "N",    # PEP 8 Naming Conventions,
+  "ANN",  # flake8-annotations
+  "INP",  # flake8-no-pep420
+  "TCH",  # flake8-type-checking
+]
+# D401 - "First line should be in imperative mood; try rephrasing"
+# F401 - "module imported but unused"
+extend-select = ["D401", "F401"]
+fixable = ["ALL"]
+
+# Ignore a variety of pycodestyle rules,
+# E501 - line length too long
+# B008 - ignore "do not perform function calls in argument defaults"
+# PLR0917 - too-many-positional-arguments
+# E902 - ignore "IOError is not defined"
+# ANN401 - ignore "dynamically typed expressions are disallowed"
+# ANN002 - ignore "missing-type-args"
+# ANN003 - ignore "missing-type-kwargs"
+ignore = ["E501", "B008", "E902", "ANN401", "ANN002", "ANN003"]
+extend-ignore = [] 
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.per-file-ignores]
+"__init__.py" = ["E401", "E402", "D104"]
+"*_test.py" = ["ANN001"]
+
+[lint.flake8-quotes]
+# Make all docstrings double-quoted
+docstring-quotes = "double"
+inline-quotes = "double"    # Make sure this matches the `format.quote-style` setting
+multiline-quotes = "double"
+
+# Declare default import aliases
+[lint.flake8-import-conventions.aliases]
+"matplotlib.pyplot" = "plt"
+numpy = "np"
+pandas = "pd"
+tensorflow = "tf"
+
+# Ban all parent relative imports (keeps things cleaner)
+[lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+# Type checking linting
+[lint.flake8-type-checking]
+exempt-modules = [
+  "typing",
+  "typing_extensions",
+] # Exempt these modules from type checking block
+#quote-annotations = "strict" # Quote type annotations and put in a TYPE_CHECKING block (ignore imports needed at runtime)
+runtime-evaluated-base-classes = [
+  "pydantic.BaseModel",
+] # Base classes that are evaluated at runtime
+strict = true
+
+[lint.flake8-unused-arguments]
+ignore-variadic-names = true # Ignore variadic names in unused arguments (e.g. *args, **kwargs)
+
+[lint.pyupgrade]
+keep-runtime-typing = false # Convert runtime typing to Python 3.10+ syntax
+
+[lint.isort]
+combine-as-imports = true # Allow same-line import statements
+case-sensitive = true # Case-sensitive sorting
+
+[format]
+# Anything here will be used to auto-format the code
+indent-style = "space" # or "tab"
+exclude = ["*.ipynb"]  # Exclude Jupyter notebooks from formatting
+line-ending = "auto"
+quote-style = "double"

@@ -1,0 +1,23 @@
+[project]
+name = "ccat"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "topher097", email = "cmendres400@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "google-api-python-client>=2.201.0",
+    "google-auth-httplib2>=0.4.4",
+    "google-auth-oauthlib>=1.5.0",
+    "opencode-python-sdk>=0.2.3",
+    "pydantic>=2.14.3",
+]
+
+[project.scripts]
+ccat = "ccat:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
