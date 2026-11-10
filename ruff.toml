@@ -84,6 +84,8 @@ convention = "google"
 [lint.per-file-ignores]
 "__init__.py" = ["E401", "E402", "D104"]
 "*_test.py" = ["ANN001"]
+# Implicit namespace package + pytest fixture arguments (§10).
+"test/**" = ["INP001", "ANN001"]
 
 [lint.flake8-quotes]
 # Make all docstrings double-quoted

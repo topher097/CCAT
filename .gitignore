@@ -48,3 +48,4 @@ temp/
 # Secret files
 .envrc.private
 ccat_google_credentials.json
+ccat_google_token.json 

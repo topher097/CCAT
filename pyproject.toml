@@ -12,12 +12,25 @@ dependencies = [
     "google-auth-httplib2>=0.4.4",
     "google-auth-oauthlib>=1.5.0",
     "opencode-python-sdk>=0.2.3",
+    "polars>=2.1.0",
     "pydantic>=2.14.3",
+    "fire>=0.7.0",
+    "requests>=2.32.0",
+    "pandera[polars]>=0.36.0",
+    "openpyxl>=3.1.5",
+    "fastexcel>=0.21.0",
 ]
 
 [project.scripts]
 ccat = "ccat:main"
+gdrive = "ccat.gdrive:cli"
+zite = "ccat.zite:cli"
 
 [build-system]
 requires = ["uv_build>=0.13.5,<0.14.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

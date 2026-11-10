@@ -1,0 +1,571 @@
+{
+  "season": "2026",
+  "xmas_date": "12/25/2026",
+  "excel_file": "./output/ccat_2026.xlsx",
+  "zite": {
+    "sponsor": "https://app.zite.com/workspace/copper-country-angel-tree-2026-0c0e69c8a079ee6f/database/tke1MMSqSKG/vtnd2syERRm",
+    "family": "https://app.zite.com/workspace/copper-country-angel-tree-2026-0c0e69c8a079ee6f/database/tuBfxw8ww4R/vqdEAPeX8fQ",
+    "child": "https://app.zite.com/workspace/copper-country-angel-tree-2026-0c0e69c8a079ee6f/database/tdPCH5txL6v/v71K9wjToNc"
+  },
+  "tables": {
+    "sponsor": {
+      "columns": {
+        "zite_record_id": {
+          "type": "string"
+        },
+        "create": {
+          "type": "datetime",
+          "rename": "Created time"
+        },
+        "email": {
+          "type": "email"
+        },
+        "accepts_disclaimer": {
+          "type": "bool",
+          "rename": "I Accept Data Disclaimer"
+        },
+        "sponsor_type": {
+          "type": "enum",
+          "rename": "Affiliation",
+          "values": "sponsor_affiliation"
+        },
+        "organization_name": {
+          "type": "string",
+          "default": null
+        },
+        "prior_assigned_angel_ids": {
+          "type": "string",
+          "rename": "Assigned Angel ID Code",
+          "default": null
+        },
+        "first_name": {
+          "type": "name"
+        },
+        "last_name": {
+          "type": "name"
+        },
+        "phone": {
+          "type": "phone_us",
+          "rename": "Phone Number"
+        },
+        "num_children": {
+          "type": "int",
+          "rename": "Number of Angels to Sponsor",
+          "default": 1
+        },
+        "age_preference": {
+          "type": "enum",
+          "rename": "Age Preference",
+          "values": "sponsor_age_preference",
+          "default": "Any Age"
+        },
+        "gender_preference": {
+          "type": "enum",
+          "rename": "Gender Preference",
+          "values": "sponsor_gender_preference",
+          "default": "Any Gender"
+        },
+        "dropoff_location": {
+          "type": "enum",
+          "rename": "Gift Drop-Off Location Preference",
+          "values": "sponsor_dropoff_location",
+          "default": "Any Location"
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    },
+    "family": {
+      "columns": {
+        "zite_record_id": {
+          "type": "string"
+        },
+        "zite_created_at": {
+          "type": "datetime"
+        },
+        "created": {
+          "type": "datetime",
+          "rename": "Created time"
+        },
+        "primary_email": {
+          "type": "email",
+          "rename": "Email"
+        },
+        "accepts_disclaimer": {
+          "type": "bool",
+          "rename": "I Accept Data Disclaimer"
+        },
+        "first_name": {
+          "type": "name"
+        },
+        "last_name": {
+          "type": "name"
+        },
+        "phone": {
+          "type": "phone_us",
+          "rename": "Phone Number"
+        },
+        "street_address": {
+          "type": "string"
+        },
+        "apt_floor": {
+          "type": "string",
+          "rename": "Apt / Floor",
+          "default": null
+        },
+        "city": {
+          "type": "string"
+        },
+        "zip_code": {
+          "type": "string"
+        },
+        "state": {
+          "type": "enum",
+          "values": "family_state"
+        },
+        "secondary_first_name": {
+          "type": "name",
+          "rename": "First Name (secondary)",
+          "default": null
+        },
+        "secondary_last_name": {
+          "type": "name",
+          "rename": "Last Name (secondary)",
+          "default": null
+        },
+        "secondary_email": {
+          "type": "email",
+          "rename": "Email (secondary)",
+          "default": null
+        },
+        "secondary_phone": {
+          "type": "phone_us",
+          "rename": "Phone Number (secondary)",
+          "default": null
+        },
+        "gift_pickup_location": {
+          "type": "enum",
+          "rename": "Gift Pickup Location Preference",
+          "values": "family_gift_pickup_location"
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    },
+    "child": {
+      "columns": {
+        "zite_record_id": {
+          "type": "string"
+        },
+        "zite_created_at": {
+          "type": "datetime"
+        },
+        "created": {
+          "type": "datetime",
+          "rename": "Creation Time"
+        },
+        "first_name": {
+          "type": "name"
+        },
+        "primary_email": {
+          "type": "email",
+          "rename": "Primary Email"
+        },
+        "dob": {
+          "type": "date",
+          "rename": "Date of Birth"
+        },
+        "age_reported": {
+          "type": "int",
+          "rename": "Age at Christmas 2026",
+          "default": null
+        },
+        "gender": {
+          "type": "enum",
+          "values": "child_gender"
+        },
+        "need_1": {
+          "type": "string",
+          "rename": "Need #1"
+        },
+        "need_2": {
+          "type": "string",
+          "rename": "Need #2",
+          "default": "N/A"
+        },
+        "desire_1": {
+          "type": "string",
+          "rename": "Desire #1",
+          "default": "N/A"
+        },
+        "desire_2": {
+          "type": "string",
+          "rename": "Desire #2",
+          "default": "N/A"
+        },
+        "shoe_size": {
+          "type": "enum",
+          "rename": "Shoe Size",
+          "values": "child_shoe_size"
+        },
+        "shoe_size_type": {
+          "type": "enum",
+          "rename": "Shoe Size Type",
+          "values": "child_shoe_size_type"
+        },
+        "pant_waist_size": {
+          "type": "enum",
+          "rename": "Pant Waist Size",
+          "values": "child_pant_waist_size"
+        },
+        "pant_inseam": {
+          "type": "enum",
+          "rename": "Pant Inseam",
+          "values": "child_pant_inseam"
+        },
+        "pant_size_letter": {
+          "type": "enum",
+          "rename": "Pant Size (Letter)",
+          "values": "child_pant_size_letter"
+        },
+        "pant_size_type": {
+          "type": "enum",
+          "rename": "Pant Size Type",
+          "values": "child_pant_size_type"
+        },
+        "jean_size": {
+          "type": "string",
+          "rename": "Jean Size",
+          "default": "N/A"
+        },
+        "shirt_size_letter": {
+          "type": "enum",
+          "rename": "Shirt Size (Letter)",
+          "values": "child_shirt_size_letter"
+        },
+        "shirt_size_type": {
+          "type": "enum",
+          "rename": "Shirt Size Type",
+          "values": "child_shirt_size_type"
+        },
+        "favorite_colors": {
+          "type": "string",
+          "rename": "Favorite Color(s)"
+        },
+        "interests": {
+          "type": "string"
+        },
+        "other_notes": {
+          "type": "string",
+          "rename": "Other Notes",
+          "default": "N/A"
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "vocabularies": {
+    "sponsor_affiliation": [
+      "Individual",
+      "Organization"
+    ],
+    "sponsor_age_preference": [
+      "Any Age",
+      "Newborn through Toddler (0-3 yrs)",
+      "Pre-K through Grade 5 (4-10 yrs)",
+      "Middle School (11-13 yrs)",
+      "High School (14-18+ yrs)",
+      "Special Needs (any age)"
+    ],
+    "sponsor_gender_preference": [
+      "Any Gender",
+      "Male",
+      "Female"
+    ],
+    "sponsor_dropoff_location": [
+      "Any Location",
+      "Hancock",
+      "Calumet"
+    ],
+    "family_gift_pickup_location": [
+      "TSA (Hancock)",
+      "CCAM (Calumet)",
+      "Hancock",
+      "Calumet"
+    ],
+    "child_gender": [
+      "Male",
+      "Female",
+      "Non-binary"
+    ],
+    "child_shoe_size": [
+      "0.5",
+      "1",
+      "1.5",
+      "2",
+      "2.5",
+      "3",
+      "3.5",
+      "4",
+      "4.5",
+      "5",
+      "5.5",
+      "6",
+      "6.5",
+      "7",
+      "7.5",
+      "8",
+      "8.5",
+      "9",
+      "9.5",
+      "10",
+      "10.5",
+      "11",
+      "11.5",
+      "12",
+      "12.5",
+      "13",
+      "13.5",
+      "14",
+      "14.5",
+      "15",
+      "15.5",
+      "16",
+      "not applicable"
+    ],
+    "child_shoe_size_type": [
+      "Baby/Infant",
+      "Youth",
+      "Men's",
+      "Women's",
+      "Not Applicable"
+    ],
+    "child_pant_waist_size": [
+      "Newborn (NB)",
+      "0-3 Months",
+      "3-6 Months",
+      "6-9 Months",
+      "9-12 Months",
+      "12-18 Months",
+      "18-24 Months",
+      "2T",
+      "3T",
+      "4T",
+      "5T",
+      "5\"",
+      "6\"",
+      "7\"",
+      "8\"",
+      "9\"",
+      "10\"",
+      "11\"",
+      "12\"",
+      "13\"",
+      "14\"",
+      "15\"",
+      "16\"",
+      "17\"",
+      "18\"",
+      "19\"",
+      "20\"",
+      "21\"",
+      "22\"",
+      "23\"",
+      "24\"",
+      "25\"",
+      "26\"",
+      "27\"",
+      "28\"",
+      "29\"",
+      "30\"",
+      "31\"",
+      "32\"",
+      "33\"",
+      "34\"",
+      "35\"",
+      "36\"",
+      "37\"",
+      "38\"",
+      "39\"",
+      "40\"",
+      "41\"",
+      "42\"",
+      "43\"",
+      "44\""
+    ],
+    "child_pant_inseam": [
+      "N/A (Baby/Infant)",
+      "14\"",
+      "15\"",
+      "16\"",
+      "17\"",
+      "18\"",
+      "19\"",
+      "20\"",
+      "21\"",
+      "22\"",
+      "23\"",
+      "24\"",
+      "25\"",
+      "26\"",
+      "27\"",
+      "28\"",
+      "29\"",
+      "30\"",
+      "31\"",
+      "32\"",
+      "33\"",
+      "34\"",
+      "35\"",
+      "36\""
+    ],
+    "child_pant_size_letter": [
+      "Newborn (NB)",
+      "0-3 Months",
+      "3-6 Months",
+      "6-9 Months",
+      "9-12 Months",
+      "12-18 Months",
+      "18-24 Months",
+      "XXS",
+      "XS",
+      "S",
+      "M",
+      "L",
+      "XL",
+      "XXL",
+      "2X",
+      "3X",
+      "not applicable"
+    ],
+    "child_pant_size_type": [
+      "Baby/Infant",
+      "Youth",
+      "Adult",
+      "not applicable"
+    ],
+    "child_shirt_size_letter": [
+      "Newborn (NB)",
+      "0-3 Months",
+      "3-6 Months",
+      "6-9 Months",
+      "9-12 Months",
+      "12-18 Months",
+      "18-24 Months",
+      "XXS",
+      "XS",
+      "S",
+      "M",
+      "L",
+      "XL",
+      "XXL",
+      "2X",
+      "3X",
+      "not applicable"
+    ],
+    "child_shirt_size_type": [
+      "Baby/Infant",
+      "Youth",
+      "Adult",
+      "not applicable"
+    ],
+    "family_state": [
+      "Alabama",
+      "Alaska",
+      "Arizona",
+      "Arkansas",
+      "California",
+      "Colorado",
+      "Connecticut",
+      "Delaware",
+      "Florida",
+      "Georgia",
+      "Hawaii",
+      "Idaho",
+      "Illinois",
+      "Indiana",
+      "Iowa",
+      "Kansas",
+      "Kentucky",
+      "Louisiana",
+      "Maine",
+      "Maryland",
+      "Massachusetts",
+      "Michigan",
+      "Minnesota",
+      "Mississippi",
+      "Missouri",
+      "Montana",
+      "Nebraska",
+      "Nevada",
+      "New Hampshire",
+      "New Jersey",
+      "New Mexico",
+      "New York",
+      "North Carolina",
+      "North Dakota",
+      "Ohio",
+      "Oklahoma",
+      "Oregon",
+      "Pennsylvania",
+      "Rhode Island",
+      "South Carolina",
+      "South Dakota",
+      "Tennessee",
+      "Texas",
+      "Utah",
+      "Vermont",
+      "Virginia",
+      "Washington",
+      "West Virginia",
+      "Wisconsin",
+      "Wyoming",
+      "District of Columbia"
+    ],
+    "sponsor_num_children": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "15",
+      "20",
+      "25"
+    ]
+  },
+  "location_groups": {
+    "hancock": [
+      "Hancock",
+      "TSA (Hancock)"
+    ],
+    "calumet": [
+      "Calumet",
+      "CCAM (Calumet)"
+    ]
+  },
+  "ai_screening": {
+    "model": "opencode/glm-5.3-flash",
+    "system_prompt": "You are a meticulous data-quality adjudicator for a children's holiday gift\nprogram (Copper Country Angel Tree). You will be given one child's\nregistration record as a JSON object. Your job is to check it for internal\nconsistency and produce a corrected (adjudicated) version of the fields you\nare confident are wrong or unclear. A human reviewer will see your output\nside by side with the original, so be conservative: only change what the\nevidence supports.\n\nYou will receive these fields:\n- zite_record_id (opaque system identifier, copied back unchanged), dob\n  (YYYY-MM-DD), age_at_xmas (integer, computed from dob and Christmas\n  {{xmas_date}}), age_reported (integer the family typed in, may differ or\n  be null), gender\n- need_1, need_2, desire_1, desire_2, interests, favorite_colors,\n  other_notes (free text from the family)\n- shoe_size, shoe_size_type, pant_waist_size, pant_inseam,\n  pant_size_letter, pant_size_type, jean_size (free text),\n  shirt_size_letter, shirt_size_type\n\nThe child's name and any family contact information are intentionally NOT\nprovided to you. Do not speculate about the child's identity, and never\ninclude a name in your output.\n\nCHECK 1 — Date of birth sanity:\n- Treat age_at_xmas as the authoritative age (it is computed from dob).\n- If age_reported is present and differs from age_at_xmas, describe the\n  mismatch in potential_anomoly.\n- Infant sizing is expected when age_at_xmas < 2. Infant indicators are:\n  size types \"Baby/Infant\", month-based sizes (\"Newborn (NB)\" through\n  \"18-24 Months\"), toddler sizes 2T-5T, inseam \"N/A (Baby/Infant)\", and\n  \"Baby/Infant\"-typed shoe sizes.\n- If the child is age_at_xmas < 2 but has non-infant sizing (Youth or Adult\n  types, XXS-3X letters, numeric inch waist/inseam), the reported dob may be\n  wrong. Likewise, if the child is older but has infant sizing, dob may be\n  wrong.\n- If a single corrected dob would reconcile age_reported, age_at_xmas, and\n  the sizes, and you are confident, propose it in the dob field (YYYY-MM-DD).\n  Otherwise leave dob null and describe the discrepancy in\n  potential_anomoly.\n\nCHECK 2 — Needs and desires clarity:\n- For need_1, need_2, desire_1, desire_2, interests, favorite_colors,\n  other_notes: fix spelling errors, expand unclear abbreviations, and\n  lightly reword garbled phrasing so a volunteer shopper understands\n  what to buy. Never change the meaning, never invent items, never\n  remove items. Keep each field short (one sentence, comma-separated\n  items for interests and favorite_colors). If the text is already\n  clear, leave the field null.\n\nCHECK 3 — Clothing sizes:\n- Only touch a size field if the sizes contradict each other or contradict\n  the age in an obvious way (e.g. shoe_size 13 with type \"Baby/Infant\" for a\n  10-year-old). If you correct a size, it must be one of the exact allowed\n  option labels from the registration form. When in doubt, leave the size\n  null and describe the issue in potential_anomoly.\n\nOUTPUT — return exactly one JSON object with these keys:\n{\"zite_record_id\": string, \"dob\": string|null, \"need_1\": string|null,\n\"need_2\": string|null, \"desire_1\": string|null, \"desire_2\": string|null,\n\"shoe_size\": string|null, \"shoe_size_type\": string|null,\n\"pant_waist_size\": string|null, \"pant_inseam\": string|null,\n\"pant_size_letter\": string|null, \"pant_size_type\": string|null,\n\"jean_size\": string|null, \"shirt_size_letter\": string|null,\n\"shirt_size_type\": string|null, \"interests\": string|null,\n\"favorite_colors\": string|null, \"other_notes\": string|null,\n\"potential_anomoly\": string|null}\n\nRules for the output:\n- Copy zite_record_id from the input unchanged.\n- Every other key is null when you have no change for that field (value\n  identical to the input or no correction to make).\n- potential_anomoly: a short plain-English description of any age, dob, or\n  size discrepancy you found (including age_reported mismatches); null when\n  everything is consistent.\n- If you have no changes AND no anomaly, return the literal null instead of\n  an object. (The pipeline records the screening either way.)\n- Return only the JSON object (or null). No explanations, no markdown\n  fences.",
+    "temperature": 0.0
+  },
+  "audit": {
+    "host": "127.0.0.1",
+    "port": 8642
+  },
+  "matchmaking": {
+    "location_weight": 1000,
+    "age_weight": 100,
+    "gender_weight": 1
+  },
+  "log_file": "./output/ccat_2026.log",
+  "match_report_csv": "./output/ccat_2026_match_report.csv"
+}

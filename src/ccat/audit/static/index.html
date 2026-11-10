@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCAT Angel Tree — Child Audit</title>
+<style>
+  :root { --warn: #b45309; --ok: #047857; --err: #b91c1c; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; background: #f8fafc; }
+  header { display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; margin-bottom: .75rem; }
+  header h1 { font-size: 1.2rem; margin: 0; }
+  #queueinfo { color: #475569; }
+  .banner { padding: .5rem .75rem; border-radius: .375rem; margin-bottom: .75rem; display: none; }
+  .banner.orphan { background: #fef3c7; color: var(--warn); border: 1px solid #fcd34d; display: block; }
+  .banner.error { background: #fee2e2; color: var(--err); border: 1px solid #fca5a5; display: block; }
+  .banner.saved { background: #d1fae5; color: var(--ok); border: 1px solid #6ee7b7; display: block; }
+  .checkbox-row { margin-bottom: .75rem; }
+  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .columns h2 { font-size: .9rem; margin: 0 0 .25rem; color: #334155; }
+  pre { margin: 0; padding: .5rem; background: #0f172a; color: #e2e8f0; border-radius: .375rem;
+        overflow: auto; max-height: 55vh; font-size: .8rem; white-space: pre-wrap; }
+  textarea { width: 100%; min-height: 55vh; padding: .5rem; font: .8rem/1.4 monospace;
+             border: 1px solid #cbd5e1; border-radius: .375rem; }
+  .k { color: #7dd3fc; } .s { color: #fbbf24; } .n { color: #a5b4fc; } .b { color: #f472b6; }
+  .controls { margin-top: .75rem; display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  button { padding: .45rem .9rem; border-radius: .375rem; border: 1px solid #94a3b8;
+           background: #fff; cursor: pointer; font-size: .9rem; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
+  button.warn { background: var(--warn); color: #fff; border-color: var(--warn); }
+  label { font-size: .85rem; color: #334155; }
+  #clarify { width: 100%; margin-top: .75rem; padding: .5rem; font: .85rem/1.4 system-ui;
+             border: 1px solid #cbd5e1; border-radius: .375rem; min-height: 2.4rem; }
+  @media (max-width: 800px) { .columns { grid-template-columns: 1fr; } textarea { min-height: 30vh; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>CCAT Angel Tree — Child Audit</h1>
+  <span id="queueinfo">loading…</span>
+</header>
+<div id="banner" class="banner"></div>
+
+<div class="checkbox-row">
+  <label><input type="checkbox" id="special_needs"> Child is special needs</label>
+</div>
+
+<div class="columns">
+  <div>
+    <h2>Raw child data (read-only)</h2>
+    <pre id="raw">—</pre>
+  </div>
+  <div>
+    <h2>Adjudicated child data (editable JSON; age_at_xmas is read-only)</h2>
+    <textarea id="adj" spellcheck="false"></textarea>
+  </div>
+</div>
+
+<textarea id="clarify" placeholder="require_clarification (optional note)"></textarea>
+
+<div class="controls">
+  <button id="prev">&larr; Previous</button>
+  <button id="next">Next &rarr;</button>
+  <button id="save" class="primary">Save (needs clarification)</button>
+  <button id="audit" class="warn">Mark audited</button>
+</div>
+
+<script>
+"use strict";
+const ADJ_FIELDS = ["dob","need_1","need_2","desire_1","desire_2",
+  "shoe_size","shoe_size_type","pant_waist_size","pant_inseam",
+  "pant_size_letter","pant_size_type","jean_size",
+  "shirt_size_letter","shirt_size_type","interests",
+  "favorite_colors","other_notes","potential_anomoly"];
+// Shown but never sent back: computed by acquire, not editable (§5.5).
+const ADJ_READ_ONLY = ["age_at_xmas"];
+// Display order: read-only fields beside the field they annotate.
+const ADJ_QUEUE_FIELDS = (() => {
+  const fields = ADJ_FIELDS.slice();
+  for (const field of ADJ_READ_ONLY.slice().reverse()) {
+    fields.splice(fields.indexOf("dob") + 1, 0, field);
+  }
+  return fields;
+})();
+const ORPHAN_NOTE = "No matching family registration for this child's primary email";
+
+let queue = [];
+let pos = 0;
+
+const $ = (id) => document.getElementById(id);
+
+function highlight(json) {
+  const esc = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return esc.replace(
+    /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false)\b|\b(-?\d+\.?\d*)\b/g,
+    (m, str, colon, bool, num) => {
+      if (str) return colon ? `<span class="k">${str}</span>${colon}` : `<span class="s">${str}</span>`;
+      if (bool) return `<span class="b">${bool}</span>`;
+      return `<span class="n">${num}</span>`;
+    });
+}
+
+function mergedAdj(item) {
+  // Pre-fill: adj_child values merged over the raw values (§7.2).
+  // Read-only fields are shown for context but stripped before save.
+  const out = {};
+  for (const field of ADJ_QUEUE_FIELDS) {
+    const a = item.adj && item.adj[field] !== null && item.adj[field] !== undefined
+      ? item.adj[field] : item.raw[field];
+    out[field] = a === undefined ? null : a;
+  }
+  return out;
+}
+
+function render() {
+  const item = queue[pos];
+  if (!item) { $("raw").textContent = "queue is empty — all children audited"; $("adj").value = ""; return; }
+  $("queueinfo").textContent =
+    `child ${pos + 1} of ${queue.length} in queue` +
+    (item.angel_id ? ` — angel ${item.angel_id}` : " — ORPHANED (no family)");
+  const banner = $("banner");
+  if (item.angel_id === null || item.angel_id === undefined) {
+    banner.className = "banner orphan";
+    banner.textContent = "ORPHANED: no matching family registration for this child's" +
+      " primary email. It cannot be marked audited until a family registration" +
+      " appears (run `ccat acquire` again). You may still save it with" +
+      " audited = false.";
+    if (!$("clarify").value.trim()) $("clarify").value = ORPHAN_NOTE;
+  } else {
+    banner.className = "banner";
+    banner.textContent = "";
+    if ($("clarify").value === ORPHAN_NOTE) $("clarify").value = "";
+  }
+  $("raw").innerHTML = highlight(JSON.stringify(item.raw, null, 2));
+  $("adj").value = JSON.stringify(mergedAdj(item), null, 2);
+  $("special_needs").checked = false;
+  $("audit").disabled = item.angel_id === null || item.angel_id === undefined;
+  $("prev").disabled = pos === 0;
+  $("next").disabled = pos >= queue.length - 1;
+}
+
+async function refresh() {
+  const response = await fetch("/api/queue");
+  queue = await response.json();
+  if (pos >= queue.length) pos = Math.max(0, queue.length - 1);
+  render();
+}
+
+async function save(audited) {
+  const item = queue[pos];
+  if (!item) return;
+  let edited;
+  try {
+    edited = JSON.parse($("adj").value);
+    if (typeof edited !== "object" || edited === null || Array.isArray(edited)) throw new Error();
+  } catch {
+    const banner = $("banner");
+    banner.className = "banner error";
+    banner.textContent = "The adjudicated JSON does not parse; fix it before saving.";
+    return;
+  }
+  // Read-only fields are display-only; the server rejects them.
+  for (const field of ADJ_READ_ONLY) delete edited[field];
+  const body = Object.assign({}, edited, {
+    special_needs: $("special_needs").checked,
+    audited,
+    require_clarification: $("clarify").value.trim() || null,
+  });
+  const response = await fetch(`/api/children/${encodeURIComponent(item.zite_record_id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const banner = $("banner");
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    banner.className = "banner error";
+    banner.textContent = `HTTP ${response.status}: ${payload.error || response.statusText}`;
+    return;
+  }
+  await refresh();  // keep the current child on screen unless it left the queue
+  if (!queue[pos] || queue[pos].zite_record_id !== item.zite_record_id) {
+    pos = Math.min(pos, Math.max(0, queue.length - 1));
+    render();
+  }
+  banner.className = "banner saved";
+  banner.textContent = audited
+    ? "Saved and marked audited." : "Saved with audited = false (needs clarification).";
+}
+
+$("prev").onclick = () => { if (pos > 0) { pos -= 1; render(); } };
+$("next").onclick = () => { if (pos < queue.length - 1) { pos += 1; render(); } };
+$("save").onclick = () => save(false);
+$("audit").onclick = () => save(true);
+refresh().catch((error) => {
+  const banner = $("banner");
+  banner.className = "banner error";
+  banner.textContent = `Failed to load queue: ${error}`;
+});
+</script>
+</body>
+</html>
