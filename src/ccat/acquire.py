@@ -4,9 +4,13 @@ Pulls the sponsor/family/child tables from Zite, validates and cleans them
 against the config schema, deduplicates families, assigns stable IDs
 (``family_id``, ``sponsor_id``, ``angel_id``) and derived columns
 (``age_at_xmas``, ``pref_age_min``/``pref_age_max``), and persists the
-``raw_*`` sheets.  Never touches any other sheet (§5.6).
+``raw_*`` sheets plus the ``dedup_log`` sheet recording every merged
+duplicate (§5.4) and the ``dob_conflict_log`` sheet recording same-family
+children born too close together (§5.6).  Never touches any other sheet
+(§5.7).
 """
 
+import json
 import logging
 import re
 from datetime import date, datetime, UTC
@@ -28,6 +32,13 @@ logger = logging.getLogger(__name__)
 
 class AcquisitionError(Exception):
     """Raised when acquisition cannot complete (structural failure)."""
+
+
+#: Columns excluded from dedup conflict detection (§5.4): identity and
+#: ordering metadata that duplicate records necessarily differ on.
+DEDUP_CONFLICT_EXCLUDED = frozenset(
+    {"zite_record_id", "created", "zite_created_at"}
+)
 
 
 #: Exact mapping from the `age_preference` vocabulary to age bounds (§5.5).
@@ -288,7 +299,7 @@ def _parse_reported_age(value: Any) -> int | None:
 
 def process_table(
     frame: pl.DataFrame, table_name: str, cfg: Config
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Import, clean, and validate one table (§5.1–§5.3).
 
     Family rows are deduplicated (§5.4) on cleaned rows before validation so
@@ -300,8 +311,9 @@ def process_table(
         cfg: Pipeline configuration.
 
     Returns:
-        A tuple of (kept rows, rejected-row records) where each rejected
-        record has table, index, column, value, and reason keys.
+        A tuple of (kept rows, rejected-row records, dedup-log rows) where
+        each rejected record has table, index, column, value, and reason
+        keys; the dedup log is empty except for the family table.
     """
     rows = import_table(frame, table_name, cfg)
     specs = cfg.tables[table_name].columns
@@ -339,15 +351,17 @@ def process_table(
         else:
             cleaned.append(out)
     if table_name == "family":
-        cleaned = dedup_families(cleaned, cfg)
+        cleaned, dedup_log = dedup_families(cleaned, cfg)
+    else:
+        dedup_log = []
     kept, schema_rejected = validate_rows(cleaned, table_name, cfg)
     rejected.extend(schema_rejected)
-    return kept, rejected
+    return kept, rejected, dedup_log
 
 
 def dedup_families(
     rows: list[dict[str, Any]], cfg: Config
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Coalesce duplicate family rows by primary_email (§5.4).
 
     Rows are ordered by ``created`` ascending; for each column the first
@@ -359,7 +373,11 @@ def dedup_families(
         cfg: Pipeline configuration (unused, kept for signature symmetry).
 
     Returns:
-        The deduplicated rows.
+        A tuple of (deduplicated rows, dedup-log rows).  One log row is
+        produced per merged duplicate record, carrying the primary email,
+        the surviving and duplicate zite ids, the conflicting columns,
+        the conflicting values, and the full recorded contents of both
+        records as JSON.
     """
     del cfg  # signature symmetry only
     ordered = sorted(
@@ -380,6 +398,7 @@ def dedup_families(
             continue
         groups.setdefault(email, []).append(row)
     merged_rows: list[dict[str, Any]] = []
+    log_rows: list[dict[str, Any]] = []
     for email, group in groups.items():
         merged = dict(group[0])
         for key in merged:
@@ -388,6 +407,8 @@ def dedup_families(
                 merged[key] = None
                 continue
             merged[key] = values[0]
+            if key in DEDUP_CONFLICT_EXCLUDED:
+                continue
             distinct = {str(value) for value in values}
             if len(distinct) > 1:
                 logger.warning(
@@ -398,6 +419,8 @@ def dedup_families(
                     values[1:],
                 )
         merged_rows.append(merged)
+        if len(group) > 1:
+            log_rows.extend(_dedup_log_rows("family", email, merged, group[1:]))
     merged_rows.extend(no_email)
     merged_rows.sort(
         key=lambda row: (
@@ -405,7 +428,209 @@ def dedup_families(
             row.get("zite_record_id") or "",
         )
     )
-    return merged_rows
+    return merged_rows, log_rows
+
+
+def _dedup_log_rows(
+    sheet: str,
+    email: Any,
+    merged: dict[str, Any],
+    duplicates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build one dedup-log row per merged duplicate record (§5.4).
+
+    Args:
+        sheet: Name of the raw sheet the records came from.
+        email: The primary_email key the group was merged on.
+        merged: The surviving (coalesced) row as written to the sheet.
+        duplicates: The dropped duplicate rows, in merge order.
+
+    Returns:
+        Log rows with the kept/duplicate ids and created timestamps, the
+        conflicting columns (duplicate value differs from the surviving
+        value, both non-null), a human-readable detail string, and the
+        full recorded contents of both records as JSON.
+    """
+    log_rows: list[dict[str, Any]] = []
+    for duplicate in duplicates:
+        conflicts = [
+            key
+            for key in merged
+            if key not in DEDUP_CONFLICT_EXCLUDED
+            and merged.get(key) is not None
+            and duplicate.get(key) is not None
+            and str(duplicate.get(key)) != str(merged.get(key))
+        ]
+        details = "; ".join(
+            f"{key}: kept {merged.get(key)!r} / duplicate"
+            f" {duplicate.get(key)!r}"
+            for key in conflicts
+        )
+        log_rows.append(
+            {
+                "sheet": sheet,
+                "primary_email": email,
+                "kept_zite_record_id": merged.get("zite_record_id"),
+                "kept_created": merged.get("created"),
+                "duplicate_zite_record_id": duplicate.get("zite_record_id"),
+                "duplicate_created": duplicate.get("created"),
+                "conflict_columns": ",".join(conflicts),
+                "conflict_details": details,
+                "kept_record": json.dumps(merged, default=str, sort_keys=True),
+                "duplicate_record": json.dumps(
+                    duplicate, default=str, sort_keys=True
+                ),
+            }
+        )
+    return log_rows
+
+
+#: Column schema of the ``dedup_log`` sheet (§5.4).
+DEDUP_LOG_SCHEMA: dict[str, PolarsDataType] = {
+    "sheet": pl.String,
+    "primary_email": pl.String,
+    "kept_zite_record_id": pl.String,
+    "kept_created": pl.String,
+    "duplicate_zite_record_id": pl.String,
+    "duplicate_created": pl.String,
+    "conflict_columns": pl.String,
+    "conflict_details": pl.String,
+    "kept_record": pl.String,
+    "duplicate_record": pl.String,
+}
+
+
+def dedup_log_frame(log_rows: list[dict[str, Any]]) -> pl.DataFrame:
+    """Build the ``dedup_log`` sheet frame (§5.4).
+
+    Args:
+        log_rows: Log rows from :func:`dedup_families`.
+
+    Returns:
+        The typed frame (empty when nothing was deduplicated).
+    """
+    return pl.DataFrame(log_rows, schema=DEDUP_LOG_SCHEMA)
+
+
+#: Same-family children whose birth dates are at most
+#: ``cfg.acquire.sibling_dob_max_gap_days`` apart are recorded in
+#: ``dob_conflict_log`` (§5.6).  The default (274) is ~9 months.
+def _dob_gap_months(earlier: date, later: date) -> int:
+    """Count completed calendar months between two dates (§5.6).
+
+    Reporting only: the conflict threshold is day-based, from
+    ``cfg.acquire.sibling_dob_max_gap_days``.
+
+    Args:
+        earlier: The earlier date.
+        later: The later date.
+
+    Returns:
+        Whole months between the dates; two equal dates yield 0.
+    """
+    months = (later.year - earlier.year) * 12 + (later.month - earlier.month)
+    if later.day < earlier.day:
+        months -= 1
+    return max(months, 0)
+
+
+#: Column schema of the ``dob_conflict_log`` sheet (§5.6).
+DOB_CONFLICT_LOG_SCHEMA: dict[str, PolarsDataType] = {
+    "family_id": pl.Int64,
+    "primary_email": pl.String,
+    "child_a_zite_record_id": pl.String,
+    "child_a_angel_id": pl.String,
+    "child_a_first_name": pl.String,
+    "child_a_dob": pl.String,
+    "child_b_zite_record_id": pl.String,
+    "child_b_angel_id": pl.String,
+    "child_b_first_name": pl.String,
+    "child_b_dob": pl.String,
+    "gap_months": pl.Int64,
+    "gap_days": pl.Int64,
+}
+
+
+def sibling_dob_conflicts(
+    rows: list[dict[str, Any]], cfg: Config
+) -> list[dict[str, Any]]:
+    """Find same-family children born too close together (§5.6).
+
+    Every unordered pair of children sharing a ``family_id`` whose birth
+    dates are at most ``cfg.acquire.sibling_dob_max_gap_days`` days
+    apart (twins included) is recorded for human review.  Children
+    without a ``family_id`` (orphans) or without a ``dob`` are skipped.
+
+    Args:
+        rows: Cleaned, validated child rows with ``family_id`` and
+            ``angel_id`` assigned.
+        cfg: Pipeline configuration (threshold in days).
+
+    Returns:
+        One log row per conflicting pair, ordered deterministically
+        (family, then birth date, then record id); ``child_a`` is always
+        the earlier birth.
+    """
+    max_gap_days = cfg.acquire.sibling_dob_max_gap_days
+    by_family: dict[Any, list[dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("family_id") is None or row.get("dob") is None:
+            continue
+        by_family.setdefault(row["family_id"], []).append(row)
+    log_rows: list[dict[str, Any]] = []
+    for family_id in sorted(by_family, key=lambda value: str(value)):
+        ordered = sorted(
+            by_family[family_id],
+            key=lambda row: (row["dob"], row.get("zite_record_id") or ""),
+        )
+        for index, child_a in enumerate(ordered):
+            for child_b in ordered[index + 1 :]:
+                dob_a = date.fromisoformat(str(child_a["dob"]))
+                dob_b = date.fromisoformat(str(child_b["dob"]))
+                gap_days = abs((dob_b - dob_a).days)
+                if gap_days > max_gap_days:
+                    continue
+                log_rows.append(
+                    {
+                        "family_id": family_id,
+                        "primary_email": child_a.get("primary_email"),
+                        "child_a_zite_record_id": child_a.get("zite_record_id"),
+                        "child_a_angel_id": child_a.get("angel_id"),
+                        "child_a_first_name": child_a.get("first_name"),
+                        "child_a_dob": child_a.get("dob"),
+                        "child_b_zite_record_id": child_b.get("zite_record_id"),
+                        "child_b_angel_id": child_b.get("angel_id"),
+                        "child_b_first_name": child_b.get("first_name"),
+                        "child_b_dob": child_b.get("dob"),
+                        "gap_months": _dob_gap_months(dob_a, dob_b),
+                        "gap_days": gap_days,
+                    }
+                )
+                logger.warning(
+                    "sibling dob conflict for family %s: %s (%s, dob %s) and"
+                    " %s (%s, dob %s) are %d day(s) apart",
+                    family_id,
+                    child_a.get("first_name"),
+                    child_a.get("angel_id"),
+                    child_a.get("dob"),
+                    child_b.get("first_name"),
+                    child_b.get("angel_id"),
+                    child_b.get("dob"),
+                    gap_days,
+                )
+    return log_rows
+
+
+def dob_conflict_log_frame(log_rows: list[dict[str, Any]]) -> pl.DataFrame:
+    """Build the ``dob_conflict_log`` sheet frame (§5.6).
+
+    Args:
+        log_rows: Log rows from :func:`sibling_dob_conflicts`.
+
+    Returns:
+        The typed frame (empty when no pair was flagged).
+    """
+    return pl.DataFrame(log_rows, schema=DOB_CONFLICT_LOG_SCHEMA)
 
 
 def build_schema(table_name: str, cfg: Config) -> pap.DataFrameSchema:
@@ -739,8 +964,13 @@ def run(cfg: Config) -> None:
     """
     frames = pull_tables(cfg)
     sheets: dict[str, pl.DataFrame] = {}
+    dedup_log_rows: list[dict[str, Any]] = []
+    dob_conflict_rows: list[dict[str, Any]] = []
     for table_name in ("sponsor", "family", "child"):
-        kept, rejected = process_table(frames[table_name], table_name, cfg)
+        kept, rejected, log_rows = process_table(
+            frames[table_name], table_name, cfg
+        )
+        dedup_log_rows.extend(log_rows)
         for record in rejected:
             logger.warning(
                 "rejected %s row %s column %s value %r: %s",
@@ -758,6 +988,7 @@ def run(cfg: Config) -> None:
             family_rows = sheets["raw_family"].to_dicts()
             kept = assign_angel_ids(kept, family_rows, cfg)
             _cross_check_created(kept, "child")
+            dob_conflict_rows.extend(sibling_dob_conflicts(kept, cfg))
         if table_name == "family":
             _cross_check_created(kept, "family")
         logger.info(
@@ -768,6 +999,8 @@ def run(cfg: Config) -> None:
             len({(record["table"], record["index"]) for record in rejected}),
         )
         sheets[f"raw_{table_name}"] = _rows_to_frame(kept, table_name, cfg)
+    sheets["dedup_log"] = dedup_log_frame(dedup_log_rows)
+    sheets["dob_conflict_log"] = dob_conflict_log_frame(dob_conflict_rows)
     final_sheets = [
         "final_child",
         "final_family",

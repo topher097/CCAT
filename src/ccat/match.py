@@ -297,13 +297,17 @@ def greedy_subset(
     return backtrack(0, 0, [])
 
 
-def _participating_children(cfg: Config) -> list[dict[str, Any]]:
+def _participating_children(
+    cfg: Config, overwrite: bool = False
+) -> list[dict[str, Any]]:
     """Load final_child rows that participate in matchmaking (§8.1).
 
-    Only rows with ``audited == true`` and a non-null ``angel_id``.
+    Only rows with ``audited == true`` and a non-null ``angel_id``.  With
+    ``overwrite`` set, the ``audited`` column is ignored.
 
     Args:
         cfg: Pipeline configuration.
+        overwrite: Ignore the ``audited`` column when selecting rows.
 
     Returns:
         The participating child rows.
@@ -320,8 +324,30 @@ def _participating_children(cfg: Config) -> list[dict[str, Any]]:
     return [
         row
         for row in rows
-        if _as_bool(row.get("audited")) and row.get("angel_id")
+        if (overwrite or _as_bool(row.get("audited"))) and row.get("angel_id")
     ]
+
+
+def _children_per_family(cfg: Config) -> dict[Any, int]:
+    """Count ``final_child`` rows per ``family_id`` (§8.6).
+
+    Args:
+        cfg: Pipeline configuration.
+
+    Returns:
+        Mapping of ``family_id`` to the number of ``final_child`` rows
+        sharing it.  Families with no ``final_child`` rows are absent
+        (callers default to 0).
+    """
+    final_child = read_sheet(cfg.excel_file, "final_child")
+    if final_child is None or "family_id" not in final_child.columns:
+        return {}
+    counts: dict[Any, int] = {}
+    for row in final_child.to_dicts():
+        family_id = row.get("family_id")
+        if family_id is not None:
+            counts[family_id] = counts.get(family_id, 0) + 1
+    return counts
 
 
 def reconcile_pre_assignments(
@@ -575,7 +601,7 @@ def match_sponsors(
     return assignments, report
 
 
-def run(cfg: Config, test: bool = False) -> None:
+def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
     """Run module 4 end to end (§8).
 
     Args:
@@ -583,6 +609,10 @@ def run(cfg: Config, test: bool = False) -> None:
         test: Stop after the first full sponsor: only the first sponsor
             in phase order is matched; the match_report records that this
             is a partial test run.
+        overwrite: Ignore the ``audited`` column of ``final_child`` (all
+            children with an angel_id participate) and replace any
+            previous ``final_family``/``final_sponsor``/``match_report``
+            outputs in place instead of archiving them (§8.6).
 
     Raises:
         MatchError: If required sheets are missing.
@@ -599,7 +629,8 @@ def run(cfg: Config, test: bool = False) -> None:
     sponsor_rows = sorted(
         raw_sponsor.to_dicts(), key=lambda row: row["sponsor_id"]
     )
-    children = _participating_children(cfg)
+    children = _participating_children(cfg, overwrite=overwrite)
+    children_per_family = _children_per_family(cfg)
     logger.info("participating audited children: %d", len(children))
 
     pre_assigned, report = reconcile_pre_assignments(sponsor_rows, children)
@@ -724,6 +755,7 @@ def run(cfg: Config, test: bool = False) -> None:
                 **row,
                 "assigned_sponsor_id": sponsor_id,
                 "assigned_angel_ids": assigned_angels,
+                "num_angels_in_family": children_per_family.get(family_id, 0),
             }
         )
     final_sponsor_rows: list[dict[str, Any]] = []
@@ -742,6 +774,7 @@ def run(cfg: Config, test: bool = False) -> None:
                 "assigned_angel_ids": ",".join(angel_ids)
                 if angel_ids
                 else None,
+                "num_angels_assigned": len(angel_ids),
             }
         )
 
@@ -752,19 +785,32 @@ def run(cfg: Config, test: bool = False) -> None:
     final_family = _augmented_frame(
         raw_family,
         final_family_rows,
-        {"assigned_sponsor_id": pl.Int64, "assigned_angel_ids": pl.String},
+        {
+            "assigned_sponsor_id": pl.Int64,
+            "assigned_angel_ids": pl.String,
+            "num_angels_in_family": pl.Int64,
+        },
     )
     final_sponsor = _augmented_frame(
-        raw_sponsor, final_sponsor_rows, {"assigned_angel_ids": pl.String}
+        raw_sponsor,
+        final_sponsor_rows,
+        {
+            "assigned_angel_ids": pl.String,
+            "num_angels_assigned": pl.Int64,
+        },
     )
 
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     existing = set(list_sheets(cfg.excel_file))
-    renames = {
-        name: _archive_name(existing, name, timestamp)
-        for name in ("final_family", "final_sponsor", "match_report")
-        if name in existing
-    }
+    renames = (
+        {
+            name: _archive_name(existing, name, timestamp)
+            for name in ("final_family", "final_sponsor", "match_report")
+            if name in existing
+        }
+        if not overwrite
+        else {}
+    )
     write_sheets(
         cfg.excel_file,
         "match",

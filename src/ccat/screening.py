@@ -4,17 +4,33 @@ Adjudicates each child row with an LLM via the opencode python SDK, flags
 anomalies, and appends sparse rows to the ``adj_child`` sheet for
 zite_record_ids not already present.  The child's name is never passed to
 the LLM; ``zite_record_id`` is the sole identifier in the prompt (§6.2).
+
+Batch screening runs each child's LLM check on a
+``concurrent.futures.ThreadPoolExecutor`` -- the calls are I/O-bound, so
+threads scale them without GIL issues (same pattern as the pgi-s3
+transfers).  Each worker thread owns one opencode session so concurrent
+generates never share a conversation, and the shared tqdm progress bar
+advances once per child under a lock as futures complete.  Ctrl-C stops
+the run promptly: queued tasks are cancelled and abandoned in-flight
+calls die with their threads, while every row completed so far is
+already persisted (see below).
+
+``--redo`` re-screens one child; ``--overwrite`` re-screens every child,
+replacing all existing ``adj_child`` rows (§6.3).
 """
 
 import json
 import logging
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from collections.abc import Callable
 
 import polars as pl
 from polars._typing import PolarsDataType
 from pydantic import BaseModel, ConfigDict, field_validator
+from tqdm import tqdm
 
 from ccat.config import Config
 from ccat.io import read_sheet, read_sheet_or_empty, write_sheets
@@ -276,29 +292,152 @@ def screen_children(
     children: list[dict[str, Any]],
     cfg: Config,
     send: Callable[[str], str],
+    max_workers: int = 4,
+    on_result: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Screen every given child (§6.2–§6.3).
+    """Screen every given child, concurrently (§6.2–§6.3).
+
+    Each child's LLM check runs on a ``ThreadPoolExecutor`` -- I/O-bound
+    work, so threads scale it (pgi-s3 transfer pattern).  The shared
+    tqdm bar advances once per child under a lock in each future's
+    ``finally`` block, so the count stays correct regardless of thread
+    scheduling; one failed task still counts as progress.
 
     Args:
         children: raw_child rows to screen.
         cfg: Pipeline configuration.
-        send: Callable sending one prompt to the model session.
+        send: Callable sending one prompt to the model session.  Must be
+            safe to call from multiple threads (each thread keeps its
+            own opencode session upstream).
+        max_workers: Maximum number of concurrent LLM requests; values
+            above the number of children are clamped.
+        on_result: Optional callback invoked from the completion loop
+            (the main thread) with each successfully screened row --
+            used by ``run`` to persist rows as they arrive.
 
     Returns:
         The adj_child rows to persist (one per successfully screened
         child, sparse cells, §6.3).
+
+    Raises:
+        KeyboardInterrupt: When interrupted (Ctrl-C); queued tasks are
+            cancelled immediately and in-flight ones are abandoned, so
+            the process exits after at most one in-flight LLM call.
     """
+    if not children:
+        return []
     rows: list[dict[str, Any]] = []
-    for child in children:
-        row = screen_child(child, cfg, send)
+    pbar_lock = threading.Lock()
+    progress = tqdm(
+        total=len(children),
+        desc="Screening children",
+        unit="child",
+        position=0,
+        disable=None,  # silent when stderr is not a terminal
+    )
+
+    def _finish(child: dict[str, Any], row: dict[str, Any] | None) -> None:
+        """Record one child's outcome and advance the shared bar."""
         if row is not None:
             rows.append(row)
+            if on_result is not None:
+                on_result(row)
+        with pbar_lock:
+            progress.update(1)
+            progress.set_postfix_str(
+                str(child["zite_record_id"])[:8], refresh=False
+            )
+
+    if max_workers <= 1:
+        try:
+            for child in children:
+                _finish(child, screen_child(child, cfg, send))
+        finally:
+            progress.close()
+        return rows
+
+    executor = ThreadPoolExecutor(max_workers=min(max_workers, len(children)))
+    futures: dict[Any, dict[str, Any]] = {}
+    try:
+        futures = {
+            executor.submit(screen_child, child, cfg, send): child
+            for child in children
+        }
+        for future in as_completed(futures):
+            child = futures[future]
+            try:
+                row = future.result()
+            except Exception as error:  # noqa: BLE001 - keep the bar moving
+                logger.error(
+                    "screening task failed for child %s: %s",
+                    child.get("zite_record_id"),
+                    error,
+                )
+                row = None
+            _finish(child, row)
+    except KeyboardInterrupt:
+        queued = sum(1 for pending in futures if not pending.done())
+        logger.warning(
+            "interrupted: cancelling %d queued screening task(s);"
+            " completed rows are already persisted",
+            queued,
+        )
+        # Cancel everything not yet started; running threads finish
+        # their single LLM call and die with the queue empty, so the
+        # process exits after at most one in-flight call.
+        executor.shutdown(wait=False, cancel_futures=True)
+        progress.close()
+        raise
+    progress.close()
+    executor.shutdown(wait=True)
     return rows
 
 
 def _adj_schema() -> dict[str, PolarsDataType]:
     """Sheet schema for adj_child: every column is a string."""
     return {column: pl.String for column in ADJ_CHILD_COLUMNS}
+
+
+def _upsert_adj_row(
+    adj_rows: list[dict[str, Any]], row: dict[str, Any]
+) -> None:
+    """Insert or replace one adj row in place, keyed by zite_record_id.
+
+    Args:
+        adj_rows: The mutable adj_child row list.
+        row: The row to insert (new id) or replace (existing id).
+    """
+    for index, existing in enumerate(adj_rows):
+        if existing.get("zite_record_id") == row["zite_record_id"]:
+            adj_rows[index] = row
+            return
+    adj_rows.append(row)
+
+
+def _write_adj(
+    cfg: Config, adj_rows: list[dict[str, Any]], raw_child: pl.DataFrame
+) -> pl.DataFrame:
+    """Atomically write the adj_child sheet with ages filled in (§5.5).
+
+    Args:
+        cfg: Pipeline configuration.
+        adj_rows: All current adj_child rows.
+        raw_child: The raw_child frame joined for computed ages.
+
+    Returns:
+        The written adj_child frame.
+
+    Raises:
+        ScreeningError: If the workbook cannot be written.
+    """
+    frame = pl.DataFrame(
+        _with_computed_age(adj_rows, raw_child), schema=_adj_schema()
+    )
+    try:
+        write_sheets(cfg.excel_file, "screen", {"adj_child": frame})
+    except Exception as error:  # noqa: BLE001 - wrap any save failure
+        raise ScreeningError(f"could not persist adj_child: {error}") from error
+    return frame
 
 
 def first_family_children(
@@ -328,9 +467,11 @@ def first_family_children(
 
 
 def _screen_targets(
-    targets: list[dict[str, Any]], cfg: Config
+    targets: list[dict[str, Any]],
+    cfg: Config,
+    on_result: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Screen targets over one opencode session (§6.2, §6.4).
+    """Screen targets over one opencode server (§6.2, §6.4).
 
     Connects to the server named by ``OPENCODE_BASE_URL`` when set;
     otherwise starts an embedded ``opencode serve`` child process that
@@ -339,6 +480,8 @@ def _screen_targets(
     Args:
         targets: raw_child rows to screen.
         cfg: Pipeline configuration.
+        on_result: Optional per-row callback forwarded to
+            :func:`screen_children` (see its docstring).
 
     Returns:
         One adj_child row per target.
@@ -362,14 +505,34 @@ def _screen_targets(
         )
 
     def _run(client: Any) -> list[dict[str, Any]]:
-        session = client.session.create(
-            model=ModelRef(id=model_id, provider_id=provider_id)
-        )
+        """Screen all targets, one opencode session per worker thread.
+
+        Concurrent ``session.generate`` calls must not share a session
+        (one conversation per thread), so sessions are created lazily
+        and cached by thread id.
+        """
+        sessions: dict[int, str] = {}
+        sessions_lock = threading.Lock()
 
         def send(prompt: str) -> str:
-            return client.session.generate(session.id, prompt=prompt).text
+            thread_id = threading.get_ident()
+            with sessions_lock:
+                session_id = sessions.get(thread_id)
+            if session_id is None:
+                session_id = client.session.create(
+                    model=ModelRef(id=model_id, provider_id=provider_id)
+                ).id
+                with sessions_lock:
+                    sessions[thread_id] = session_id
+            return client.session.generate(session_id, prompt=prompt).text
 
-        return screen_children(targets, cfg, send)
+        return screen_children(
+            targets,
+            cfg,
+            send,
+            max_workers=cfg.ai_screening.max_workers,
+            on_result=on_result,
+        )
 
     if os.environ.get("OPENCODE_BASE_URL"):
         with Opencode() as client:
@@ -413,8 +576,40 @@ def _with_computed_age(
     return adj_rows
 
 
-def run(cfg: Config, redo: str | None = None, test: bool = False) -> None:
+def _audited_count(final_child: pl.DataFrame) -> int:
+    """Count audited children in final_child (§6).
+
+    Tolerates the sheet's Boolean columns reading back as strings
+    ("true"/"false") after another module rewrites the workbook.
+
+    Args:
+        final_child: The final_child frame (or any frame).
+
+    Returns:
+        The number of rows with ``audited`` true; 0 when the column is
+        missing or empty.
+    """
+    if "audited" not in final_child.columns:
+        return 0
+    audited_column = final_child["audited"]
+    if audited_column.dtype == pl.String:
+        text = audited_column.str.strip_chars().str.to_lowercase()
+        audited_column = text == "true"
+    return int(audited_column.fill_null(False).sum())
+
+
+def run(
+    cfg: Config,
+    redo: str | None = None,
+    test: bool = False,
+    overwrite: bool = False,
+) -> None:
     """Run module 2 end to end (§6).
+
+    Successfully screened rows are persisted to ``adj_child`` as they
+    arrive (one atomic workbook write per completed child), so an
+    interrupted run keeps every completed result; the final write
+    reconciles the whole sheet.
 
     Args:
         cfg: Pipeline configuration.
@@ -422,6 +617,8 @@ def run(cfg: Config, redo: str | None = None, test: bool = False) -> None:
             (explicit opt-in only, §6.3).
         test: Stop after the first full family: only the children of the
             first family (lowest family_id) are screened.
+        overwrite: Ignore the existing ``adj_child`` sheet: every child
+            is re-screened and its adj row replaced (§6.3).
 
     Raises:
         ScreeningError: If raw_child is missing, a redo target is unknown,
@@ -442,9 +639,7 @@ def run(cfg: Config, redo: str | None = None, test: bool = False) -> None:
     adj_rows = adj.to_dicts()
     existing_ids = {row.get("zite_record_id") for row in adj_rows}
     final_child = read_sheet(cfg.excel_file, "final_child")
-    audited = 0
-    if final_child is not None and "audited" in final_child.columns:
-        audited = int(final_child["audited"].fill_null(False).sum())
+    audited = _audited_count(final_child) if final_child is not None else 0
     logger.info("children already audited in final_child: %d", audited)
 
     if redo is not None:
@@ -454,11 +649,19 @@ def run(cfg: Config, redo: str | None = None, test: bool = False) -> None:
         if not targets:
             raise ScreeningError(f"redo target {redo!r} not found in raw_child")
     else:
-        targets = [
-            child
-            for child in children
-            if child["zite_record_id"] not in existing_ids
-        ]
+        if overwrite:
+            targets = children
+            logger.info(
+                "overwrite: re-screening all %d children (existing adj rows"
+                " are replaced)",
+                len(targets),
+            )
+        else:
+            targets = [
+                child
+                for child in children
+                if child["zite_record_id"] not in existing_ids
+            ]
         if test:
             allowed = {
                 child["zite_record_id"]
@@ -476,16 +679,33 @@ def run(cfg: Config, redo: str | None = None, test: bool = False) -> None:
             )
     logger.info("children to screen: %d", len(targets))
 
-    new_rows: list[dict[str, Any]] = []
-    if targets:
-        new_rows = _screen_targets(targets, cfg)
-
+    # A redo target's old row is removed up front; the upsert below then
+    # replaces rows in place as results arrive.
     if redo is not None:
         adj_rows = [
             row for row in adj_rows if row.get("zite_record_id") != redo
         ]
-    adj_rows.extend(new_rows)
-    adj_rows = _with_computed_age(adj_rows, raw_child)
-    frame = pl.DataFrame(adj_rows, schema=_adj_schema())
-    write_sheets(cfg.excel_file, "screen", {"adj_child": frame})
+
+    new_rows: list[dict[str, Any]] = []
+
+    def persist(row: dict[str, Any]) -> None:
+        """Upsert one screened row and save adj_child immediately.
+
+        Runs in the completion loop (main thread), so workbook writes
+        never race each other; ``io.write_sheets`` is atomic, so an
+        interrupted save never leaves a half-written workbook.
+        """
+        _upsert_adj_row(adj_rows, row)
+        _write_adj(cfg, adj_rows, raw_child)
+        new_rows.append(row)
+        logger.debug(
+            "persisted adj_child row for %s (%d rows in sheet)",
+            row["zite_record_id"],
+            len(adj_rows),
+        )
+
+    if targets:
+        new_rows = _screen_targets(targets, cfg, on_result=persist)
+
+    frame = _write_adj(cfg, adj_rows, raw_child)
     logger.info("wrote %d adj_child rows (%d new)", frame.height, len(new_rows))

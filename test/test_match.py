@@ -472,6 +472,76 @@ def test_run_archives_previous_sheets_and_exports_csv(cfg: Config) -> None:
     assert content[0] == "kind,ref,reason"
 
 
+def test_run_overwrite_replaces_without_archives(cfg: Config) -> None:
+    """--overwrite replaces prior match outputs in place, no archives (§8.6)."""
+    sponsors = [sponsor_row(1, num_children=1)]
+    families = [family_row(1)]
+    children = [child_row("1A", 1, 8)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+    run(cfg)
+    run(cfg, overwrite=True)
+    sheets = list_sheets(cfg.excel_file)
+    assert not [name for name in sheets if name.startswith("final_family_")], (
+        "overwrite must not archive previous sheets"
+    )
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    assert final_family["assigned_sponsor_id"].to_list() == [1]
+
+
+def test_run_writes_family_and_sponsor_angel_counts(cfg: Config) -> None:
+    """final_family.num_angels_in_family counts final_child rows per family.
+
+    final_sponsor.num_angels_assigned counts the ids in
+    ``assigned_angel_ids`` (§8.6).
+    """
+    sponsors = [
+        sponsor_row(1, num_children=2),
+        sponsor_row(2, num_children=1),
+        sponsor_row(3, num_children=2),
+    ]
+    families = [family_row(1), family_row(2), family_row(3)]
+    children = [
+        child_row("1A", 1, 10),
+        child_row("1B", 1, 8, gender="Female"),
+        child_row("2A", 2, 5),
+    ]
+    _seed_match_workbook(cfg, sponsors, families, children)
+    run(cfg)
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    counts = dict(
+        zip(
+            final_family["family_id"].to_list(),
+            final_family["num_angels_in_family"].to_list(),
+            strict=True,
+        )
+    )
+    assert counts == {1: 2, 2: 1, 3: 0}
+    final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+    assert final_sponsor is not None
+    by_id = {row["sponsor_id"]: row for row in final_sponsor.to_dicts()}
+    assert by_id[1]["num_angels_assigned"] == 2
+    assert by_id[2]["num_angels_assigned"] == 1
+    assert by_id[3]["num_angels_assigned"] == 0  # unmatched sponsor
+    assert "num_angels_in_fmaily" not in final_sponsor.columns
+
+
+def test_run_family_count_includes_unaudited_rows(cfg: Config) -> None:
+    """num_angels_in_family counts every final_child row (§8.6)."""
+    sponsors = [sponsor_row(1, num_children=1)]
+    families = [family_row(1)]
+    children = [
+        child_row("1A", 1, 8),
+        child_row("1B", 1, 9, audited=False),
+    ]
+    _seed_match_workbook(cfg, sponsors, families, children)
+    run(cfg)
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    assert final_family["num_angels_in_family"].to_list() == [2]
+
+
 def test_run_final_child_never_rewritten(cfg: Config) -> None:
     """Match never writes final_child (§8.6)."""
     sponsors = [sponsor_row(1, num_children=1)]
@@ -500,6 +570,23 @@ def test_run_unaudited_children_excluded(cfg: Config) -> None:
     assert any(
         "no audited children" in reason for reason in report["reason"].to_list()
     )
+
+
+def test_run_overwrite_includes_unaudited_children(cfg: Config) -> None:
+    """--overwrite ignores the audited column (§8.1)."""
+    sponsors = [sponsor_row(1, num_children=1)]
+    families = [family_row(1), family_row(2)]
+    children = [child_row("1A", 1, 8, audited=False), child_row("2A", 2, 8)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+    run(cfg)
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    assert final_family["assigned_sponsor_id"].to_list() == [None, 1]
+    run(cfg, overwrite=True)
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    # the unaudited family now participates and wins the sponsor by id order
+    assert final_family["assigned_sponsor_id"].to_list() == [1, None]
 
 
 def test_run_requires_final_child(cfg: Config) -> None:

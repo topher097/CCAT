@@ -11,6 +11,8 @@ from ccat.audit.server import (
     AuditClientError,
     AuditState,
     build_final_child_row,
+    dob_conflict_notes,
+    merge_anomoly,
     run,
 )
 from ccat.config import Config
@@ -75,6 +77,58 @@ def _seed(cfg: Config, **sheets: pl.DataFrame) -> None:
         write_sheets(cfg.excel_file, "screen", sheets)
 
 
+DOB_CONFLICT_SCHEMA: dict[str, Any] = {
+    "family_id": pl.Int64,
+    "primary_email": pl.String,
+    "child_a_zite_record_id": pl.String,
+    "child_a_angel_id": pl.String,
+    "child_a_first_name": pl.String,
+    "child_a_dob": pl.String,
+    "child_b_zite_record_id": pl.String,
+    "child_b_angel_id": pl.String,
+    "child_b_first_name": pl.String,
+    "child_b_dob": pl.String,
+    "gap_months": pl.Int64,
+    "gap_days": pl.Int64,
+}
+
+
+def _seed_conflict(cfg: Config) -> str:
+    """Seed one dob_conflict_log pair and return the expected c1 note.
+
+    The pair is c1 (child_b) born 219 days after c2 (child_a).
+    """
+    write_sheets(
+        cfg.excel_file,
+        "acquire",
+        {
+            "dob_conflict_log": pl.DataFrame(
+                [
+                    {
+                        "family_id": 1,
+                        "primary_email": "fam@example.com",
+                        "child_a_zite_record_id": "c2",
+                        "child_a_angel_id": "1B",
+                        "child_a_first_name": "Kiddo",
+                        "child_a_dob": "2018-05-10",
+                        "child_b_zite_record_id": "c1",
+                        "child_b_angel_id": "1A",
+                        "child_b_first_name": "Kiddo",
+                        "child_b_dob": "2018-12-15",
+                        "gap_months": 7,
+                        "gap_days": 219,
+                    }
+                ],
+                schema=DOB_CONFLICT_SCHEMA,
+            )
+        },
+    )
+    return (
+        "Sibling DOB conflict: born 7 month(s) (219 day(s)) apart from"
+        " sibling Kiddo (1B, dob 2018-05-10)"
+    )
+
+
 def test_queue_includes_unaudited_and_unscreened(cfg: Config) -> None:
     """Queue holds children without final rows or with audited == false (§7.1)."""
     _seed(cfg)
@@ -113,6 +167,23 @@ def test_queue_excludes_audited_children(cfg: Config) -> None:
     assert [item["zite_record_id"] for item in queue] == ["c2", "orphan1"]
 
 
+def test_queue_overwrite_requeues_audited_children(cfg: Config) -> None:
+    """--overwrite queues audited children too (§7.1)."""
+    _seed(cfg)
+    state = AuditState(cfg)
+    state.save("c1", {"audited": True, "special_needs": False})
+    assert [item["zite_record_id"] for item in AuditState(cfg).queue()] == [
+        "c2",
+        "orphan1",
+    ]
+    overwrite_queue = AuditState(cfg, overwrite=True).queue()
+    assert [item["zite_record_id"] for item in overwrite_queue] == [
+        "c1",
+        "c2",
+        "orphan1",
+    ]
+
+
 def test_queue_adj_object_null_vs_sparse(cfg: Config) -> None:
     """Adj is the adj row, an all-null object, or null when unscreened (§7.1)."""
     adj = pl.DataFrame(
@@ -124,6 +195,112 @@ def test_queue_adj_object_null_vs_sparse(cfg: Config) -> None:
     by_id = {item["zite_record_id"]: item for item in queue}
     assert by_id["c1"]["adj"]["need_1"] == "winter coat that fits"
     assert by_id["orphan1"]["adj"] is None
+
+
+def test_dob_conflict_notes_match_either_side(cfg: Config) -> None:
+    """Notes build from both sides of each conflicting pair (§5.6, §7)."""
+    note_c1 = _seed_conflict(cfg)
+    _seed(cfg)
+    log = read_sheet(cfg.excel_file, "dob_conflict_log")
+    assert log is not None
+    rows = log.to_dicts()
+    assert dob_conflict_notes(rows, "c1") == note_c1
+    assert dob_conflict_notes(rows, "c2") == (
+        "Sibling DOB conflict: born 7 month(s) (219 day(s)) apart from"
+        " sibling Kiddo (1A, dob 2018-12-15)"
+    )
+    assert dob_conflict_notes(rows, "orphan1") is None
+    assert dob_conflict_notes(None, "c1") is None
+
+
+def test_merge_anomoly_appends_once() -> None:
+    """Conflict notes append after existing text exactly once."""
+    notes = "Sibling DOB conflict: X"
+    assert merge_anomoly(None, notes) == notes
+    assert merge_anomoly("AI text", notes) == f"AI text; {notes}"
+    assert merge_anomoly(f"AI text; {notes}", notes) == f"AI text; {notes}"
+    assert merge_anomoly("AI text", None) == "AI text"
+    assert merge_anomoly(None, None) is None
+
+
+def test_queue_shows_conflict_note_for_unscreened_child(
+    cfg: Config,
+) -> None:
+    """Unscreened conflict children get an adj carrying the note (§7.1)."""
+    note_c1 = _seed_conflict(cfg)
+    _seed(cfg)
+    queue = AuditState(cfg).queue()
+    by_id = {item["zite_record_id"]: item for item in queue}
+    adj = by_id["c1"]["adj"]
+    assert adj is not None
+    assert adj["potential_anomoly"] == note_c1
+    assert adj["need_1"] is None  # other fields stay null over raw
+    assert by_id["c2"]["adj"]["potential_anomoly"] == (
+        "Sibling DOB conflict: born 7 month(s) (219 day(s)) apart from"
+        " sibling Kiddo (1A, dob 2018-12-15)"
+    )
+    assert by_id["orphan1"]["adj"] is None
+
+
+def test_queue_merges_conflict_into_screened_adj(cfg: Config) -> None:
+    """Screened adj text keeps the AI note plus the conflict note (§7.1)."""
+    note_c1 = _seed_conflict(cfg)
+    adj = pl.DataFrame(
+        [
+            {
+                "zite_record_id": "c1",
+                "potential_anomoly": "age_reported 7 differs from computed 8",
+            }
+        ],
+        schema={
+            "zite_record_id": pl.String,
+            "potential_anomoly": pl.String,
+        },
+    )
+    _seed(cfg, adj_child=adj)
+    queue = AuditState(cfg).queue()
+    by_id = {item["zite_record_id"]: item for item in queue}
+    assert by_id["c1"]["adj"]["potential_anomoly"] == (
+        f"age_reported 7 differs from computed 8; {note_c1}"
+    )
+
+
+def test_save_appends_conflict_note_idempotently(cfg: Config) -> None:
+    """Saved final_child rows always carry the conflict note once (§7.3)."""
+    note_c1 = _seed_conflict(cfg)
+    _seed(cfg)
+    state = AuditState(cfg)
+    state.save("c1", {"audited": False, "special_needs": False})
+    final = read_sheet(cfg.excel_file, "final_child")
+    assert final is not None
+    assert final.to_dicts()[0]["potential_anomoly"] == note_c1
+    # re-save with the note already in the body: not duplicated
+    state.save(
+        "c1",
+        {
+            "audited": False,
+            "special_needs": False,
+            "potential_anomoly": note_c1,
+        },
+    )
+    final = read_sheet(cfg.excel_file, "final_child")
+    assert final is not None
+    anomoly = final.to_dicts()[0]["potential_anomoly"] or ""
+    assert anomoly.count("Sibling DOB conflict") == 1
+    # auditor replaces the field with their own text: note re-appended
+    state.save(
+        "c1",
+        {
+            "audited": True,
+            "special_needs": False,
+            "potential_anomoly": "hand-written note",
+        },
+    )
+    final = read_sheet(cfg.excel_file, "final_child")
+    assert final is not None
+    assert final.to_dicts()[0]["potential_anomoly"] == (
+        f"hand-written note; {note_c1}"
+    )
 
 
 def test_queue_orphan_has_null_angel_id(cfg: Config) -> None:
@@ -188,6 +365,57 @@ def test_save_writes_and_rereads_row(cfg: Config) -> None:
     assert final.to_dicts()[0]["audited"] is True
 
 
+def test_build_final_child_row_generated_info_sheet_default() -> None:
+    """New rows carry generated_info_sheet False; True passes through (§13.3)."""
+    row = build_final_child_row(
+        raw_child_row("c1"),
+        {},
+        special_needs=False,
+        audited=True,
+        require_clarification=None,
+    )
+    assert row["generated_info_sheet"] is False
+    row = build_final_child_row(
+        raw_child_row("c1"),
+        {},
+        special_needs=False,
+        audited=True,
+        require_clarification=None,
+        generated_info_sheet=True,
+    )
+    assert row["generated_info_sheet"] is True
+
+
+def test_save_preserves_generated_info_sheet(cfg: Config) -> None:
+    """Re-saving a child keeps its generated_info_sheet flag (§13.3)."""
+    _seed(cfg)
+    state = AuditState(cfg)
+    state.save("c1", {"audited": False, "special_needs": False})
+    # module 5 runs between audit saves: flag flips to True
+    final = read_sheet(cfg.excel_file, "final_child")
+    assert final is not None
+    final = final.with_columns(
+        pl.when(pl.col("zite_record_id") == "c1")
+        .then(True)
+        .otherwise(pl.col("generated_info_sheet"))
+        .alias("generated_info_sheet")
+    )
+    write_sheets(cfg.excel_file, "generate", {"final_child": final})
+    # a later audit save of the same child must not lose the flag
+    state.save(
+        "c1",
+        {"audited": True, "special_needs": False, "need_1": "updated coat"},
+    )
+    # and a brand-new row must default to False
+    state.save("c2", {"audited": True, "special_needs": False})
+    final = read_sheet(cfg.excel_file, "final_child")
+    assert final is not None
+    rows = {row["zite_record_id"]: row for row in final.to_dicts()}
+    assert rows["c1"]["generated_info_sheet"] is True
+    assert rows["c1"]["need_1"] == "updated coat"
+    assert rows["c2"]["generated_info_sheet"] is False
+
+
 def test_save_frozen_row_returns_409(cfg: Config) -> None:
     """PUT for an audited child is rejected (§7.3)."""
     _seed(cfg)
@@ -196,6 +424,22 @@ def test_save_frozen_row_returns_409(cfg: Config) -> None:
     with pytest.raises(AuditClientError) as error:
         state.save("c1", {"audited": False, "special_needs": False})
     assert error.value.status == 409
+
+
+def test_save_overwrite_replaces_frozen_row(cfg: Config) -> None:
+    """--overwrite bypasses the frozen-row 409 and re-saves (§7.3)."""
+    _seed(cfg)
+    state = AuditState(cfg, overwrite=True)
+    state.save("c1", {"audited": True, "special_needs": False})
+    state.save(
+        "c1",
+        {"audited": True, "special_needs": False, "need_1": "fixed coat"},
+    )
+    final = read_sheet(cfg.excel_file, "final_child")
+    assert final is not None
+    row = next(row for row in final.to_dicts() if row["zite_record_id"] == "c1")
+    assert row["need_1"] == "fixed coat"
+    assert row["audited"] is True
 
 
 def test_save_orphan_cannot_be_marked_audited(cfg: Config) -> None:

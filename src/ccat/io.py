@@ -48,14 +48,26 @@ SHEETS = (
     "final_family",
     "final_sponsor",
     "match_report",
+    "dedup_log",
+    "dob_conflict_log",
 )
 
 #: Ownership matrix (§9): module -> sheets it may write.
 WRITABLE_SHEETS: dict[str, frozenset[str]] = {
-    "acquire": frozenset({"raw_sponsor", "raw_family", "raw_child"}),
+    "acquire": frozenset(
+        {
+            "raw_sponsor",
+            "raw_family",
+            "raw_child",
+            "dedup_log",
+            "dob_conflict_log",
+        }
+    ),
     "screen": frozenset({"adj_child"}),
     "audit": frozenset({"final_child"}),
     "match": frozenset({"final_family", "final_sponsor", "match_report"}),
+    "generate": frozenset({"final_child"}),
+    "stats": frozenset({"final_child", "final_family", "final_sponsor"}),
 }
 
 #: Read access matrix (§9); listed for documentation, all modules may read.
@@ -64,6 +76,7 @@ READABLE_SHEETS: dict[str, frozenset[str]] = {
     "screen": frozenset({"raw_child", "adj_child", "final_child"}),
     "audit": frozenset({"raw_child", "adj_child", "final_child"}),
     "match": frozenset({"raw_family", "raw_sponsor", "final_child"}),
+    "generate": frozenset({"final_child", "final_family", "final_sponsor"}),
 }
 
 

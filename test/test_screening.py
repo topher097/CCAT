@@ -18,7 +18,9 @@ from ccat.screening import (
     parse_model_output,
     run,
     screen_child,
+    screen_children,
     validate_adj_response,
+    _audited_count,
 )
 
 
@@ -330,6 +332,46 @@ def test_run_redo_unknown_child_fails(screen_cfg: Config, monkeypatch) -> None:
         run(screen_cfg, redo="nope")
 
 
+def test_run_overwrite_replaces_all_rows(
+    screen_cfg: Config, monkeypatch
+) -> None:
+    """--overwrite re-screens every child, replacing all adj rows (§6.3)."""
+    _seed_workbook(screen_cfg)
+    FakeOpencode.responses = ["null", "null"]
+    import opencode
+
+    monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
+    run(screen_cfg)
+    adj = read_sheet(screen_cfg.excel_file, "adj_child")
+    assert adj is not None and adj.height == 2
+    FakeOpencode.responses = [json.dumps(full_response()), "null"]
+    run(screen_cfg, overwrite=True)
+    adj = read_sheet(screen_cfg.excel_file, "adj_child")
+    assert adj is not None and adj.height == 2
+    row = adj.filter(pl.col("zite_record_id") == "rec_c1").to_dicts()[0]
+    assert row["need_1"] == "winter coat that fits"
+
+
+def test_run_overwrite_test_mode_limits_to_first_family(
+    screen_cfg: Config, monkeypatch
+) -> None:
+    """--overwrite --test re-screens only the first family's children."""
+    _seed_workbook(screen_cfg)
+    FakeOpencode.responses = ["null", "null"]
+    import opencode
+
+    monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
+    run(screen_cfg)
+    adj = read_sheet(screen_cfg.excel_file, "adj_child")
+    assert adj is not None and adj.height == 2
+    FakeOpencode.responses = [json.dumps(full_response()), "null"]
+    run(screen_cfg, overwrite=True, test=True)
+    adj = read_sheet(screen_cfg.excel_file, "adj_child")
+    assert adj is not None and adj.height == 2
+    row = adj.filter(pl.col("zite_record_id") == "rec_c1").to_dicts()[0]
+    assert row["need_1"] == "winter coat that fits"
+
+
 def test_run_requires_raw_child(screen_cfg: Config) -> None:
     """Missing raw_child fails with an actionable error."""
     with pytest.raises(screening.ScreeningError, match="acquire"):
@@ -428,3 +470,187 @@ def test_run_test_mode_skips_already_screened_first_family(
     after = read_sheet(screen_cfg.excel_file, "adj_child")
     assert after is not None
     assert after["zite_record_id"].to_list() == ["f1c1"]  # untouched
+
+
+def test_screen_children_screens_every_child_concurrently(
+    screen_cfg: Config,
+) -> None:
+    """The thread pool screens every child exactly once."""
+    children = [child(zite_record_id=f"rec_{index}") for index in range(8)]
+    rows = screen_children(
+        children, screen_cfg, lambda _prompt: "null", max_workers=4
+    )
+    assert len(rows) == len(children)
+    assert {row["zite_record_id"] for row in rows} == {
+        child_row["zite_record_id"] for child_row in children
+    }
+
+
+def test_screen_children_survives_send_failure(screen_cfg: Config) -> None:
+    """A failing LLM call skips one child and screens the rest."""
+
+    def send(prompt: str) -> str:
+        if '"rec_2"' in prompt:  # one child's call blows up
+            raise RuntimeError("model session died")
+        return "null"
+
+    children = [child(zite_record_id=f"rec_{index}") for index in range(5)]
+    rows = screen_children(children, screen_cfg, send, max_workers=3)
+    assert len(rows) == 4
+    assert "rec_2" not in {row["zite_record_id"] for row in rows}
+
+
+def test_screen_children_sequential_mode(screen_cfg: Config) -> None:
+    """max_workers=1 screens sequentially with the same results."""
+    children = [child(zite_record_id=f"rec_{index}") for index in range(3)]
+    calls: list[str] = []
+
+    def send(prompt: str) -> str:
+        calls.append(prompt)
+        return "null"
+
+    rows = screen_children(children, screen_cfg, send, max_workers=1)
+    assert len(rows) == len(children)
+    assert len(calls) == len(children)
+
+
+def test_screen_children_reports_each_result(screen_cfg: Config) -> None:
+    """on_result fires once per successfully screened child."""
+    children = [child(zite_record_id=f"rec_{index}") for index in range(4)]
+    reported: list[dict[str, Any]] = []
+    screen_children(
+        children,
+        screen_cfg,
+        lambda _prompt: "null",
+        on_result=reported.append,
+    )
+    # Completion order varies with the thread pool; the set must match.
+    assert {row["zite_record_id"] for row in reported} == {
+        child_row["zite_record_id"] for child_row in children
+    }
+    assert len(reported) == len(children)
+
+
+def test_audited_count_string_dtype() -> None:
+    """String audited columns count only "true" values."""
+    frame = pl.DataFrame(
+        {"audited": ["true", "false", None, "true", "TRUE", " true "]},
+        schema={"audited": pl.String},
+    )
+    assert _audited_count(frame) == 4
+
+
+def test_audited_count_boolean_dtype() -> None:
+    """Boolean audited columns count true values, nulls as false."""
+    frame = pl.DataFrame(
+        {"audited": [True, False, None, True]},
+        schema={"audited": pl.Boolean},
+    )
+    assert _audited_count(frame) == 2
+
+
+def test_audited_count_missing_or_empty() -> None:
+    """Missing column and empty frame both count zero."""
+    assert _audited_count(pl.DataFrame({"other": ["x"]})) == 0
+    empty = pl.DataFrame(
+        {"audited": []},
+        schema={"audited": pl.Boolean},
+    )
+    assert _audited_count(empty) == 0
+
+
+def test_upsert_adj_row_replaces_and_appends() -> None:
+    """Rows upsert by zite_record_id: append new, replace in place."""
+    rows: list[dict[str, Any]] = [{"zite_record_id": "a"}]
+    screening._upsert_adj_row(rows, {"zite_record_id": "b"})
+    assert [row["zite_record_id"] for row in rows] == ["a", "b"]
+    screening._upsert_adj_row(rows, {"zite_record_id": "a"})
+    assert [row["zite_record_id"] for row in rows] == ["a", "b"]
+    assert rows[0] == {"zite_record_id": "a"}  # the replacement row
+
+
+class KeyedFakeOpencode:
+    """Fake opencode client answering each child a canned response.
+
+    Responses are keyed by the ``zite_record_id`` found inside the
+    prompt, so results are deterministic under the thread pool.
+    """
+
+    responses: dict[str, str] = {}
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Record the fake session resource."""
+        self.session = SimpleNamespace(
+            create=lambda model: SimpleNamespace(id="ses_test"),
+            generate=self._generate,
+        )
+
+    def _generate(self, session_id: str, prompt: str) -> SimpleNamespace:
+        """Answer with the canned response for the prompted child."""
+        import re
+
+        match = re.search(r'"zite_record_id": "([^"]+)"', prompt)
+        assert match is not None
+        record_id = match.group(1)
+        return SimpleNamespace(text=KeyedFakeOpencode.responses[record_id])
+
+    def __enter__(self) -> "KeyedFakeOpencode":
+        """Return self as the context manager target."""
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        """Swallow exceptions like the real client does."""
+        return None
+
+
+def test_screen_children_stops_on_interrupt(screen_cfg: Config) -> None:
+    """Ctrl-C cancels queued tasks and stops screening promptly."""
+
+    def send(prompt: str) -> str:
+        if '"rec_5"' in prompt:  # the interrupt lands mid-run
+            raise KeyboardInterrupt
+        return "null"
+
+    children = [child(zite_record_id=f"rec_{index}") for index in range(6)]
+    reported: list[dict[str, Any]] = []
+    with pytest.raises(KeyboardInterrupt):
+        screen_children(
+            children,
+            screen_cfg,
+            send,
+            max_workers=2,
+            on_result=reported.append,
+        )
+    assert len(reported) < len(children)  # some tasks were cancelled
+
+
+def test_run_persists_rows_as_results_arrive(
+    screen_cfg: Config, monkeypatch
+) -> None:
+    """Each screened child is written to adj_child before the next ends."""
+    _seed_workbook(screen_cfg)
+    KeyedFakeOpencode.responses = {
+        "rec_c1": "null",
+        "rec_c2": json.dumps(full_response("rec_c2")),
+    }
+    import opencode
+
+    monkeypatch.setattr(opencode, "Opencode", KeyedFakeOpencode)
+    save_calls: list[str] = []
+    real_write = screening.write_sheets
+
+    def counting_write(
+        path: str,
+        module: str,
+        sheets: dict[str, pl.DataFrame],
+        renames: dict[str, str] | None = None,
+    ) -> None:
+        save_calls.append(module)
+        real_write(path, module, sheets, renames)
+
+    monkeypatch.setattr(screening, "write_sheets", counting_write)
+    run(screen_cfg)
+    adj = read_sheet(screen_cfg.excel_file, "adj_child")
+    assert adj is not None and adj.height == 2
+    # final reconcile write plus one save per completed child
+    assert save_calls.count("screen") >= 2

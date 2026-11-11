@@ -39,11 +39,15 @@ configuration lives in one JSON file.
                                         |
                                         v
                   (4) Match  ----------> final_family / final_sponsor / match_report
+                                        |
+                                        v
+                  (5) Generate --------> output/child_info_sheets/<angel_id>.pdf
 ```
 
 - Modules run individually via CLI (`ccat acquire`, `ccat screen`, `ccat audit`,
-  `ccat match`), each taking an optional `--config` path (default
-  `config/ccat_2026.json`).
+  `ccat match`, `ccat generate`), each taking an optional `--config` path
+  (default `config/ccat_2026.json`); screen/audit/match/generate accept
+  `--test` and `--overwrite` (§6.3, §7.2, §8.6, §13.4).
 - `final_*` sheets are ground truth: only their owning module writes them, all
   other modules treat them read-only (see §9 Ownership Matrix).
 
@@ -205,6 +209,12 @@ Structure:
     "temperature": 0.0
   },
 
+  // Acquisition (module 1). Sibling DOB check: same-family children born
+  // at most this many days apart are recorded in dob_conflict_log (§5.6).
+  "acquire": {
+    "sibling_dob_max_gap_days": 274
+  },
+
   // Human audit tool (module 3).
   "audit": {
     "host": "127.0.0.1",
@@ -216,6 +226,48 @@ Structure:
     "location_weight": 1000,
     "age_weight": 100,
     "gender_weight": 1
+  },
+
+  // Child info sheet generation (module 5). `mappings` maps each py3o
+  // template variable in the .ott onto a column key of the enriched
+  // final_child row (§13); template_file is the LibreOffice template.
+  "info_sheet": {
+    "template_file": "./data/child_information_sheet_2026.ott",
+    "output_dir": "./output/child_info_sheets",
+    "soffice_binary": "soffice",
+    "mappings": {
+      "info.angel_id": "angel_id",
+      "info.age": "age_at_xmas",
+      "info.gender": "gender",
+      "info.family_size": "family_size",
+      "info.drop_off_location": "gift_pickup_location",
+      "info.sponsor_id": "assigned_sponsor_id",
+      "entry.colors": "favorite_colors",
+      "entry.interests": "interests",
+      "entry.other_info": "other_notes",
+      "entry.need_1": "need_1",
+      "entry.need_2": "need_2",
+      "entry.desire_1": "desire_1",
+      "entry.desire_2": "desire_2",
+      "entry.footwear.size": "shoe_size",
+      "entry.footwear.size_type": "shoe_size_type",
+      "entry.pants.waist_in": "pant_waist_size",
+      "entry.pants.inseam_in": "pant_inseam",
+      "entry.pants.size_letter": "pant_size_letter",
+      "entry.pants.size_type": "pant_size_type",
+      "entry.pants.jean_size": "jean_size",
+      "entry.tops.size_letter": "shirt_size_letter",
+      "entry.tops.size_type": "shirt_size_type",
+
+      // sponsor.* fills from the child's assigned final_sponsor row (§13);
+      // children without an assigned sponsor render these blank.
+      "sponsor.full_name": "sponsor_name",
+      "sponsor.email": "sponsor_email",
+      "sponsor.phone": "sponsor_phone",
+      "sponsor.sponsor_id": "assigned_sponsor_id",
+      "sponsor.angel_id": "sponsor_assigned_angel_ids",
+      "sponsor.family_size": "sponsor_family_size"
+    }
   },
 
   // Logging / reports. match_report is also exported as CSV for the
@@ -253,8 +305,10 @@ One workbook (`excel_file` from config). Sheets:
 | `raw_sponsor`   | Cleaned, deduplicated, ID-assigned sponsor rows                 | module 1   |
 | `raw_family`    | Cleaned, deduplicated (by primary email), ID-assigned families | module 1   |
 | `raw_child`     | Cleaned child rows with `age_at_xmas` and `angel_id`            | module 1   |
+| `dedup_log`     | One row per merged duplicate family record (§5.4)               | module 1   |
+| `dob_conflict_log` | One row per same-family pair born <=9 months apart (§5.6)    | module 1   |
 | `adj_child`     | Screening results, one row per screened child (keyed by `zite_record_id`, sparse cells) | module 2   |
-| `final_child`   | Ground-truth audited child rows                                 | module 3   |
+| `final_child`   | Ground-truth audited child rows (plus `generated_info_sheet`, module 5) | modules 3, 5 |
 | `final_family`  | Ground-truth families with match results                       | module 4   |
 | `final_sponsor` | Ground-truth sponsors with `assigned_angel_ids`                 | module 4   |
 | `match_report`  | Unmatched families/sponsors and reasons                         | module 4   |
@@ -327,6 +381,15 @@ The `family` table may contain multiple rows per `primary_email`:
 - If two rows have conflicting non-null values for the same column, keep the
   value from the earliest `created` row and log the conflict for review.
 - The surviving row keeps the earliest `created` timestamp of the group.
+- Every merged duplicate is recorded in the `dedup_log` sheet — one row per
+  dropped duplicate record — with: `sheet` ("family"), `primary_email`,
+  `kept_zite_record_id`/`kept_created`, `duplicate_zite_record_id`/
+  `duplicate_created`, `conflict_columns` and `conflict_details` (columns
+  where the duplicate's non-null value differs from the surviving value;
+  identity/ordering metadata `zite_record_id`, `created`, and
+  `zite_created_at` are excluded), and `kept_record`/`duplicate_record`
+  (the full recorded contents of both rows as JSON). Rows without an
+  email are never merged and never logged.
 
 ### 5.5 Derived columns and IDs
 
@@ -365,7 +428,25 @@ The `family` table may contain multiple rows per `primary_email`:
   until a matching family registration exists, and therefore never
   participate in matchmaking (§8.1).
 
-### 5.6 Persistence and re-run semantics
+### 5.6 Sibling DOB proximity check
+
+After family linking and angel-id assignment, every pair of children
+sharing a `family_id` whose birth dates are at most
+`acquire.sibling_dob_max_gap_days` days apart (default 274, ~9 months;
+twins included) is recorded for human review in the
+`dob_conflict_log` sheet — one row per conflicting pair, with:
+
+- `family_id`, `primary_email`.
+- `child_a_zite_record_id`, `child_a_angel_id`, `child_a_first_name`,
+  `child_a_dob` (earlier birth) and the same `child_b_*` columns.
+- `gap_months` (completed calendar months, day-of-month aware; twins
+  record 0) and `gap_days` (absolute day difference).
+
+Children without a `family_id` (orphans) or without a `dob` are skipped.
+Each conflict is also logged as a warning.  The check is informational:
+it never rejects rows and never blocks the run.
+
+### 5.7 Persistence and re-run semantics
 
 - `raw_sponsor`, `raw_family`, `raw_child` are fully rebuilt on every run.
 - ID assignment is deterministic (ordering rules above), so re-runs produce
@@ -445,7 +526,9 @@ For each child row not already present in `adj_child`:
   `adj_child`. Existing adj rows are never modified by this module (the
   human audit tool owns edits from here on).
 - Regeneration: `ccat screen --redo ZITE_RECORD_ID` re-screens one child and
-  replaces its adj row (explicit opt-in only).
+  replaces its adj row (explicit opt-in only). `ccat screen --overwrite`
+  re-screens every child and replaces all their adj rows (ignores the
+  existing sheet).
 - `zite_record_id` is the join key between `raw_child` and `adj_child` —
   and between both and `final_child` (§7.3). It is stable even when
   `angel_id` cannot be assigned (orphaned children, §5.5).
@@ -498,7 +581,9 @@ dependencies, single human user.
 - Navigation: next/previous unaudited child; queue length display; the current
   child is never lost on save (page stays on the same angel).
 - The tool never displays children whose `final_child` row exists with
-  `audited == true`.
+  `audited == true` (`ccat audit --overwrite` re-queues audited children
+  and allows re-saving frozen rows; the `audited`/`audited_at` columns
+  stop gating anything for that session).
 
 ### 7.3 `final_child` row
 
@@ -626,10 +711,13 @@ Some sponsors already have manually assigned angels recorded in the
 
 - `final_family`: one row per family — all `raw_family` columns, `family_id`,
   `assigned_sponsor_id` (null if unmatched), `assigned_angel_ids`
-  (comma-separated).
+  (comma-separated), and `num_angels_in_family` (count of `final_child`
+  rows sharing the family's `family_id`; 0 when none).
 - `final_sponsor`: one row per sponsor — all `raw_sponsor` columns,
   `sponsor_id`, `assigned_angel_ids` (comma-separated list of every `angel_id`
-  sponsored across all assigned families and pre-assignments, sorted).
+  sponsored across all assigned families and pre-assignments, sorted),
+  and `num_angels_assigned` (count of angel ids in `assigned_angel_ids`;
+  0 when none).
   Pre-assigned sponsors appear with their reconciled manual lists.
 - `match_report`: unmatched families and sponsors with reasons, plus
   pre-assignment problems (unknown ids, duplicates, split families).
@@ -638,21 +726,24 @@ Some sponsors already have manually assigned angels recorded in the
 - This module is the sole owner of these three sheets and fully regenerates
   them on each run; the previous contents are archived to timestamped sheets
   (`final_family_YYYYMMDD_HHMMSS`, etc.) before replacement, so prior
-  matchings are never silently lost.
+  matchings are never silently lost. `ccat match --overwrite` skips the
+  archiving and replaces the sheets in place.
 - `final_child` is read-only here (never rewritten).
 
 ## 9. Idempotency and Ground-Truth Protection
 
 Ownership matrix — a module may only write cells in its own column:
 
-| Sheet           | acquire | screen | audit | match |
-|-----------------|---------|--------|-------|-------|
-| `raw_*`         | write   | read   | read  | read  |
-| `adj_child`     | -       | append-new / `--redo` | read | - |
-| `final_child`   | -       | -      | write (while unaudited) | read |
-| `final_family`  | -       | -      | -     | write |
-| `final_sponsor` | -       | -      | -     | write |
-| `match_report`  | -       | -      | -     | write |
+| Sheet           | acquire | screen | audit | match | generate |
+|-----------------|---------|--------|-------|-------|----------|
+| `raw_*`         | write   | read   | read  | read  | -        |
+| `dedup_log`     | write   | read   | read  | read  | -        |
+| `dob_conflict_log` | write | read   | read  | read  | -        |
+| `adj_child`     | -       | append-new / `--redo` | read | - | - |
+| `final_child`   | -       | -      | write (while unaudited) | read | write (`generated_info_sheet` only) |
+| `final_family`  | -       | -      | -     | write | read     |
+| `final_sponsor` | -       | -      | -     | write | read     |
+| `match_report`  | -       | -      | -     | write | -        |
 
 Additional guarantees:
 
@@ -675,6 +766,7 @@ src/ccat/
   acquire.py           # module 1
   screening.py         # module 2
   match.py             # module 4
+  child_info_generate.py  # module 5
   audit/
     __init__.py
     server.py          # module 3: http.server + JSON API
@@ -682,10 +774,11 @@ src/ccat/
       index.html       # single-page UI, vanilla JS
 test/
   test_config.py
-  test_acquire.py      # validation, cleaning, dedup, IDs, angel_id rules, orphans
+  test_acquire.py      # validation, cleaning, dedup, IDs, angel_id rules, orphans, dedup_log, dob_conflict_log
   test_screening.py     # prompt build (name excluded), always-row output, retry/skip logic
   test_audit.py         # queue filter, merge rules, orphan flagging, frozen-row 409
   test_match.py         # indivisibility, exact counts, phase order, scoring
+  test_child_info_generate.py  # flag handling, enrichment, render/convert wiring
 ```
 
 Style: ruff format/check, `ty` type checking, google docstrings, snake_case
@@ -697,7 +790,7 @@ Run via `just ready-py` for the venv.
 - All modules log to `config.log_file` (plain text, timestamped, level INFO;
   DEBUG for per-row detail). Failures raise typed exceptions
   (`ConfigError`, `AcquisitionError`, `ScreeningError`, `AuditError`,
-  `MatchError`) so the CLI can print actionable messages.
+  `MatchError`, `InfoSheetError`) so the CLI can print actionable messages.
 - Zite/network errors surface from `zite.py` unchanged; acquire retries are
   already handled inside the Zite client (429 with backoff).
 - **Zite is strictly read-only**: the pipeline only ever pulls data from
@@ -734,6 +827,75 @@ Resolved decisions (for the record):
 - ~~Zite write-back~~ — never; Zite is read-only (§11).
 - ~~`match_report` CSV export~~ — yes, via `config.match_report_csv` (§3, §8.6).
 - ~~Sponsor count options~~ — 1-10, 15, 20, 25 all valid (Appendix A).
+
+## 13. Module 5 — Child Info Sheet Generation
+
+Renders one per-child information sheet PDF for the sponsor packet from the
+LibreOffice template `data/child_information_sheet_2026.ott` via the
+`py3o.template` package, converted to PDF by headless LibreOffice
+(`soffice --convert-to pdf`, isolated `-env:UserInstallation` profile so a
+running GUI cannot block conversion).
+
+### 13.1 Input
+
+- `final_child` (module 5 reads; also owns `generated_info_sheet`).
+- `final_family` (read-only), joined by `family_id` for
+  `gift_pickup_location` and `assigned_sponsor_id`.
+- `final_sponsor` (read-only), joined by `assigned_sponsor_id ==
+  sponsor_id` for the sponsor's name, email, phone, and
+  `assigned_angel_ids`.
+- `config.info_sheet`: `template_file`, `output_dir`, `soffice_binary`,
+  and `mappings` (py3o variable -> enriched column, §3).
+
+### 13.2 Template variables
+
+Three namespaces: `info.*` (angel id, age, gender, family size, drop-off
+location, sponsor id), `entry.*` (gifts, sizes, interests), and
+`sponsor.*` (assigned sponsor name, id, email, phone, angel ids, and
+angel count).
+
+Mapped sources resolve against an *enriched* row: the `final_child`
+columns plus the family join plus computed `family_size` (number of
+`final_child` rows sharing the child's `family_id`), plus the sponsor
+join (aliased `sponsor_*` columns) plus computed `sponsor_name`
+(`organization_name` when set, else first + last name) and
+`sponsor_family_size` (number of `final_child` rows assigned to the
+child's sponsor).  `info.age` maps to `age_at_xmas`.
+
+Children without an assigned sponsor (null `assigned_sponsor_id`) render
+the `sponsor.*` section blank for hand-filling, as do unmapped
+`sponsor.*` placeholders.
+
+### 13.3 `generated_info_sheet` flag
+
+- New `final_child` rows carry `generated_info_sheet = FALSE`
+  (defaulted in module 3's row builder and sheet frame).
+- The flag is Boolean; only module 5 writes it (`WRITABLE_SHEETS`,
+  §9).  Module 3 preserves the existing value on re-saves of the same
+  child.
+- First run adds the column (all `FALSE`) when absent; nulls normalize
+  to `FALSE`.
+
+### 13.4 Run semantics
+
+- Only rows with `generated_info_sheet == FALSE` are processed (every
+  row with `ccat generate --overwrite`, ignoring the flag column); the
+  output is `output/child_info_sheets/<angel_id>.pdf` (existing files
+  are overwritten, so generation is idempotent).
+- Per-row failures are logged and skipped; after the loop the flags of
+  successful rows flip to `TRUE` in one atomic sheet write, then a typed
+  `InfoSheetError` reports any failed angel ids.  Reruns pick up exactly
+  the failed rows.
+- `--test` stops after the first successfully generated sheet.
+- Pending rows need a non-null `zite_record_id` and a safe `angel_id`
+  filename (no separators); missing family/sponsor rows or duplicate
+  `family_id`/`sponsor_id`s in `final_family`/`final_sponsor` are hard
+  errors.
+- The enrichment columns (`gift_pickup_location`, `assigned_sponsor_id`,
+  `family_size`, and the `sponsor_*` join/computed columns) are never
+  written back to the workbook; `final_child` gains only
+  `generated_info_sheet`.
+
 
 ## Appendix A — Form Vocabularies
 

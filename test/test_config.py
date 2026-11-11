@@ -18,6 +18,15 @@ def test_load_real_config() -> None:
     assert config.xmas.isoformat() == "2026-12-25"
     assert set(config.tables) >= {"sponsor", "family", "child"}
     assert config.matchmaking.location_weight > config.matchmaking.age_weight
+    assert config.acquire.sibling_dob_max_gap_days == 274
+
+
+def test_acquire_spec_gap_days_must_be_positive() -> None:
+    """A non-positive sibling dob gap threshold is rejected (§3)."""
+    from ccat.config import AcquireSpec
+
+    with pytest.raises(ValueError, match="must be positive"):
+        AcquireSpec(sibling_dob_max_gap_days=0)
 
 
 def test_enum_values_resolved_from_vocabularies() -> None:

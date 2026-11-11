@@ -2,3 +2,5 @@
 *xlsx
 *csv
 *log
+reports/**
+child_info_sheets/**

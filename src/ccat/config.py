@@ -97,13 +97,30 @@ class ZiteSpec(BaseModel):
 
 
 class AIScreeningSpec(BaseModel):
-    """AI screening settings (module 2), used via the opencode SDK."""
+    """AI screening settings (module 2), used via the opencode SDK.
+
+    Attributes:
+        model: Model reference (``provider/model``) used for screening.
+        system_prompt: The screening system prompt.
+        temperature: Sampling temperature (0.0 = deterministic).
+        max_workers: Concurrent LLM requests during batch screening.
+            One opencode session is created per worker thread.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     model: str
     system_prompt: str
     temperature: float = 0.0
+    max_workers: int = 4
+
+    @field_validator("max_workers")
+    @classmethod
+    def _check_max_workers(cls, value: int) -> int:
+        """Require a positive worker count."""
+        if value <= 0:
+            raise ValueError("ai_screening.max_workers must be positive")
+        return value
 
 
 class AuditSpec(BaseModel):
@@ -113,6 +130,24 @@ class AuditSpec(BaseModel):
 
     host: str = "127.0.0.1"
     port: int = 8642
+
+
+class AcquireSpec(BaseModel):
+    """Data acquisition settings (module 1)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Same-family children born at most this many days apart are
+    #: recorded in ``dob_conflict_log`` (§5.6); 274 days is ~9 months.
+    sibling_dob_max_gap_days: int = 274
+
+    @field_validator("sibling_dob_max_gap_days")
+    @classmethod
+    def _check_gap_days(cls, value: int) -> int:
+        """Require a positive day threshold."""
+        if value <= 0:
+            raise ValueError("sibling_dob_max_gap_days must be positive")
+        return value
 
 
 class MatchmakingSpec(BaseModel):
@@ -128,6 +163,61 @@ class MatchmakingSpec(BaseModel):
     gender_weight: int = 1
 
 
+class InfoSheetSpec(BaseModel):
+    """Child info sheet generation settings (module 5).
+
+    Attributes:
+        template_file: Path to the py3o LibreOffice ``.ott`` template.
+        output_dir: Directory receiving one ``<angel_id>.pdf`` per child.
+        soffice_binary: LibreOffice binary used for the ODT -> PDF
+            conversion.
+        mappings: py3o template variable (dotted, e.g.
+            ``"entry.colors"``) mapped onto the column key of the
+            enriched ``final_child`` row (see module 5).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    template_file: str
+    output_dir: str
+    soffice_binary: str = "soffice"
+    mappings: dict[str, str]
+
+    @model_validator(mode="after")
+    def _check_mappings(self) -> "InfoSheetSpec":
+        """Require non-empty, well-formed variable mappings."""
+        if not self.mappings:
+            raise ValueError("info_sheet.mappings must not be empty")
+        for variable, column in self.mappings.items():
+            parts = variable.split(".")
+            if len(parts) < 2 or not all(parts):
+                raise ValueError(
+                    f"info_sheet.mappings: variable {variable!r} must be a"
+                    " dotted py3o path with a namespace (e.g. 'entry.colors')"
+                )
+            if not column:
+                raise ValueError(
+                    f"info_sheet.mappings: {variable!r} maps to an empty column"
+                )
+        return self
+
+
+class ReportSpec(BaseModel):
+    """Statistics report settings (module 6).
+
+    Attributes:
+        output_dir: Directory receiving the dated ``<prefix>_<date>.html``
+            and ``.pdf`` report files.
+        filename_prefix: Report filename prefix; the current date is
+            appended (e.g. ``report_2026-11-10``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    output_dir: str = "output/reports"
+    filename_prefix: str = "report"
+
+
 class Config(BaseModel):
     """Root configuration model for one pipeline run."""
 
@@ -140,9 +230,12 @@ class Config(BaseModel):
     tables: dict[str, TableSpec]
     vocabularies: dict[str, list[str]]
     location_groups: dict[str, list[str]]
+    acquire: AcquireSpec
     ai_screening: AIScreeningSpec
     audit: AuditSpec
     matchmaking: MatchmakingSpec
+    info_sheet: InfoSheetSpec
+    report: ReportSpec = ReportSpec()
     log_file: str
     match_report_csv: str
 
