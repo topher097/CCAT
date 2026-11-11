@@ -1,0 +1,44 @@
+default_language_version:
+  python: python3
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v4.5.0
+  hooks:
+    - id: check-ast
+    - id: check-builtin-literals
+    - id: check-merge-conflict
+    - id: check-yaml
+    - id: check-toml
+      exclude: ^ruff.toml
+
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.11.0
+  hooks:
+    - id: ruff
+      args: [--fix]
+      files: \.(py|ipynb)$
+      exclude: ^(venv|.venv).*$ 
+    - id: ruff-format
+      files: \.(py|ipynb)$
+
+- repo: local
+  hooks:
+    - id: ty
+      name: ty check
+      entry: ty check --ignore unresolved-import --ignore unknown-argument
+      files: \.(py|ipynb)$
+      exclude: ^(venv|.venv).*$ 
+      language: system
+    - id: test
+      name: pytest
+      entry: uv run pytest
+      types: [python]
+      pass_filenames: false
+      always_run: true
+      language: system
+
+
+- repo: https://github.com/kynan/nbstripout
+  rev: 0.8.2
+  hooks:
+    - id: nbstripout

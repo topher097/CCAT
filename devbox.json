@@ -1,15 +1,27 @@
 {
-    "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.2/.schema/devbox.schema.json",
-    "packages": [],
-    "shell": {
-      "init_hook": [
-        "echo 'Welcome to devbox!' > /dev/null"
-      ],
-      "scripts": {
-        "test": [
-          "echo \"Error: no test specified\" && exit 1"
-        ]
-      }
-    }
+  "$schema":  "https://raw.githubusercontent.com/jetify-com/devbox/0.17.2/.schema/devbox.schema.json",
+  "packages": [
+    "uv@latest",
+    "awscli2@latest",
+    "docker@latest",
+    "docker-compose@latest",
+    "pre-commit@latest",
+    "ty@latest",
+    "ruff@latest",
+    "just@latest",
+    "bump-my-version@latest",
+    "tabiew@latest",
+    "frogmouth@latest",
+    "pandoc@latest"
+  ],
+  "shell": {
+    "init_hook": [
+      "export LD_LIBRARY_PATH=`pwd`/.devbox/nix/profile/default/lib:$LD_LIBRARY_PATH",
+      "pre-commit install",
+      "uv python install 3.12",
+      "just ready-py",
+      "source .venv/bin/activate"
+    ],
+    "scripts": {}
   }
-  
+}
