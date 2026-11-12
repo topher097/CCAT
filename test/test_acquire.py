@@ -483,6 +483,26 @@ def test_sibling_dob_conflicts_flags_twins(cfg: Config) -> None:
     assert log[0]["child_b_zite_record_id"] == "t2"
 
 
+def test_sibling_dob_conflicts_never_repeats_a_pair(cfg: Config) -> None:
+    """A pair reaching the check twice logs once, in one direction."""
+    rows = [
+        _dob_check_child("c1", 1, "2020-01-15", "1A", "Kiddo One"),
+        _dob_check_child("c2", 1, "2020-08-20", "1B", "Kiddo Two"),
+        # Duplicated submission of the same child.
+        _dob_check_child("c2", 1, "2020-08-20", "1B", "Kiddo Two"),
+    ]
+    log = sibling_dob_conflicts(rows, cfg)
+    unordered = [
+        frozenset(
+            (row["child_a_zite_record_id"], row["child_b_zite_record_id"])
+        )
+        for row in log
+    ]
+    assert len(log) == len(set(unordered)) == 1
+    assert log[0]["child_a_zite_record_id"] == "c1"
+    assert log[0]["child_b_zite_record_id"] == "c2"
+
+
 def test_sibling_dob_conflicts_day_threshold_boundary(cfg: Config) -> None:
     """Pairs at exactly the configured threshold flag; one day more does not (§5.6)."""
     from datetime import timedelta

@@ -601,18 +601,92 @@ def match_sponsors(
     return assignments, report
 
 
-def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
+def _reconcile_family_rows(
+    family_rows: list[dict[str, Any]],
+    sponsor_ids: set[int],
+    children_per_family: dict[Any, int],
+    existing_final: pl.DataFrame | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Reconcile ``final_family`` with the current raw rows (§8.6).
+
+    Every current ``raw_family`` row gets a ``final_family`` row.
+    Previously assigned sponsors and angel lists carry over unchanged;
+    new families get no sponsor.  This is the ``--skip-match`` path:
+    sync the sheet without running the matching algorithm.
+
+    Args:
+        family_rows: All ``raw_family`` rows, sorted by ``family_id``.
+        sponsor_ids: Valid ``sponsor_id``s in ``raw_sponsor`` (used only
+            for warning when an assignment references a vanished
+            sponsor).
+        children_per_family: ``final_child`` row count per family.
+        existing_final: The previous ``final_family`` frame (or None
+            when the sheet has never been written).
+
+    Returns:
+        A tuple of (reconciled final_family rows, warning messages for
+        anomalies the auditor should know about).
+    """
+    existing_by_id: dict[Any, dict[str, Any]] = {}
+    if existing_final is not None:
+        for row in existing_final.to_dicts():
+            existing_by_id[row.get("family_id")] = row
+    warnings: list[str] = []
+    dropped = sorted(
+        set(existing_by_id) - {row["family_id"] for row in family_rows}
+    )
+    if dropped:
+        message = (
+            "final_family families no longer in raw_family (dropped):"
+            f" {dropped}"
+        )
+        warnings.append(message)
+        logger.warning("%s", message)
+    rows: list[dict[str, Any]] = []
+    for row in family_rows:
+        family_id = row["family_id"]
+        prior = existing_by_id.get(family_id, {})
+        sponsor_id = prior.get("assigned_sponsor_id")
+        if sponsor_id is not None and sponsor_id not in sponsor_ids:
+            message = (
+                f"family {family_id} has assigned_sponsor_id {sponsor_id},"
+                " who is no longer in raw_sponsor; keeping the assignment"
+            )
+            warnings.append(message)
+            logger.warning("%s", message)
+        rows.append(
+            {
+                **row,
+                "assigned_sponsor_id": sponsor_id,
+                "assigned_angel_ids": prior.get("assigned_angel_ids"),
+                "num_angels_in_family": children_per_family.get(family_id, 0),
+            }
+        )
+    return rows, warnings
+
+
+def run(
+    cfg: Config,
+    test: bool = False,
+    overwrite: bool = False,
+    skip_match: bool = False,
+) -> None:
     """Run module 4 end to end (§8).
 
     Args:
         cfg: Pipeline configuration.
         test: Stop after the first full sponsor: only the first sponsor
             in phase order is matched; the match_report records that this
-            is a partial test run.
+            is a partial test run.  Has no effect with ``skip_match``.
         overwrite: Ignore the ``audited`` column of ``final_child`` (all
             children with an angel_id participate) and replace any
             previous ``final_family``/``final_sponsor``/``match_report``
             outputs in place instead of archiving them (§8.6).
+        skip_match: Reconcile ``final_family`` without running the
+            matching algorithm: every current ``raw_family`` family gets
+            a row, previously assigned sponsors and angel lists carry
+            over, new families get no sponsor.  ``final_sponsor`` and
+            ``match_report`` are left untouched.
 
     Raises:
         MatchError: If required sheets are missing.
@@ -629,6 +703,50 @@ def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
     sponsor_rows = sorted(
         raw_sponsor.to_dicts(), key=lambda row: row["sponsor_id"]
     )
+    if skip_match:
+        if test:
+            logger.warning("--test has no effect with --skip-match")
+        existing_final = read_sheet(cfg.excel_file, "final_family")
+        reconciled, _warnings = _reconcile_family_rows(
+            family_rows,
+            {row["sponsor_id"] for row in sponsor_rows},
+            _children_per_family(cfg),
+            existing_final,
+        )
+        final_family = _augmented_frame(
+            raw_family,
+            reconciled,
+            {
+                "assigned_sponsor_id": pl.Int64,
+                "assigned_angel_ids": pl.String,
+                "num_angels_in_family": pl.Int64,
+            },
+        )
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        existing = set(list_sheets(cfg.excel_file))
+        renames = (
+            {
+                name: _archive_name(existing, name, timestamp)
+                for name in ("final_family",)
+                if name in existing
+            }
+            if not overwrite
+            else {}
+        )
+        write_sheets(
+            cfg.excel_file,
+            "match",
+            {"final_family": final_family},
+            renames=renames,
+        )
+        logger.info(
+            "skip-match: reconciled %d final_family rows (%s);"
+            " matching algorithm skipped, final_sponsor and match_report"
+            " untouched",
+            final_family.height,
+            "archived previous sheet" if renames else "first write",
+        )
+        return
     children = _participating_children(cfg, overwrite=overwrite)
     children_per_family = _children_per_family(cfg)
     logger.info("participating audited children: %d", len(children))

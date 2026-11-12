@@ -73,7 +73,7 @@ def _seed(
     sponsors: list[dict[str, Any]] | None = None,
 ) -> None:
     """Write final_child, final_family, and final_sponsor sheets."""
-    schema: dict[str, pl.DataType] = {
+    schema: dict[str, Any] = {
         "zite_record_id": pl.String,
         "family_id": pl.Int64,
         "angel_id": pl.String,
@@ -163,7 +163,7 @@ def _sponsor(sponsor_id: int = 7, **overrides: Any) -> dict[str, Any]:
     return row
 
 
-SPONSOR_SCHEMA: dict[str, pl.DataType] = {
+SPONSOR_SCHEMA: dict[str, Any] = {
     "sponsor_id": pl.Int64,
     "first_name": pl.String,
     "last_name": pl.String,
@@ -345,6 +345,13 @@ class TestNestedData:
         data = gen._nested_data({}, {"info.angel_id": "angel_id"})
         assert all(v == "" for v in data["sponsor"].values())
 
+    def test_sponsor_angel_id_matches_info_angel_id(self) -> None:
+        """``sponsor.angel_id`` fills with the child's own angel id."""
+        mappings = {"info.angel_id": "angel_id", "sponsor.angel_id": "angel_id"}
+        data = gen._nested_data({"angel_id": "3C"}, mappings)
+        assert data["sponsor"]["angel_id"] == "3C"
+        assert data["sponsor"]["angel_id"] == data["info"]["angel_id"]
+
 
 class TestLoadEnriched:
     """final_child enrichment with family data (§13.1)."""
@@ -370,10 +377,6 @@ class TestLoadEnriched:
             "Sam Sponsor",
         ]
         assert enriched["sponsor_family_size"].to_list() == [2, 2]
-        assert enriched["sponsor_assigned_angel_ids"].to_list() == [
-            "1A,1B",
-            "1A,1B",
-        ]
 
     def test_missing_final_child(self, gen_cfg: Config) -> None:
         """An empty workbook raises a typed error."""
@@ -498,16 +501,22 @@ class TestPendingRows:
     """Pending-row selection and guards (§13.4)."""
 
     def _frame(
-        self, flags: list[Any], angel_ids: list[str | None]
+        self,
+        flags: list[Any],
+        angel_ids: list[str | None],
+        sponsor_ids: list[int | None] | None = None,
     ) -> pl.DataFrame:
+        if sponsor_ids is None:
+            sponsor_ids = [None] * len(flags)
         rows = [
             {
                 "zite_record_id": f"c{i}",
                 "angel_id": angel,
                 "generated_info_sheet": flag,
+                "assigned_sponsor_id": sponsor,
             }
-            for i, (flag, angel) in enumerate(
-                zip(flags, angel_ids, strict=True)
+            for i, (flag, angel, sponsor) in enumerate(
+                zip(flags, angel_ids, sponsor_ids, strict=True)
             )
         ]
         return pl.DataFrame(
@@ -516,25 +525,55 @@ class TestPendingRows:
                 "zite_record_id": pl.String,
                 "angel_id": pl.String,
                 "generated_info_sheet": pl.Boolean,
+                "assigned_sponsor_id": pl.Int64,
             },
         )
 
     def test_filters_false_rows(self) -> None:
-        """Only False rows are pending."""
-        pending = gen._pending_rows(
-            self._frame([True, False, False], ["1A", "1B", "1C"])
+        """Only False-flagged, sponsored rows are pending."""
+        pending, _skipped = gen._pending_rows(
+            self._frame(
+                [True, False, False],
+                ["1A", "1B", "1C"],
+                [7, 7, None],
+            )
         )
-        assert pending["zite_record_id"].to_list() == ["c1", "c2"]
+        assert pending["zite_record_id"].to_list() == ["c1"]
+
+    def test_unsponsored_rows_not_pending(self) -> None:
+        """Children without an assigned sponsor are skipped, flag ignored."""
+        pending, skipped = gen._pending_rows(
+            self._frame(
+                [False, False, False],
+                ["1A", "1B", "1C"],
+                [None, 8, None],
+            )
+        )
+        assert pending["zite_record_id"].to_list() == ["c1"]
+        assert skipped == 2
+
+    def test_unsponsored_rows_still_skipped_on_overwrite(self) -> None:
+        """--overwrite re-renders flagged rows, never unsponsored ones."""
+        pending, skipped = gen._pending_rows(
+            self._frame(
+                [True, True],
+                ["1A", "1B"],
+                [None, 7],
+            ),
+            overwrite=True,
+        )
+        assert pending["zite_record_id"].to_list() == ["c1"]
+        assert skipped == 1
 
     def test_null_angel_id_rejected(self) -> None:
         """A pending row without angel_id raises a typed error."""
         with pytest.raises(InfoSheetError, match="usable angel_id"):
-            gen._pending_rows(self._frame([False], [None]))
+            gen._pending_rows(self._frame([False], [None], [7]))
 
     def test_path_separator_angel_id_rejected(self) -> None:
         """angel_id with a path separator raises a typed error."""
         with pytest.raises(InfoSheetError, match="usable angel_id"):
-            gen._pending_rows(self._frame([False], ["../evil"]))
+            gen._pending_rows(self._frame([False], ["../evil"], [7]))
 
 
 class TestRun:
@@ -575,12 +614,13 @@ class TestRun:
         """Pending rows are rendered, flagged True, and written back."""
         _seed(gen_cfg, two_children, _family())
         gen.run(gen_cfg)
+        stem = f"AT{gen_cfg.season}_"
         names = sorted(name for name, _data in render_calls)
-        assert names == ["1A.odt", "1B.odt"]
+        assert names == [f"{stem}1A.odt", f"{stem}1B.odt"]
         pdfs = sorted(
             p.name for p in Path(gen_cfg.info_sheet.output_dir).glob("*.pdf")
         )
-        assert pdfs == ["1A.pdf", "1B.pdf"]
+        assert pdfs == [f"{stem}1A.pdf", f"{stem}1B.pdf"]
         frame = read_sheet(gen_cfg.excel_file, "final_child")
         assert frame is not None
         assert frame["generated_info_sheet"].to_list() == [True, True]
@@ -613,21 +653,24 @@ class TestRun:
             "email": "sam@example.com",
             "phone": "555-0100",
             "sponsor_id": 7,
-            "angel_id": "1A,1B",
+            # The child's own angel id, same as info.angel_id.
+            "angel_id": "1A",
             "family_size": 2,
         }
 
-    def test_unassigned_child_renders_sponsor_blank(
+    def test_unsponsored_children_skipped_end_to_end(
         self,
         gen_cfg: Config,
         two_children: list[dict[str, Any]],
         render_calls: list[tuple[str, dict[str, Any]]],
     ) -> None:
-        """Children without an assigned sponsor render the section blank (§13.2)."""
+        """Children without an assigned sponsor get no sheet (§13.4)."""
         _seed(gen_cfg, two_children, _unassigned_family())
         gen.run(gen_cfg)
-        _name, data = render_calls[0]
-        assert all(value == "" for value in data["sponsor"].values())
+        assert render_calls == []
+        frame = read_sheet(gen_cfg.excel_file, "final_child")
+        assert frame is not None
+        assert frame["generated_info_sheet"].to_list() == [False, False]
 
     def test_organization_sponsor_uses_organization_name(
         self,
@@ -669,7 +712,9 @@ class TestRun:
             flags=[True, False],
         )
         gen.run(gen_cfg)
-        assert [name for name, _data in render_calls] == ["1B.odt"]
+        assert [name for name, _data in render_calls] == [
+            f"AT{gen_cfg.season}_1B.odt"
+        ]
 
     def test_test_mode_stops_after_first(
         self,
@@ -680,7 +725,9 @@ class TestRun:
         """--test stops after the first generated sheet (§13.4)."""
         _seed(gen_cfg, two_children, _family())
         gen.run(gen_cfg, test=True)
-        assert [name for name, _data in render_calls] == ["1A.odt"]
+        assert [name for name, _data in render_calls] == [
+            f"AT{gen_cfg.season}_1A.odt"
+        ]
         frame = read_sheet(gen_cfg.excel_file, "final_child")
         assert frame is not None
         assert frame["generated_info_sheet"].to_list() == [True, False]
@@ -693,12 +740,17 @@ class TestRun:
     ) -> None:
         """--overwrite regenerates flagged rows too (§13.4)."""
         _seed(
-            gen_cfg, two_children, _family(), with_flag=True, flags=[True, True]
+            gen_cfg,
+            two_children,
+            _family(),
+            with_flag=True,
+            flags=[True, True],
         )
         gen.run(gen_cfg, overwrite=True)
+        stem = f"AT{gen_cfg.season}_"
         assert sorted(name for name, _data in render_calls) == [
-            "1A.odt",
-            "1B.odt",
+            f"{stem}1A.odt",
+            f"{stem}1B.odt",
         ]
         frame = read_sheet(gen_cfg.excel_file, "final_child")
         assert frame is not None
@@ -712,10 +764,48 @@ class TestRun:
     ) -> None:
         """--overwrite --test re-renders only the first sheet (§13.4)."""
         _seed(
-            gen_cfg, two_children, _family(), with_flag=True, flags=[True, True]
+            gen_cfg,
+            two_children,
+            _family(),
+            with_flag=True,
+            flags=[True, True],
         )
         gen.run(gen_cfg, test=True, overwrite=True)
-        assert [name for name, _data in render_calls] == ["1A.odt"]
+        assert [name for name, _data in render_calls] == [
+            f"AT{gen_cfg.season}_1A.odt"
+        ]
+
+    def test_unsponsored_children_skipped_overwrite_end_to_end(
+        self,
+        gen_cfg: Config,
+        render_calls: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """--overwrite regenerates sponsored children only."""
+        children = [
+            child_row("c1", "1A", 1),
+            child_row("c2", "2A", 2),
+        ]
+        families = [
+            {
+                "family_id": 1,
+                "gift_pickup_location": "Hancock",
+                "assigned_sponsor_id": None,
+            },
+            {
+                "family_id": 2,
+                "gift_pickup_location": "Calumet",
+                "assigned_sponsor_id": 7,
+            },
+        ]
+        _seed(gen_cfg, children, families)
+        gen.run(gen_cfg, overwrite=True)
+        assert [name for name, _data in render_calls] == [
+            f"AT{gen_cfg.season}_2A.odt"
+        ]
+        pdfs = sorted(
+            p.name for p in Path(gen_cfg.info_sheet.output_dir).glob("*.pdf")
+        )
+        assert pdfs == [f"AT{gen_cfg.season}_2A.pdf"]
 
     def test_failure_keeps_flag_and_raises(
         self,
@@ -728,7 +818,7 @@ class TestRun:
         def failing_render(
             template_file: Path, data: dict[str, Any], odt_path: Path
         ) -> None:
-            if odt_path.stem == "1A":
+            if odt_path.stem.endswith("1A"):
                 raise InfoSheetError("boom")
 
         def fake_convert(
@@ -766,7 +856,11 @@ class TestRun:
 
         monkeypatch.setattr(gen, "write_sheets", counting_write)
         _seed(
-            gen_cfg, two_children, _family(), with_flag=True, flags=[True, True]
+            gen_cfg,
+            two_children,
+            _family(),
+            with_flag=True,
+            flags=[True, True],
         )
         gen.run(gen_cfg)
         assert calls == []

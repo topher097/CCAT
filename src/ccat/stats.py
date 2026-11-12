@@ -1,7 +1,8 @@
 """Module 6 -- statistics report generation.
 
 Reads the post-match state (``final_child`` joined with ``final_family``
-and ``final_sponsor``) from the pipeline workbook and renders a dated
+and ``final_sponsor``) from the pipeline workbook -- or the raw
+``raw_child``/``raw_family`` sheets with ``--raw`` -- and renders a dated
 report as both HTML and PDF into ``report.output_dir``:
 
 1. A stacked bar chart of children (angels) added per day per pickup
@@ -36,6 +37,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402 - must follow backend choice
 import polars as pl
 from jinja2 import Environment
+from PIL import Image
 from xhtml2pdf import pisa
 
 from ccat.config import Config
@@ -82,24 +84,44 @@ LOCATION_COLORS = ("#1f77b4", "#2ca02c")
 FIGSIZE = (10.0, 4.0)
 DPI = 150
 
+#: Figure display width in px: xhtml2pdf maps 1px to 0.75pt (96 dpi),
+#: so 672px fills the 504pt content width of a letter page (612pt wide
+#: with 0.75in margins).
+FIGURE_WIDTH = 672
+
 
 class StatsError(Exception):
     """Raised when statistics report generation cannot complete."""
 
 
+#: Alternate spellings that count as the same pickup location in every
+#: statistic; the source vocabulary contains both forms.  Keys are
+#: lowercase cell values, values the canonical report label.  Site-less
+#: values (``Any Location``) bucket under ``Unknown``.
+LOCATION_ALIASES = {
+    "tsa (hancock)": "Hancock",
+    "ccam (calumet)": "Calumet",
+    "any location": UNKNOWN_LOCATION,
+}
+
+
 def _normalize_location(value: Any) -> str:
-    """Coerce one pickup location cell to a report label.
+    """Coerce one pickup location cell to a canonical report label.
 
     Args:
         value: Raw ``gift_pickup_location`` cell (may be null/blank).
 
     Returns:
-        The stripped label, or ``UNKNOWN_LOCATION`` when unusable.
+        The canonical label (``LOCATION_ALIASES`` merges the
+        site-prefixed spellings into the bare site name), the stripped
+        label when unknown, or ``UNKNOWN_LOCATION`` when unusable.
     """
     if value is None:
         return UNKNOWN_LOCATION
     text = str(value).strip()
-    return text if text else UNKNOWN_LOCATION
+    if not text:
+        return UNKNOWN_LOCATION
+    return LOCATION_ALIASES.get(text.lower(), text)
 
 
 def _normalize_gender(value: Any) -> str:
@@ -137,7 +159,12 @@ def _location_order(cfg: Config, present: list[str]) -> list[str]:
         The ordered location labels (every vocabulary location is
         kept even when absent, so the table shows complete zeros).
     """
-    known = list(cfg.enum_values("family", "gift_pickup_location"))
+    known_raw = cfg.enum_values("family", "gift_pickup_location")
+    known: list[str] = []
+    for label in known_raw:
+        canonical = _normalize_location(label)
+        if canonical not in known:
+            known.append(canonical)
     extras = sorted(set(present) - set(known) - {UNKNOWN_LOCATION})
     ordered = known + extras
     if UNKNOWN_LOCATION in present and UNKNOWN_LOCATION not in ordered:
@@ -184,28 +211,34 @@ def _coerce_created(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 def _load_enriched(
-    cfg: Config,
-) -> tuple[pl.DataFrame, pl.DataFrame, list[str]]:
-    """Read and join the final sheets for the report.
+    cfg: Config, raw: bool = False
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
+    """Read and join the report's source sheets.
 
     Args:
         cfg: The pipeline configuration.
+        raw: Read the ``raw_child``/``raw_family`` sheets instead of the
+            final sheets.  ``raw_family`` has no ``assigned_sponsor_id``,
+            so sponsor counts are zero in this mode.
 
     Returns:
-        A tuple of (enriched child frame -- ``final_child`` plus
+        A tuple of (enriched child frame -- child sheet plus
         ``gift_pickup_location`` and ``assigned_sponsor_id`` joined
-        from ``final_family`` with normalized location/gender columns,
-        family frame with a normalized location column, ordered
-        location labels).
+        from the family sheet with normalized location/gender columns,
+        family frame with a normalized location column, sponsor frame
+        (empty schema stand-in when absent), ordered location labels).
 
     Raises:
-        StatsError: If ``final_child``/``final_family`` is missing or
-            empty, or lacks the required columns.
+        StatsError: If the child/family sheet is missing or empty, or
+            lacks the required columns.
     """
-    child = read_sheet(cfg.excel_file, "final_child")
+    child_sheet = "raw_child" if raw else "final_child"
+    family_sheet = "raw_family" if raw else "final_family"
+    sponsor_sheet = "raw_sponsor" if raw else "final_sponsor"
+    child = read_sheet(cfg.excel_file, child_sheet)
     if child is None or child.is_empty():
         raise StatsError(
-            "final_child sheet is missing or empty; run `ccat audit` first"
+            f"{child_sheet} sheet is missing or empty; run `ccat acquire` first"
         )
     missing = [
         column
@@ -214,28 +247,36 @@ def _load_enriched(
     ]
     if missing:
         raise StatsError(
-            f"final_child lacks column(s): {missing}; run `ccat audit`"
-            " and `ccat match` first"
+            f"{child_sheet} lacks column(s): {missing}; run `ccat acquire`"
+            " first"
         )
     child = _coerce_created(child)
-    family = read_sheet(cfg.excel_file, "final_family")
+    family = read_sheet(cfg.excel_file, family_sheet)
     if family is None or family.is_empty():
         raise StatsError(
-            "final_family sheet is missing or empty; run `ccat match` first"
+            f"{family_sheet} sheet is missing or empty; run `ccat acquire`"
+            " first"
         )
     missing_family = [
         column for column in FAMILY_JOIN_COLUMNS if column not in family.columns
     ]
-    if missing_family:
+    if missing_family and not (
+        raw and missing_family == ["assigned_sponsor_id"]
+    ):
         raise StatsError(
-            f"final_family lacks column(s): {missing_family}; run"
-            " `ccat match` first"
+            f"{family_sheet} lacks column(s): {missing_family}; run"
+            " `ccat acquire` first"
+        )
+    if "assigned_sponsor_id" not in family.columns:
+        # raw_family has no sponsor assignment yet (§9 ownership matrix).
+        family = family.with_columns(
+            pl.lit(None, dtype=pl.Int64).alias("assigned_sponsor_id")
         )
     duplicated = family.group_by("family_id").len().filter(pl.col("len") > 1)
     if not duplicated.is_empty():
         logger.warning(
-            "final_family family_id is not unique; keeping the first row"
-            " per family: %s",
+            "%s family_id is not unique; keeping the first row per family: %s",
+            family_sheet,
             duplicated["family_id"].to_list(),
         )
         family = family.unique(subset="family_id", keep="first")
@@ -261,11 +302,84 @@ def _load_enriched(
         .alias("gender_key"),
         pl.col("assigned_sponsor_id").cast(pl.Int64, strict=False),
     )
+    sponsor = _load_sponsor(cfg, sponsor_sheet)
     present = sorted(
         set(enriched["gift_pickup_location"].to_list())
         | set(family["gift_pickup_location"].to_list())
     )
-    return enriched, family, _location_order(cfg, present)
+    return enriched, family, sponsor, _location_order(cfg, present)
+
+
+#: Schema of the empty sponsor frame used when the sponsor sheet is
+#: absent: the report shows zero desired angels instead of failing.
+_SPONSOR_SCHEMA: dict[str, Any] = {
+    "sponsor_id": pl.Int64,
+    "num_children": pl.Int64,
+    "dropoff_location": pl.String,
+}
+
+
+def _load_sponsor(cfg: Config, sponsor_sheet: str) -> pl.DataFrame:
+    """Read the sponsor sheet for the desired-angels column.
+
+    Args:
+        cfg: The pipeline configuration.
+        sponsor_sheet: ``raw_sponsor`` (raw mode) or ``final_sponsor``.
+
+    Returns:
+        The sponsor frame, or an empty frame with the expected schema
+        when the sheet is absent or unusable (a warning is logged and
+        the report's sponsor columns show zeros).
+    """
+    sponsor = read_sheet(cfg.excel_file, sponsor_sheet)
+    if sponsor is None or sponsor.is_empty():
+        logger.warning(
+            "%s sheet is missing or empty; sponsor columns show zeros"
+            " (run `ccat acquire` to collect sponsor registrations)",
+            sponsor_sheet,
+        )
+        return pl.DataFrame(schema=_SPONSOR_SCHEMA)
+    missing = [
+        column for column in _SPONSOR_SCHEMA if column not in sponsor.columns
+    ]
+    if missing:
+        logger.warning(
+            "%s lacks column(s) %s; sponsor columns show zeros",
+            sponsor_sheet,
+            missing,
+        )
+        return pl.DataFrame(schema=_SPONSOR_SCHEMA)
+    return sponsor
+
+
+def _desired_angels_by_location(sponsor: pl.DataFrame) -> dict[str, int]:
+    """Sum the desired number of angels per pickup site (§6).
+
+    Each sponsor's ``num_children`` counts toward the site named by its
+    ``dropoff_location`` (normalized); sponsors with ``Any Location``
+    count under ``Unknown``.
+
+    Args:
+        sponsor: The sponsor frame with ``num_children`` and
+            ``dropoff_location``.
+
+    Returns:
+        Mapping of canonical location label to the summed desired
+        angels of all its sponsors.
+    """
+    if sponsor.is_empty():
+        return {}
+    summed = (
+        sponsor.with_columns(
+            pl.col("dropoff_location")
+            .map_elements(_normalize_location, return_dtype=pl.String)
+            .alias("location"),
+            pl.col("num_children").cast(pl.Int64, strict=False).fill_null(0),
+        )
+        .group_by("location")
+        .agg(pl.col("num_children").sum().alias("desired"))
+    )
+    return dict(zip(summed["location"], summed["desired"], strict=False))
 
 
 def _daily_admissions(
@@ -321,6 +435,7 @@ def _daily_admissions(
 def _location_table(
     enriched: pl.DataFrame,
     family: pl.DataFrame,
+    sponsor: pl.DataFrame,
     locations: list[str],
     gender_keys: list[str],
 ) -> list[dict[str, Any]]:
@@ -328,15 +443,20 @@ def _location_table(
 
     Args:
         enriched: The enriched child frame.
-        family: The final_family frame (normalized location).
+        family: The family frame (normalized location).
+        sponsor: The sponsor frame (``raw_sponsor`` or
+            ``final_sponsor``), or an empty stand-in.
         locations: Ordered location labels.
         gender_keys: Ordered lowercase gender keys for the columns.
 
     Returns:
         Rows of ``{"label", "genders": {key: count}, "families",
-        "sponsors", "sponsored"}``; the last row is the all-locations
-        total.
+        "sponsors", "sponsored"}`` -- ``sponsors`` is the summed
+        desired number of angels of all sponsors with that site as
+        their dropoff location (``Any Location`` counts under
+        ``Unknown``); the last row is the all-locations total.
     """
+    desired = _desired_angels_by_location(sponsor)
     family_counts = (
         family.group_by("gift_pickup_location")
         .agg(pl.col("family_id").n_unique().alias("families"))
@@ -353,7 +473,7 @@ def _location_table(
     totals = {
         "genders": {key: 0 for key in gender_keys},
         "families": family["family_id"].n_unique(),
-        "sponsors": enriched["assigned_sponsor_id"].drop_nulls().n_unique(),
+        "sponsors": sum(desired.values()),
         "sponsored": enriched.filter(
             pl.col("assigned_sponsor_id").is_not_null()
         ).height,
@@ -364,16 +484,14 @@ def _location_table(
             key: here.filter(pl.col("gender_key") == key).height
             for key in gender_keys
         }
-        sponsors = here["assigned_sponsor_id"].drop_nulls().n_unique()
-        sponsored = here.filter(
-            pl.col("assigned_sponsor_id").is_not_null()
-        ).height
         row = {
             "label": location,
             "genders": genders,
             "families": families_at.get(location, 0),
-            "sponsors": sponsors,
-            "sponsored": sponsored,
+            "sponsors": desired.get(location, 0),
+            "sponsored": here.filter(
+                pl.col("assigned_sponsor_id").is_not_null()
+            ).height,
         }
         rows.append(row)
         for key in gender_keys:
@@ -397,6 +515,39 @@ def _figure_to_png(fig: plt.Figure) -> str:
     return (
         "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
     )
+
+
+def _png_dimensions(data_uri: str) -> tuple[int, int]:
+    """Read the pixel dimensions of a base64 PNG data URI.
+
+    Args:
+        data_uri: A ``data:image/png;base64,...`` URI.
+
+    Returns:
+        The (width, height) pixel size of the image.
+    """
+    with Image.open(
+        io.BytesIO(base64.b64decode(data_uri.split(",", 1)[1]))
+    ) as image:
+        return image.size
+
+
+def _fit_dimensions(data_uri: str, width: int) -> tuple[int, int]:
+    """Size an image to a fixed display width, keeping its aspect ratio.
+
+    xhtml2pdf ignores ``width: 100%`` and falls back to the PNG's
+    natural size (about 20 in wide at 72 dpi), which overflows the page
+    and clips the figure away; explicit px dimensions render correctly.
+
+    Args:
+        data_uri: A ``data:image/png;base64,...`` URI.
+        width: Target display width in px.
+
+    Returns:
+        The (width, height) px dimensions for the ``<img>`` style.
+    """
+    png_width, png_height = _png_dimensions(data_uri)
+    return width, max(1, round(width * png_height / png_width))
 
 
 def _daily_figure(
@@ -480,7 +631,11 @@ def _gender_age_figure(
     Returns:
         The figure as a base64 PNG data URI.
     """
-    fig, (gender_ax, age_ax) = plt.subplots(1, 2, figsize=FIGSIZE)
+    # Gender axis 25% of the width, age axis 75%: the age plot 50%
+    # wider and the gender plot 50% narrower than the equal split.
+    fig, (gender_ax, age_ax) = plt.subplots(
+        1, 2, figsize=FIGSIZE, gridspec_kw={"width_ratios": (1, 3)}
+    )
     gender_ax.bar(
         list(gender_counts), list(gender_counts.values()), color="#4c72b0"
     )
@@ -509,7 +664,7 @@ _REPORT_TEMPLATE = """
 <meta charset="utf-8"/>
 <title>{{ title }}</title>
 <style>
-@page { size: a4 portrait; margin: 1.8cm; }
+@page { size: letter portrait; margin: 0.75in; }
 body { font-family: Helvetica, sans-serif; font-size: 10pt; }
 h1 { font-size: 16pt; margin-bottom: 2pt; }
 h2 { font-size: 12pt; margin-top: 14pt; }
@@ -519,7 +674,6 @@ td, th { border: 1px solid #999999; padding: 4pt 6pt; font-size: 9pt; }
 th { background-color: #eeeeee; }
 td.number, th.number { text-align: right; }
 tr.total td { font-weight: bold; background-color: #f5f5f5; }
-img { width: 100%; }
 </style>
 </head>
 <body>
@@ -529,7 +683,7 @@ children, {{ families }} families, {{ sponsors }} sponsors with
 assigned angels.</p>
 
 <h2>Angels added per day per pickup site</h2>
-<p><img src="{{ daily_image }}"/></p>
+<p><img src="{{ daily_image }}" style="width: {{ daily_width }}px; height: {{ daily_height }}px;"/></p>
 
 <h2>Per pickup location</h2>
 <table>
@@ -554,7 +708,7 @@ assigned angels.</p>
 </table>
 
 <h2>Gender and age distribution (all children)</h2>
-<p><img src="{{ distribution_image }}"/></p>
+<p><img src="{{ distribution_image }}" style="width: {{ distribution_width }}px; height: {{ distribution_height }}px;"/></p>
 </body>
 </html>
 """
@@ -600,7 +754,13 @@ def _render_html(
         families=families,
         sponsors=sponsors,
         daily_image=daily_image,
+        daily_width=FIGURE_WIDTH,
+        daily_height=_fit_dimensions(daily_image, FIGURE_WIDTH)[1],
         distribution_image=distribution_image,
+        distribution_width=FIGURE_WIDTH,
+        distribution_height=_fit_dimensions(distribution_image, FIGURE_WIDTH)[
+            1
+        ],
         table_rows=[
             {**row, "total": row["label"] == "All locations"}
             for row in table_rows
@@ -628,16 +788,19 @@ def _render_pdf(html: str, pdf_path: Path) -> None:
         raise StatsError("xhtml2pdf produced no PDF output")
 
 
-def run(cfg: Config) -> None:
+def run(cfg: Config, raw: bool = False) -> None:
     """Generate the dated statistics report (HTML and PDF).
 
-    Reads the final sheets, computes the daily admissions, the
-    per-location table, and the gender/age distributions, then writes
-    ``<filename_prefix>_<YYYY-MM-DD>.html`` and ``.pdf`` into
-    ``report.output_dir``.
+    Reads the final sheets (or the raw sheets with ``raw``), computes
+    the daily admissions, the per-location table, and the gender/age
+    distributions, then writes ``<filename_prefix>_<YYYY-MM-DD>.html``
+    and ``.pdf`` into ``report.output_dir``.
 
     Args:
         cfg: The pipeline configuration.
+        raw: Build the report from ``raw_child``/``raw_family`` instead
+            of the final sheets; sponsor counts are zero because
+            ``raw_family`` has no ``assigned_sponsor_id``.
 
     Raises:
         StatsError: If the sheets are unusable or rendering fails.
@@ -645,7 +808,7 @@ def run(cfg: Config) -> None:
     spec = cfg.report
     out_dir = Path(spec.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    enriched, family, locations = _load_enriched(cfg)
+    enriched, family, sponsor, locations = _load_enriched(cfg, raw=raw)
     days, per_location = _daily_admissions(enriched)
     colors = _location_colors(locations)
     gender_keys = [
@@ -655,7 +818,9 @@ def run(cfg: Config) -> None:
     ]
     headers = dict(REPORT_GENDERS + UNSPECIFIED_GENDER)
     gender_headers = [headers[key] for key in gender_keys]
-    table_rows = _location_table(enriched, family, locations, gender_keys)
+    table_rows = _location_table(
+        enriched, family, sponsor, locations, gender_keys
+    )
     gender_counts = {
         headers[key]: enriched.filter(pl.col("gender_key") == key).height
         for key in gender_keys

@@ -1,9 +1,12 @@
 """Module 5 — child info sheet generation (§13).
 
-For every ``final_child`` row whose ``generated_info_sheet`` flag is
-``False``, renders the LibreOffice template ``info_sheet.template_file``
-with the child's data via py3o and converts the result to a PDF named
-``<angel_id>.pdf`` in ``info_sheet.output_dir``.  Successfully generated
+For every ``final_child`` row whose family has an **assigned sponsor**
+and whose ``generated_info_sheet`` flag is ``False``, renders the
+LibreOffice template ``info_sheet.template_file`` with the child's data
+via py3o and converts the result to a PDF named
+``AT<season>_<angel_id>.pdf`` in ``info_sheet.output_dir``.  Children
+without an assigned sponsor are skipped (run `ccat match` first).
+Successfully generated
 rows flip their flag to ``True`` so reruns only process pending children
 (§13).  Failed rows keep ``False`` and are reported as one typed error
 after the flags are written, so a rerun picks them up again.
@@ -16,12 +19,14 @@ plus ``family_size`` (the number of ``final_child`` rows sharing that
 ``family_id``).  The ``sponsor.*`` section fills from the child's
 assigned ``final_sponsor`` row (joined by ``assigned_sponsor_id``):
 name (organization name, falling back to first + last name), email,
-phone, sponsor id, assigned angel ids, and the number of angels
-assigned to that sponsor.  Children without an assigned sponsor render
-that section blank for hand-filling, as do unmapped ``sponsor.*``
-placeholders.  Only the original ``final_child`` columns plus
-``generated_info_sheet`` are written back to the workbook; the
-enrichment columns never reach the sheet.
+phone, and sponsor id; ``sponsor.angel_id`` shows the child's own
+``angel_id`` (the same value as ``info.angel_id``), and
+``sponsor.family_size`` counts the children assigned to that sponsor.
+Children without an assigned sponsor render that section blank for
+hand-filling, as do unmapped ``sponsor.*`` placeholders.  Only the
+original ``final_child`` columns plus ``generated_info_sheet`` are
+written back to the workbook; the enrichment columns never reach the
+sheet.
 """
 
 import logging
@@ -40,8 +45,9 @@ from ccat.io import read_sheet, write_sheets
 logger = logging.getLogger(__name__)
 
 #: Template placeholders of the sponsor hand-fill section (§13); mapped
-#: sources (config ``sponsor.*`` mappings) fill them from the child's
-#: assigned ``final_sponsor`` row when one exists, and unmapped ones
+#: sources (config ``sponsor.*`` mappings) fill them from the enriched
+#: row (``sponsor.angel_id`` maps to the child's own ``angel_id``, the
+#: rest to the assigned ``final_sponsor`` join), and unmapped ones
 #: render blank for the sponsor to complete by hand.
 SPONSOR_PLACEHOLDERS: frozenset[str] = frozenset(
     {
@@ -69,7 +75,6 @@ SPONSOR_JOIN_COLUMNS: tuple[tuple[str, str], ...] = (
     ("organization_name", "sponsor_organization_name"),
     ("email", "sponsor_email"),
     ("phone", "sponsor_phone"),
-    ("assigned_angel_ids", "sponsor_assigned_angel_ids"),
 )
 
 #: Computed columns added on top of the ``final_child`` schema (§13).
@@ -248,24 +253,42 @@ def _load_enriched_rows(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame, bool]:
     return frame, enriched, schema_added
 
 
-def _pending_rows(frame: pl.DataFrame, overwrite: bool = False) -> pl.DataFrame:
-    """Select rows still awaiting a generated info sheet.
+def _pending_rows(
+    frame: pl.DataFrame, overwrite: bool = False
+) -> tuple[pl.DataFrame, int]:
+    """Select rows still awaiting a generated info sheet (§13.4).
+
+    A row is pending when its family has an **assigned sponsor** and
+    its ``generated_info_sheet`` flag is False (every sponsored row,
+    with ``overwrite``) -- the sheet's purpose is to hand the sponsor
+    their child's wish list, so unsponsored children get no sheet.
 
     Args:
-        frame: An enriched or base ``final_child`` frame.
-        overwrite: Ignore the ``generated_info_sheet`` column: every row
-            is pending.
+        frame: An enriched ``final_child`` frame (needs the
+            ``assigned_sponsor_id`` join column).
+        overwrite: Ignore the ``generated_info_sheet`` column: every
+            sponsored row is pending.
 
     Returns:
-        The rows with ``generated_info_sheet == False`` (or every row).
+        A tuple of (the pending rows, how many rows were skipped
+        because their family has no assigned sponsor).
 
     Raises:
         InfoSheetError: If a pending row lacks ``zite_record_id`` or a
             usable ``angel_id`` filename.
     """
-    pending = (
-        frame if overwrite else frame.filter(~pl.col("generated_info_sheet"))
-    )
+    if overwrite:
+        pending = frame
+    else:
+        pending = frame.filter(~pl.col("generated_info_sheet"))
+    sponsored = pending.filter(pl.col("assigned_sponsor_id").is_not_null())
+    skipped_unsponsored = pending.height - sponsored.height
+    if skipped_unsponsored:
+        logger.info(
+            "skipping %d child(ren) without an assigned sponsor",
+            skipped_unsponsored,
+        )
+    pending = sponsored
     missing_records = pending.filter(pl.col("zite_record_id").is_null())
     if not missing_records.is_empty():
         raise InfoSheetError(
@@ -285,7 +308,7 @@ def _pending_rows(frame: pl.DataFrame, overwrite: bool = False) -> pl.DataFrame:
             "pending final_child rows without a usable angel_id filename:"
             f" {ids}"
         )
-    return pending
+    return pending, skipped_unsponsored
 
 
 def _nested_data(
@@ -427,22 +450,38 @@ def _record_flags(frame: pl.DataFrame, generated: list[Any]) -> pl.DataFrame:
     )
 
 
+def _sheet_stem(cfg: Config, angel_id: str) -> str:
+    """Info-sheet filename stem for one child (§13).
+
+    Args:
+        cfg: The pipeline configuration (season labels the tree year).
+        angel_id: The child's angel id.
+
+    Returns:
+        The stem, e.g. ``AT2026_3B``.
+    """
+    return f"AT{cfg.season}_{angel_id}"
+
+
 def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
     """Generate child info sheet PDFs for all pending children (§13).
 
-    Only rows with ``generated_info_sheet == False`` are processed (all
-    rows when ``overwrite`` is set).  Each
-    row is rendered with py3o and converted to ``<angel_id>.pdf`` in
-    ``info_sheet.output_dir``; successfully generated rows flip their
-    flag to ``True`` in one atomic sheet write at the end, so an
-    interrupted run never leaves a half-updated workbook and failed rows
-    are simply picked up again on the next run.
+    Pending rows are children whose family has an **assigned sponsor**
+    and whose ``generated_info_sheet`` flag is False (all sponsored
+    rows when ``overwrite`` is set) -- unsponsored children get no
+    sheet.  Each pending row is
+    rendered with py3o and converted to ``AT<season>_<angel_id>.pdf``
+    in ``info_sheet.output_dir``; successfully generated rows flip
+    their flag to ``True`` in one atomic sheet write at the end, so an
+    interrupted run never leaves a half-updated workbook and failed
+    rows are simply picked up again on the next run.
 
     Args:
         cfg: The pipeline configuration.
         test: Stop after the first successfully generated sheet.
         overwrite: Ignore the ``generated_info_sheet`` column: every
-            child's PDF is regenerated (existing files are overwritten).
+            sponsored child's PDF is regenerated (existing files are
+            overwritten).
     """
     spec = cfg.info_sheet
     template_file = Path(spec.template_file)
@@ -455,7 +494,7 @@ def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
     out_dir = Path(spec.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     base, enriched, schema_added = _load_enriched_rows(cfg)
-    pending = _pending_rows(enriched, overwrite=overwrite)
+    pending, _skipped = _pending_rows(enriched, overwrite=overwrite)
     if pending.is_empty():
         logger.info("no children pending an info sheet")
         if schema_added:
@@ -472,21 +511,21 @@ def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
         profile = tmp_dir / "lo_profile"
         profile.mkdir()
         for row in pending.to_dicts():
-            angel_id = str(row["angel_id"])
-            odt_path = tmp_dir / f"{angel_id}.odt"
+            stem = _sheet_stem(cfg, str(row["angel_id"]))
+            odt_path = tmp_dir / f"{stem}.odt"
             try:
                 _render_one(
                     template_file, _nested_data(row, spec.mappings), odt_path
                 )
                 _convert_to_pdf(odt_path, out_dir, spec.soffice_binary, profile)
             except Exception as error:  # noqa: BLE001 - per-row failures
-                failed.append(angel_id)
+                failed.append(stem)
                 logger.error(
-                    "info sheet generation failed for %s: %s", angel_id, error
+                    "info sheet generation failed for %s: %s", stem, error
                 )
                 continue
             generated.append(row["zite_record_id"])
-            logger.info("generated info sheet %s/%s.pdf", out_dir, angel_id)
+            logger.info("generated info sheet %s/%s.pdf", out_dir, stem)
             if test:
                 logger.info("test mode: stopping after first info sheet")
                 break

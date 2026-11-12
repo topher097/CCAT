@@ -60,41 +60,26 @@ def _get_service() -> Any:
     return build("drive", "v3", credentials=creds)
 
 
-def _resolve_folder(service: Any, folder: str) -> str:
+def _resolve_folder(service: Any, folder: str) -> str | None:
     """Resolve a Drive folder to its folder ID.
 
     Interprets a plain string directly as a folder ID, extracts the ID from a
-    Drive folder URL, otherwise searches My Drive for a folder by exact name.
+    Drive folder URL, and treats "" / "root" style names as the My Drive
+    root.
 
     Args:
         service: The Drive v3 API service resource.
-        folder: A folder ID, a Drive folder URL, or an exact folder name
-            in the user's My Drive.
+        folder: A folder ID, a Drive folder URL, or a My Drive root
+            alias (""/"root"/"my drive"/"drive").
 
     Returns:
         The resolved folder ID, or None for the My Drive root.
-
-    Raises:
-        ValueError: If no folder matches the given name or URL.
-        HttpError: If the query fails.
     """
     if "://" in folder or "folders/" in folder:
         return folder.rsplit("folders/", 1)[1].split("/")[0].split("?")[0]
     if folder.strip(". ") in ("", "root", "my drive", "mydrive", "drive"):
         return None  # My Drive root: omit `parents`
     return folder
-    query = "mimeType='application/vnd.google-apps.folder' and name = '{}' and trashed = false".format(
-        folder.replace("\\", "\\\\").replace("'", "\\'")
-    )
-    results = (
-        service.files()
-        .list(q=query, pageSize=1, fields="files(id, name)", spaces="drive")
-        .execute()
-    )
-    items = results.get("files", [])
-    if not items:
-        raise ValueError(f"No Drive folder named {folder!r} found in My Drive")
-    return items[0]["id"]
 
 
 def _find_file_id(service: Any, name: str, parent_id: str | None = None) -> str:
@@ -142,7 +127,6 @@ def upload(local_path: str | Path, folder: str) -> str:
 
     Raises:
         FileNotFoundError: If the local file does not exist.
-        ValueError: If the destination folder cannot be resolved.
         HttpError: If the upload fails.
     """
     local = Path(local_path)

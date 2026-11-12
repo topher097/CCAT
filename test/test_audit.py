@@ -1,6 +1,9 @@
 """Tests for module 3 — human audit tool (§7)."""
 
+import os
+import signal
 import threading
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -9,11 +12,15 @@ import requests
 
 from ccat.audit.server import (
     AuditClientError,
+    AuditError,
     AuditState,
     build_final_child_row,
     dob_conflict_notes,
+    find_audit_processes,
+    _ancestor_pids,
     merge_anomoly,
     run,
+    stop_audit_processes,
 )
 from ccat.config import Config
 from ccat.io import read_sheet, write_sheets
@@ -197,6 +204,62 @@ def test_queue_adj_object_null_vs_sparse(cfg: Config) -> None:
     assert by_id["orphan1"]["adj"] is None
 
 
+def test_queue_loads_saved_notes_and_special_needs(cfg: Config) -> None:
+    """Existing final_child notes load into the queue item (§7.1)."""
+    _seed(cfg)
+    state = AuditState(cfg)
+    state.save(
+        "c1",
+        {
+            "need_1": "winter coat that fits",
+            "special_needs": True,
+            "audited": False,
+            "require_clarification": "call family about shoe size",
+        },
+    )
+    queue = state.queue()
+    by_id = {item["zite_record_id"]: item for item in queue}
+    assert by_id["c1"]["require_clarification"] == (
+        "call family about shoe size"
+    )
+    assert by_id["c1"]["special_needs"] is True
+    # The auditor's saved edits come back in the final overlay.
+    assert by_id["c1"]["final"]["need_1"] == "winter coat that fits"
+    assert by_id["c1"]["final"]["potential_anomoly"] is None
+    # Children without notes expose none (UI clears the note box).
+    assert by_id["c2"]["require_clarification"] is None
+    assert by_id["c2"]["special_needs"] is False
+    assert by_id["c2"]["final"] is None
+
+
+@pytest.mark.parametrize("audited", [False, True])
+def test_save_writes_sheet_for_both_buttons(cfg: Config, audited: bool) -> None:
+    """Save and Mark-Audited both persist the full row to final_child."""
+    _seed(cfg)
+    state = AuditState(cfg)
+    state.save(
+        "c1",
+        {
+            "need_1": "winter coat that fits",
+            "special_needs": False,
+            "audited": audited,
+            "require_clarification": (None if audited else "needs a call back"),
+        },
+    )
+    final = read_sheet(cfg.excel_file, "final_child")
+    assert final is not None
+    rows = {row["zite_record_id"]: row for row in final.to_dicts()}
+    row = rows["c1"]
+    assert row["audited"] is audited
+    assert row["need_1"] == "winter coat that fits"
+    assert row["require_clarification"] == (
+        None if audited else "needs a call back"
+    )
+    # The raw columns carry through into the final row (§7.3).
+    assert row["first_name"] == "Kiddo"
+    assert row["primary_email"] == "fam@example.com"
+
+
 def test_dob_conflict_notes_match_either_side(cfg: Config) -> None:
     """Notes build from both sides of each conflicting pair (§5.6, §7)."""
     note_c1 = _seed_conflict(cfg)
@@ -211,6 +274,31 @@ def test_dob_conflict_notes_match_either_side(cfg: Config) -> None:
     )
     assert dob_conflict_notes(rows, "orphan1") is None
     assert dob_conflict_notes(None, "c1") is None
+
+
+def test_dob_conflict_notes_dedupe_swapped_rows(cfg: Config) -> None:
+    """A stale sheet with both directions yields one note per sibling."""
+    _seed_conflict(cfg)
+    _seed(cfg)
+    log = read_sheet(cfg.excel_file, "dob_conflict_log")
+    assert log is not None
+    rows = log.to_dicts()
+    swapped = [
+        {
+            **row,
+            "child_a_zite_record_id": row["child_b_zite_record_id"],
+            "child_a_angel_id": row["child_b_angel_id"],
+            "child_a_first_name": row["child_a_first_name"],
+            "child_a_dob": row["child_b_dob"],
+            "child_b_zite_record_id": row["child_a_zite_record_id"],
+            "child_b_angel_id": row["child_a_angel_id"],
+            "child_b_dob": row["child_a_dob"],
+        }
+        for row in rows
+    ]
+    both = rows + swapped
+    assert dob_conflict_notes(both, "c1") == dob_conflict_notes(rows, "c1")
+    assert dob_conflict_notes(both, "c2") == dob_conflict_notes(rows, "c2")
 
 
 def test_merge_anomoly_appends_once() -> None:
@@ -528,14 +616,16 @@ def test_run_serves_until_stopped(cfg: Config, monkeypatch) -> None:
     """run() blocks in serve_forever and shuts down on KeyboardInterrupt."""
     from http.server import HTTPServer
 
-    original = HTTPServer.serve_forever
-
     def stop_immediately(self: HTTPServer) -> None:
         raise KeyboardInterrupt
 
     monkeypatch.setattr(HTTPServer, "serve_forever", stop_immediately)
-    run(cfg)  # returns without raising
-    monkeypatch.setattr(HTTPServer, "serve_forever", original)
+    # Bind an ephemeral port: the configured port may be held by a real
+    # audit tool running outside the tests.
+    ephemeral = cfg.model_copy(
+        update={"audit": cfg.audit.model_copy(update={"port": 0})}
+    )
+    run(ephemeral)  # returns without raising
 
 
 def test_queue_test_mode_limits_to_first_family(cfg: Config) -> None:
@@ -636,3 +726,147 @@ def test_http_test_mode_server_stops_after_first_family(cfg: Config) -> None:
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+def _write_proc(root: Path, pid: int, arguments: list[str]) -> None:
+    """Fake one /proc entry with an NUL-separated cmdline."""
+    entry = root / str(pid)
+    entry.mkdir()
+    cmdline = entry / "cmdline"
+    cmdline.write_bytes(b"\0".join(arg.encode() for arg in arguments) + b"\0")
+
+
+class TestRestart:
+    """--restart finds and stops a stale audit server (§7)."""
+
+    def test_find_audit_processes_matches_ccat_audit(
+        self, tmp_path: Path
+    ) -> None:
+        """Only ccat-audit processes (never self or ancestors) match."""
+        _write_proc(tmp_path, 100, ["python", "/venv/bin/ccat", "audit"])
+        _write_proc(tmp_path, 101, ["python", "-m", "ccat", "audit", "--test"])
+        _write_proc(  # unrelated: dbus carries "audit" as substring
+            tmp_path,
+            102,
+            ["dbus-broker", "--audit"],
+        )
+        _write_proc(  # ccat with a different module
+            tmp_path, 103, ["python", "/venv/bin/ccat", "screen"]
+        )
+        found = find_audit_processes(str(tmp_path))
+        assert sorted(found) == [100, 101]
+
+    def test_find_audit_processes_never_matches_own_ancestry(self) -> None:
+        """Wrapper commands (timeout, uv run, shells) are excluded."""
+        assert all(
+            pid not in find_audit_processes() for pid in _ancestor_pids()
+        )
+
+    def test_stop_audit_processes_terminates(self, tmp_path: Path) -> None:
+        """SIGTERM goes to each pid; gone processes are not re-killed."""
+        killed: list[tuple[int, int]] = []
+
+        def fake_kill(pid: int, sig: int) -> None:
+            killed.append((pid, sig))
+            if sig == 0 and pid in {7, 9} and len(killed) > 2:
+                raise ProcessLookupError  # alive once, then exits
+
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(os, "kill", fake_kill)
+        monkey.setattr("ccat.audit.server.time.sleep", lambda _s: None)
+        monkey.setattr("ccat.audit.server.time.monotonic", lambda: 0.0)
+        try:
+            stop_audit_processes(
+                {7: "ccat audit", 9: "ccat audit --test"}, timeout_seconds=0.1
+            )
+        finally:
+            monkey.undo()
+        assert (7, signal.SIGTERM) in killed
+        assert (9, signal.SIGTERM) in killed
+        # escalation only when the process survives the deadline
+        assert not any(sig == signal.SIGKILL for _pid, sig in killed)
+
+    def test_stop_audit_processes_escalates_to_sigkill(self) -> None:
+        """A process ignoring SIGTERM is killed after the deadline."""
+        killed: list[tuple[int, int]] = []
+
+        def fake_kill(pid: int, sig: int) -> None:
+            killed.append((pid, sig))
+            if sig == 0 and len(killed) > 6:
+                raise ProcessLookupError  # survives SIGTERM, then dies
+
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(os, "kill", fake_kill)
+        ticks = iter(range(0, 100, 10))
+
+        def fake_monotonic() -> float:
+            return float(next(ticks))
+
+        monkey.setattr("ccat.audit.server.time.monotonic", fake_monotonic)
+        monkey.setattr("ccat.audit.server.time.sleep", lambda _s: None)
+        try:
+            stop_audit_processes({5: "ccat audit"}, timeout_seconds=5.0)
+        finally:
+            monkey.undo()
+        assert (5, signal.SIGKILL) in killed
+
+    def test_run_restart_stops_stale_server_first(
+        self, cfg: Config, monkeypatch
+    ) -> None:
+        """restart=True stops found processes, then binds and serves."""
+        stopped: dict[int, str] = {}
+        monkeypatch.setattr(
+            "ccat.audit.server.find_audit_processes",
+            lambda: {4242: "ccat audit"},
+        )
+        monkeypatch.setattr(
+            "ccat.audit.server.stop_audit_processes",
+            lambda processes, **_kw: stopped.update(processes),
+        )
+        started: list[tuple[str, int]] = []
+
+        class StubServer:
+            def __init__(self, address: tuple[str, int], handler: Any) -> None:
+                started.append(address)
+
+            def serve_forever(self) -> None:
+                raise KeyboardInterrupt  # stop immediately
+
+            def shutdown(self) -> None:
+                pass
+
+            def server_close(self) -> None:
+                pass
+
+        monkeypatch.setattr("ccat.audit.server.ThreadingHTTPServer", StubServer)
+        run(cfg, restart=True)
+        assert stopped == {4242: "ccat audit"}
+        assert started == [(cfg.audit.host, cfg.audit.port)]
+
+    def test_run_raises_typed_error_when_port_taken(self, cfg: Config) -> None:
+        """A busy port raises AuditError naming the port."""
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class _NullHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - http.server API
+                pass
+
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                pass
+
+        blocker = ThreadingHTTPServer(("127.0.0.1", 0), _NullHandler)
+        try:
+            occupied = cfg.model_copy(
+                update={
+                    "audit": cfg.audit.model_copy(
+                        update={
+                            "host": "127.0.0.1",
+                            "port": blocker.server_address[1],
+                        }
+                    )
+                }
+            )
+            with pytest.raises(AuditError, match="could not bind"):
+                run(occupied)
+        finally:
+            blocker.server_close()

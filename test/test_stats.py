@@ -27,6 +27,23 @@ FAMILY_SCHEMA: dict[str, Any] = {
     "assigned_sponsor_id": pl.Int64,
 }
 
+SPONSOR_SCHEMA: dict[str, Any] = {
+    "sponsor_id": pl.Int64,
+    "num_children": pl.Int64,
+    "dropoff_location": pl.String,
+}
+
+
+def sponsor_row(
+    sponsor_id: int, num_children: int, location: str | None
+) -> dict[str, Any]:
+    """One sponsor row for stats tests."""
+    return {
+        "sponsor_id": sponsor_id,
+        "num_children": num_children,
+        "dropoff_location": location,
+    }
+
 
 def child_row(
     record_id: str,
@@ -61,8 +78,9 @@ def _seed(
     cfg: Config,
     children: list[dict[str, Any]],
     families: list[dict[str, Any]],
+    sponsors: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Write final_child and final_family sheets into the workbook."""
+    """Write final_child, final_family, and final_sponsor sheets."""
     write_sheets(
         cfg.excel_file,
         "audit",
@@ -73,6 +91,12 @@ def _seed(
         "match",
         {"final_family": pl.DataFrame(families, schema=FAMILY_SCHEMA)},
     )
+    if sponsors is not None:
+        write_sheets(
+            cfg.excel_file,
+            "match",
+            {"final_sponsor": pl.DataFrame(sponsors, schema=SPONSOR_SCHEMA)},
+        )
 
 
 def _report_cfg(cfg: Config, tmp_path: Path) -> Config:
@@ -91,6 +115,12 @@ class TestNormalizeHelpers:
         assert stats._normalize_location("  ") == "Unknown"
         assert stats._normalize_location(" Hancock ") == "Hancock"
 
+    def test_normalize_location_merges_aliases(self) -> None:
+        """Site-prefixed spellings count as the bare site name."""
+        assert stats._normalize_location("TSA (Hancock)") == "Hancock"
+        assert stats._normalize_location("CCAM (Calumet)") == "Calumet"
+        assert stats._normalize_location("tsa (hancock)") == "Hancock"
+
     def test_normalize_gender_casings(self) -> None:
         """Gender keys tolerate casing, spacing, and nulls."""
         assert stats._normalize_gender("Female") == "female"
@@ -101,17 +131,15 @@ class TestNormalizeHelpers:
         assert stats._normalize_gender("alien") == "unspecified"
 
     def test_location_orders_vocabulary_first(self, cfg: Config) -> None:
-        """Known vocabulary locations lead, extras follow, Unknown last."""
+        """Known vocabulary locations lead, extras follow, Unknown last.
+
+        The vocabulary's aliased spellings collapse onto their
+        canonical labels.
+        """
         ordered = stats._location_order(
             cfg, ["Calumet", "Zoo", "Unknown", "Hancock"]
         )
-        assert ordered[:4] == [
-            "TSA (Hancock)",
-            "CCAM (Calumet)",
-            "Hancock",
-            "Calumet",
-        ]
-        assert ordered[4] == "Zoo"
+        assert ordered[:3] == ["Hancock", "Calumet", "Zoo"]
         assert ordered[-1] == "Unknown"
 
 
@@ -128,7 +156,7 @@ class TestDailyAdmissions:
             ],
             [family_row(1, "Hancock", 7)],
         )
-        enriched, _family, _locations = stats._load_enriched(cfg)
+        enriched, _family, _sponsor, _locations = stats._load_enriched(cfg)
         days, per_location = stats._daily_admissions(enriched)
         assert days[0] == date(2026, 10, 1)
         assert days[-1] == date.today()  # range stops at today
@@ -154,7 +182,7 @@ class TestDailyAdmissions:
                 family_row(2, "Calumet", None),
             ],
         )
-        enriched, _family, _locations = stats._load_enriched(cfg)
+        enriched, _family, _sponsor, _locations = stats._load_enriched(cfg)
         days, per_location = stats._daily_admissions(enriched)
         assert days[0] == date(2026, 10, 2)
         index = days.index(date(2026, 10, 2))
@@ -166,7 +194,7 @@ class TestLocationTable:
     """Tests for the per-location statistics table."""
 
     def test_counts_per_location_and_totals(self, cfg: Config) -> None:
-        """Rows count genders, families, sponsors, and sponsored angels."""
+        """Rows count genders, families, desired angels, sponsored."""
         stamp = datetime(2026, 10, 2, 12, 0)
         _seed(
             cfg,
@@ -181,20 +209,31 @@ class TestLocationTable:
                 family_row(2, "Calumet", 7),
                 family_row(3, "Calumet", None),
             ],
+            [
+                sponsor_row(7, 5, "Hancock"),
+                sponsor_row(8, 10, "Calumet"),
+                sponsor_row(9, 3, "Any Location"),
+                sponsor_row(10, 4, "TSA (Hancock)"),
+            ],
         )
-        enriched, family, _locations = stats._load_enriched(cfg)
+        enriched, family, sponsor, _locations = stats._load_enriched(cfg)
         keys = ["male", "female", "non-binary"]
         rows = stats._location_table(
-            enriched, family, ["Hancock", "Calumet"], keys
+            enriched, family, sponsor, ["Hancock", "Calumet", "Unknown"], keys
         )
-        hancock, calumet, total = rows
+        hancock = next(row for row in rows if row["label"] == "Hancock")
+        calumet = next(row for row in rows if row["label"] == "Calumet")
+        unknown = next(row for row in rows if row["label"] == "Unknown")
+        total = rows[-1]
         assert hancock["genders"] == {
             "male": 1,
             "female": 1,
             "non-binary": 0,
         }
         assert hancock["families"] == 1
-        assert hancock["sponsors"] == 1
+        # Desired angels: sponsor 7 wants 5, sponsor 10's
+        # "TSA (Hancock)" alias wants 4 more.
+        assert hancock["sponsors"] == 9
         assert hancock["sponsored"] == 2
         assert calumet["genders"] == {
             "male": 0,
@@ -202,13 +241,15 @@ class TestLocationTable:
             "non-binary": 1,
         }
         assert calumet["families"] == 2
-        assert calumet["sponsors"] == 1
+        assert calumet["sponsors"] == 10
         assert calumet["sponsored"] == 1
+        # "Any Location" sponsors bucket under Unknown.
+        assert unknown["sponsors"] == 3
         assert total["label"] == "All locations"
         assert total["genders"] == {"male": 1, "female": 2, "non-binary": 1}
         assert total["families"] == 3
-        # Sponsor 7 serves both locations: counted once in the totals.
-        assert total["sponsors"] == 1
+        # Totals sum every site's desired angels once.
+        assert total["sponsors"] == 22
         assert total["sponsored"] == 3
 
     def test_buckets_unknown_location(self, cfg: Config) -> None:
@@ -222,10 +263,10 @@ class TestLocationTable:
             ],
             [family_row(1, None, None)],
         )
-        enriched, family, locations = stats._load_enriched(cfg)
+        enriched, family, sponsor, locations = stats._load_enriched(cfg)
         assert locations[-1] == "Unknown"
         rows = stats._location_table(
-            enriched, family, locations, ["male", "female"]
+            enriched, family, sponsor, locations, ["male", "female"]
         )
         unknown = rows[locations.index("Unknown")]
         assert unknown["genders"] == {"male": 1, "female": 1}
@@ -251,7 +292,7 @@ class TestGenderAge:
             ],
             [family_row(1, "Hancock", None)],
         )
-        enriched, _family, _locations = stats._load_enriched(cfg)
+        enriched, _family, _sponsor, _locations = stats._load_enriched(cfg)
         counts = {
             key: enriched.filter(pl.col("gender_key") == key).height
             for key in ("male", "female", "unspecified")
@@ -270,7 +311,7 @@ class TestGenderAge:
             ],
             [family_row(1, "Hancock", None)],
         )
-        enriched, _family, _locations = stats._load_enriched(cfg)
+        enriched, _family, _sponsor, _locations = stats._load_enriched(cfg)
         ages = enriched["age_at_xmas"].drop_nulls().cast(pl.Int64)
         age_counts = {
             int(age): count
@@ -326,6 +367,9 @@ class TestRun:
         assert "Pickup location" in html
         assert "All locations" in html
         assert "data:image/png;base64," in html
+        # xhtml2pdf needs explicit px sizes or the figures overflow the
+        # page and disappear from the PDF (1px = 0.75pt, 672px = 504pt).
+        assert "width: 672px" in html
 
     def test_run_raises_when_final_child_missing(
         self, cfg: Config, tmp_path: Path
@@ -334,6 +378,52 @@ class TestRun:
         report_cfg = _report_cfg(cfg, tmp_path)
         with pytest.raises(StatsError):
             stats.run(report_cfg)
+
+    def test_run_raw_reads_raw_sheets(
+        self, cfg: Config, tmp_path: Path
+    ) -> None:
+        """--raw builds the report from raw_child/raw_family."""
+        stamp = datetime(2026, 10, 2, 12, 0)
+        write_sheets(
+            cfg.excel_file,
+            "acquire",
+            {
+                "raw_child": pl.DataFrame(
+                    [
+                        child_row("rec1", 1, stamp, "Male"),
+                        child_row("rec2", 1, stamp, "Female", age=5),
+                    ],
+                    schema=CHILD_SCHEMA,
+                ),
+                "raw_family": pl.DataFrame(
+                    [family_row(1, "Hancock", None)],
+                    schema={
+                        key: value
+                        for key, value in FAMILY_SCHEMA.items()
+                        if key != "assigned_sponsor_id"
+                    },
+                ),
+            },
+        )
+        report_cfg = _report_cfg(cfg, tmp_path)
+        stats.run(report_cfg, raw=True)
+        stem = f"report_{date.today().isoformat()}"
+        html_path = tmp_path / "reports" / f"{stem}.html"
+        assert html_path.is_file() and html_path.stat().st_size > 0
+        html = html_path.read_text(encoding="utf-8")
+        assert "Pickup location" in html
+        enriched, _family, _sponsor, _locations = stats._load_enriched(
+            report_cfg, raw=True
+        )
+        assert enriched["assigned_sponsor_id"].null_count() == len(enriched)
+
+    def test_run_raw_raises_when_raw_child_missing(
+        self, cfg: Config, tmp_path: Path
+    ) -> None:
+        """--raw without raw_child raises StatsError naming the sheet."""
+        report_cfg = _report_cfg(cfg, tmp_path)
+        with pytest.raises(StatsError, match="raw_child"):
+            stats.run(report_cfg, raw=True)
 
     def test_run_raises_when_created_column_missing(
         self, cfg: Config, tmp_path: Path

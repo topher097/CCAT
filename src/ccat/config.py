@@ -168,7 +168,8 @@ class InfoSheetSpec(BaseModel):
 
     Attributes:
         template_file: Path to the py3o LibreOffice ``.ott`` template.
-        output_dir: Directory receiving one ``<angel_id>.pdf`` per child.
+        output_dir: Directory receiving one ``AT<season>_<angel_id>.pdf``
+            per sponsored child.
         soffice_binary: LibreOffice binary used for the ODT -> PDF
             conversion.
         mappings: py3o template variable (dotted, e.g.

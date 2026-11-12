@@ -7,10 +7,10 @@ modules runnable independently, each taking an optional ``--config`` path
     ccat acquire  [--config PATH]
     ccat screen   [--config PATH] [--redo ZITE_RECORD_ID] [--test]
                   [--overwrite]
-    ccat audit    [--config PATH] [--test] [--overwrite]
-    ccat match    [--config PATH] [--test] [--overwrite]
+    ccat audit    [--config PATH] [--test] [--overwrite] [--restart]
+    ccat match    [--config PATH] [--test] [--overwrite] [--skip-match]
     ccat generate [--config PATH] [--test] [--overwrite]
-    ccat stats    [--config PATH]
+    ccat stats    [--config PATH] [--raw]
 
 The ``--test`` flag (screen/audit/match/generate) stops the run after the
 first full family (screening: only the first family's children are
@@ -25,9 +25,21 @@ matchmaking ignores the ``audited`` column and replaces its outputs in
 place instead of archiving; info sheet generation re-renders every PDF
 regardless of the ``generated_info_sheet`` column.
 
+The audit tool's ``--restart`` flag stops any currently running audit
+tool process (e.g. a stale server still holding the port) before
+starting.
+
+``ccat match --skip-match`` skips the automatic assignment algorithm
+and only reconciles ``final_family`` with the current ``raw_family``
+(previously assigned sponsors carry over; new families get rows with
+no sponsor) so downstream modules see every current family.
+
 ``ccat stats`` renders a dated statistics report (daily admissions per
 pickup site, per-location table, gender/age distributions) as HTML and
-PDF into ``report.output_dir`` (default ``output/reports``).
+PDF into ``report.output_dir`` (default ``output/reports``).  With
+``--raw`` it reads ``raw_child``/``raw_family`` instead of the final
+sheets, so the report works before audit/match has run; sponsor counts
+are zero in that mode (``raw_family`` has no ``assigned_sponsor_id``).
 """
 
 import importlib
@@ -130,6 +142,7 @@ def _audit_cmd(
     config: str = DEFAULT_CONFIG,
     test: bool = False,
     overwrite: bool = False,
+    restart: bool = False,
 ) -> None:
     """Run module 3: local human audit web tool (§7).
 
@@ -138,9 +151,16 @@ def _audit_cmd(
         test: Stop after the first full family is audited.
         overwrite: Ignore the audited column: audited children re-enter
             the queue and frozen rows may be re-saved.
+        restart: Stop any currently running audit tool process before
+            starting.
     """
     _dispatch(
-        "audit", "audit.server:run", config, test=test, overwrite=overwrite
+        "audit",
+        "audit.server:run",
+        config,
+        test=test,
+        overwrite=overwrite,
+        restart=restart,
     )
 
 
@@ -148,6 +168,7 @@ def _match_cmd(
     config: str = DEFAULT_CONFIG,
     test: bool = False,
     overwrite: bool = False,
+    skip_match: bool = False,
 ) -> None:
     """Run module 4: matchmaking (§8).
 
@@ -157,8 +178,19 @@ def _match_cmd(
         overwrite: Ignore the audited column and replace previous
             final_family/final_sponsor/match_report in place instead of
             archiving them.
+        skip_match: Reconcile final_family with the current raw_family
+            without running the matching algorithm: every family gets a
+            row, existing sponsor assignments carry over, new families
+            get none.  final_sponsor and match_report are untouched.
     """
-    _dispatch("match", "match:run", config, test=test, overwrite=overwrite)
+    _dispatch(
+        "match",
+        "match:run",
+        config,
+        test=test,
+        overwrite=overwrite,
+        skip_match=skip_match,
+    )
 
 
 def _generate_cmd(
@@ -183,13 +215,15 @@ def _generate_cmd(
     )
 
 
-def _stats_cmd(config: str = DEFAULT_CONFIG) -> None:
+def _stats_cmd(config: str = DEFAULT_CONFIG, raw: bool = False) -> None:
     """Run module 6: statistics report generation.
 
     Args:
         config: Path to the JSON configuration file.
+        raw: Build the report from the raw sheets instead of the final
+            sheets.
     """
-    _dispatch("stats", "stats:run", config)
+    _dispatch("stats", "stats:run", config, raw=raw)
 
 
 def main() -> None:

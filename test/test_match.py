@@ -666,3 +666,128 @@ def test_run_test_mode_follows_phase_order(cfg: Config) -> None:
     assert final_family is not None
     # special-needs sponsor 2 is first in phase order despite higher id
     assert final_family["assigned_sponsor_id"].to_list() == [2, None]
+
+
+FINAL_FAMILY_SCHEMA = {
+    "family_id": pl.Int64,
+    "primary_email": pl.String,
+    "gift_pickup_location": pl.String,
+    "assigned_sponsor_id": pl.Int64,
+    "assigned_angel_ids": pl.String,
+    "num_angels_in_family": pl.Int64,
+}
+
+
+def test_run_skip_match_reconciles_without_matching(cfg: Config) -> None:
+    """--skip-match syncs final_family, keeping old assignments."""
+    sponsors = [sponsor_row(1, num_children=2)]
+    # Raw now has families 1 and 3; the old final_family snapshot had
+    # 1 (matched to sponsor 1) and 2 (since removed from raw).
+    families = [family_row(1), family_row(3)]
+    children = [
+        child_row("1A", 1, 8),
+        child_row("3A", 3, 5),
+        child_row("3B", 3, 6),
+    ]
+    _seed_match_workbook(cfg, sponsors, families, children)
+    write_sheets(
+        cfg.excel_file,
+        "match",
+        {
+            "final_family": pl.DataFrame(
+                [
+                    {
+                        **family_row(1),
+                        "assigned_sponsor_id": 1,
+                        "assigned_angel_ids": "1A",
+                        "num_angels_in_family": 1,
+                    },
+                    {
+                        **family_row(2),
+                        "assigned_sponsor_id": None,
+                        "assigned_angel_ids": None,
+                        "num_angels_in_family": 0,
+                    },
+                ],
+                schema=FINAL_FAMILY_SCHEMA,
+            ),
+            "match_report": pl.DataFrame(
+                [{"kind": "family", "ref": "2", "reason": "unmatched"}],
+                schema={
+                    "kind": pl.String,
+                    "ref": pl.String,
+                    "reason": pl.String,
+                },
+            ),
+        },
+    )
+
+    run(cfg, skip_match=True)
+
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    rows = {row["family_id"]: row for row in final_family.to_dicts()}
+    # Every current raw family has a row; stale family 2 is dropped.
+    assert sorted(rows) == [1, 3]
+    # Existing assignments carry over untouched.
+    assert rows[1]["assigned_sponsor_id"] == 1
+    assert rows[1]["assigned_angel_ids"] == "1A"
+    # New family 3 has no sponsor; angel counts refresh from final_child.
+    assert rows[3]["assigned_sponsor_id"] is None
+    assert rows[3]["num_angels_in_family"] == 2
+    # final_sponsor and match_report are untouched.
+    report = read_sheet(cfg.excel_file, "match_report")
+    assert report is not None
+    assert report.to_dicts() == [
+        {"kind": "family", "ref": "2", "reason": "unmatched"}
+    ]
+
+
+def test_run_skip_match_without_previous_final_family(cfg: Config) -> None:
+    """--skip-match on a fresh workbook writes all-null assignments."""
+    _seed_match_workbook(
+        cfg,
+        [sponsor_row(1, num_children=1)],
+        [family_row(1)],
+        [child_row("1A", 1, 8)],
+    )
+    run(cfg, skip_match=True)
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    assert final_family.height == 1
+    assert final_family["assigned_sponsor_id"].to_list() == [None]
+    assert final_family["num_angels_in_family"].to_list() == [1]
+
+
+def test_run_skip_match_warns_on_vanished_sponsor(cfg: Config, caplog) -> None:
+    """An assignment referencing a removed sponsor logs a warning."""
+    _seed_match_workbook(
+        cfg,
+        [],  # sponsor gone from raw_sponsor
+        [family_row(1)],
+        [child_row("1A", 1, 8)],
+    )
+    write_sheets(
+        cfg.excel_file,
+        "match",
+        {
+            "final_family": pl.DataFrame(
+                [
+                    {
+                        **family_row(1),
+                        "assigned_sponsor_id": 9,
+                        "assigned_angel_ids": "1A",
+                        "num_angels_in_family": 1,
+                    }
+                ],
+                schema=FINAL_FAMILY_SCHEMA,
+            )
+        },
+    )
+    with caplog.at_level("WARNING"):
+        run(cfg, skip_match=True)
+    assert "no longer in raw_sponsor" in caplog.text
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    # Kept for the human to sort out, not silently dropped.
+    assert final_family["assigned_sponsor_id"].to_list() == [9]

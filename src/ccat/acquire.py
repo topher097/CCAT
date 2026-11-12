@@ -558,8 +558,10 @@ def sibling_dob_conflicts(
 
     Every unordered pair of children sharing a ``family_id`` whose birth
     dates are at most ``cfg.acquire.sibling_dob_max_gap_days`` days
-    apart (twins included) is recorded for human review.  Children
-    without a ``family_id`` (orphans) or without a ``dob`` are skipped.
+    apart (twins included) is recorded for human review -- each pair is
+    compared and logged exactly once (``child_a`` is the earlier birth,
+    so no swapped duplicate rows are ever written).  Children without a
+    ``family_id`` (orphans) or without a ``dob`` are skipped.
 
     Args:
         rows: Cleaned, validated child rows with ``family_id`` and
@@ -568,8 +570,7 @@ def sibling_dob_conflicts(
 
     Returns:
         One log row per conflicting pair, ordered deterministically
-        (family, then birth date, then record id); ``child_a`` is always
-        the earlier birth.
+        (family, then birth date, then record id).
     """
     max_gap_days = cfg.acquire.sibling_dob_max_gap_days
     by_family: dict[Any, list[dict[str, Any]]] = {}
@@ -577,6 +578,7 @@ def sibling_dob_conflicts(
         if row.get("family_id") is None or row.get("dob") is None:
             continue
         by_family.setdefault(row["family_id"], []).append(row)
+    seen: set[frozenset[Any]] = set()
     log_rows: list[dict[str, Any]] = []
     for family_id in sorted(by_family, key=lambda value: str(value)):
         ordered = sorted(
@@ -585,11 +587,26 @@ def sibling_dob_conflicts(
         )
         for index, child_a in enumerate(ordered):
             for child_b in ordered[index + 1 :]:
+                if child_a.get("zite_record_id") == child_b.get(
+                    "zite_record_id"
+                ):
+                    continue  # duplicated submission, not two children
                 dob_a = date.fromisoformat(str(child_a["dob"]))
                 dob_b = date.fromisoformat(str(child_b["dob"]))
                 gap_days = abs((dob_b - dob_a).days)
                 if gap_days > max_gap_days:
                     continue
+                # Unordered-pair key: a duplicate submission (the same
+                # pair reaching the loop twice) never logs twice.
+                pair = frozenset(
+                    (
+                        child_a.get("zite_record_id"),
+                        child_b.get("zite_record_id"),
+                    )
+                )
+                if pair in seen:
+                    continue
+                seen.add(pair)
                 log_rows.append(
                     {
                         "family_id": family_id,

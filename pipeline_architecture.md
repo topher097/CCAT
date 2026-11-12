@@ -265,7 +265,7 @@ Structure:
       "sponsor.email": "sponsor_email",
       "sponsor.phone": "sponsor_phone",
       "sponsor.sponsor_id": "assigned_sponsor_id",
-      "sponsor.angel_id": "sponsor_assigned_angel_ids",
+      "sponsor.angel_id": "angel_id",
       "sponsor.family_size": "sponsor_family_size"
     }
   },

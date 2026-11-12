@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CCAT Angel Tree — Child Audit</title>
 <style>
-  :root { --warn: #b45309; --ok: #047857; --err: #b91c1c; }
+  :root { --warn: #b45309; --ok: #047857; --err: #b91c1c;
+          --absent: #e2e8f0; --absent-text: #94a3b8; --diff: #fef9c3; }
   * { box-sizing: border-box; }
   body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; background: #f8fafc; }
   header { display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; margin-bottom: .75rem; }
@@ -16,13 +17,27 @@
   .banner.error { background: #fee2e2; color: var(--err); border: 1px solid #fca5a5; display: block; }
   .banner.saved { background: #d1fae5; color: var(--ok); border: 1px solid #6ee7b7; display: block; }
   .checkbox-row { margin-bottom: .75rem; }
-  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  th, td { padding: .3rem .45rem; vertical-align: top; text-align: left;
+           border-bottom: 1px solid #e2e8f0; overflow-wrap: break-word; }
+  th { background: #f1f5f9; position: sticky; top: 0; font-weight: 600; }
+  .tbl-wrap { max-height: 65vh; overflow: auto; border-radius: .375rem;
+              background: #fff; border: 1px solid #cbd5e1; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0;
+          font-size: .8rem; table-layout: fixed; }
+  td.field, th.field { width: 11rem; color: #475569; font-family: ui-monospace, monospace; }
+  td.raw, th.raw { border-right: 2px solid #94a3b8; }
+  td.raw { color: #0f172a; white-space: pre-wrap; }
+  td.absent { background: var(--absent); color: var(--absent-text); text-align: center; }
+  td.diff { background: var(--diff); }
+  td.adj { padding: .15rem .25rem; }
+  td.adj input, td.adj textarea { width: 100%; font: inherit; color: #0f172a;
+           border: 1px solid transparent; border-radius: .25rem;
+           padding: .15rem .3rem; background: transparent; resize: vertical; }
+  td.adj input:hover, td.adj textarea:hover { border-color: #cbd5e1; }
+  td.adj input:focus, td.adj textarea:focus { border-color: #1d4ed8; background: #fff; outline: none; }
+  td.adj input[readonly], td.adj textarea[readonly] { color: #64748b; background: transparent; }
+  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start; }
   .columns h2 { font-size: .9rem; margin: 0 0 .25rem; color: #334155; }
-  pre { margin: 0; padding: .5rem; background: #0f172a; color: #e2e8f0; border-radius: .375rem;
-        overflow: auto; max-height: 55vh; font-size: .8rem; white-space: pre-wrap; }
-  textarea { width: 100%; min-height: 55vh; padding: .5rem; font: .8rem/1.4 monospace;
-             border: 1px solid #cbd5e1; border-radius: .375rem; }
-  .k { color: #7dd3fc; } .s { color: #fbbf24; } .n { color: #a5b4fc; } .b { color: #f472b6; }
   .controls { margin-top: .75rem; display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
   button { padding: .45rem .9rem; border-radius: .375rem; border: 1px solid #94a3b8;
            background: #fff; cursor: pointer; font-size: .9rem; }
@@ -32,7 +47,7 @@
   label { font-size: .85rem; color: #334155; }
   #clarify { width: 100%; margin-top: .75rem; padding: .5rem; font: .85rem/1.4 system-ui;
              border: 1px solid #cbd5e1; border-radius: .375rem; min-height: 2.4rem; }
-  @media (max-width: 800px) { .columns { grid-template-columns: 1fr; } textarea { min-height: 30vh; } }
+  @media (max-width: 800px) { .columns { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -46,14 +61,16 @@
   <label><input type="checkbox" id="special_needs"> Child is special needs</label>
 </div>
 
-<div class="columns">
-  <div>
-    <h2>Raw child data (read-only)</h2>
-    <pre id="raw">—</pre>
-  </div>
-  <div>
-    <h2>Adjudicated child data (editable JSON; age_at_xmas is read-only)</h2>
-    <textarea id="adj" spellcheck="false"></textarea>
+<p style="font-size:.85rem;color:#334155;margin:.25rem 0">
+  Left: raw child data (read-only) &middot; Right: adjudicated data (editable).
+  Grey cells have no counterpart on that side; yellow = adjudicated value differs
+  from raw.
+</p>
+
+<div class="tbl-wrap">
+  <div class="columns">
+    <table id="tbl"><tbody id="tbody"></tbody></table>
+    <table id="tbl2"><tbody id="tbody2"></tbody></table>
   </div>
 </div>
 
@@ -75,14 +92,10 @@ const ADJ_FIELDS = ["dob","need_1","need_2","desire_1","desire_2",
   "favorite_colors","other_notes","potential_anomoly"];
 // Shown but never sent back: computed by acquire, not editable (§5.5).
 const ADJ_READ_ONLY = ["age_at_xmas"];
-// Display order: read-only fields beside the field they annotate.
-const ADJ_QUEUE_FIELDS = (() => {
-  const fields = ADJ_FIELDS.slice();
-  for (const field of ADJ_READ_ONLY.slice().reverse()) {
-    fields.splice(fields.indexOf("dob") + 1, 0, field);
-  }
-  return fields;
-})();
+const ADJ_ALL = ADJ_FIELDS.concat(ADJ_READ_ONLY);
+// Free-text fields get a multi-line editor.
+const MULTILINE = new Set(["interests","other_notes","potential_anomoly",
+  "favorite_colors"]);
 const ORPHAN_NOTE = "No matching family registration for this child's primary email";
 
 let queue = [];
@@ -90,35 +103,114 @@ let pos = 0;
 
 const $ = (id) => document.getElementById(id);
 
-function highlight(json) {
-  const esc = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return esc.replace(
-    /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false)\b|\b(-?\d+\.?\d*)\b/g,
-    (m, str, colon, bool, num) => {
-      if (str) return colon ? `<span class="k">${str}</span>${colon}` : `<span class="s">${str}</span>`;
-      if (bool) return `<span class="b">${bool}</span>`;
-      return `<span class="n">${num}</span>`;
-    });
+// Keep both tables' rows the same height so raw and adjudicated rows
+// stay aligned even when text wraps to a different number of lines.
+function syncRowHeights() {
+  const left = $("tbody").rows, right = $("tbody2").rows;
+  for (let index = 0; index < Math.min(left.length, right.length); index++) {
+    const height = `${Math.max(left[index].offsetHeight, right[index].offsetHeight)}px`;
+    left[index].style.height = height;
+    right[index].style.height = height;
+  }
 }
 
+// Row order: every raw_child column in sheet order, then adj-only fields.
+function fieldOrder(item) {
+  const fields = Object.keys(item.raw);
+  for (const field of ADJ_ALL) if (!fields.includes(field)) fields.push(field);
+  return fields;
+}
+
+let tablesBuilt = false;
+
+// Build both tables on the first real child; only values change later.
+function buildTables(item) {
+  if (tablesBuilt) return;
+  tablesBuilt = true;
+  const rawKeys = new Set(Object.keys(item.raw));
+  let rows1 = "", rows2 = "";
+  for (const field of fieldOrder(item)) {
+    if (rawKeys.has(field)) {
+      rows1 += `<tr><td class='field'>${field}</td><td class='raw' id='raw_${field}'></td></tr>`;
+    } else {
+      // adj-only field: no raw counterpart exists (raw cell is greyed out).
+      rows1 += `<tr><td class='field'>${field}</td><td class='raw absent'>&mdash;</td></tr>`;
+    }
+    if (rawKeys.has(field) && !ADJ_ALL.includes(field)) {
+      // raw-only field: the adjudicated sheet has no such column.
+      rows2 += `<tr><td class='field'>${field}</td><td class='absent'>&mdash;</td></tr>`;
+    } else {
+      const editable = ADJ_FIELDS.includes(field);
+      const editor = MULTILINE.has(field)
+        ? `<textarea id='adj_${field}' rows='1'></textarea>`
+        : `<input id='adj_${field}' type='text'>`;
+      rows2 += `<tr><td class='field'>${field}</td>` +
+        `<td class='adj'>${editor}</td></tr>`;
+    }
+  }
+  $("tbody").innerHTML =
+    "<tr><th class='field'>Field</th><th class='raw'>Raw value</th></tr>" + rows1;
+  $("tbody2").innerHTML =
+    "<tr><th class='field'>Field</th><th>Adjudicated value</th></tr>" + rows2;
+  document.querySelectorAll("td.adj input, td.adj textarea").forEach((box) => {
+    box.addEventListener("input", () => {
+      const field = box.id.slice(4);  // strip the "adj_" prefix
+      const rawCell = $(`raw_${field}`);
+      const rawText = rawCell ? rawCell.textContent : "";
+      // Live highlight: any user edit that leaves the raw value.
+      box.closest("td").classList.toggle(
+        "diff", box.value !== "" && box.value !== rawText
+      );
+      if (box.tagName === "TEXTAREA") {
+        box.style.height = "auto";
+        box.style.height = `${box.scrollHeight}px`;
+      }
+      syncRowHeights();
+    });
+  });
+  syncRowHeights();
+}
+
+// Pre-fill: final_child edits merged over adj_child merged over the
+// raw values (§7.2).  A previously saved row (audited = false) must
+// reload exactly what the auditor last saw; read-only fields are shown
+// for context but stripped before save.
 function mergedAdj(item) {
-  // Pre-fill: adj_child values merged over the raw values (§7.2).
-  // Read-only fields are shown for context but stripped before save.
   const out = {};
-  for (const field of ADJ_QUEUE_FIELDS) {
-    const a = item.adj && item.adj[field] !== null && item.adj[field] !== undefined
-      ? item.adj[field] : item.raw[field];
-    out[field] = a === undefined ? null : a;
+  for (const field of ADJ_ALL) {
+    let value;
+    if (item.final && item.final[field] !== null
+        && item.final[field] !== undefined) {
+      value = item.final[field];
+    } else if (item.adj && item.adj[field] !== null
+        && item.adj[field] !== undefined) {
+      value = item.adj[field];
+    } else {
+      value = item.raw[field];
+    }
+    out[field] = value === undefined ? null : value;
   }
   return out;
 }
 
 function render() {
   const item = queue[pos];
-  if (!item) { $("raw").textContent = "queue is empty — all children audited"; $("adj").value = ""; return; }
+  if (!item) {
+    // Message row only; the tables are rebuilt on the next child so the
+    // empty state never leaves stale editors behind.
+    $("tbody").innerHTML = "<tr><td>queue is empty — all children audited</td></tr>";
+    $("tbody2").innerHTML = "<tr><td></td></tr>";
+    tablesBuilt = false;
+    return;
+  }
+  buildTables(item);
   $("queueinfo").textContent =
     `child ${pos + 1} of ${queue.length} in queue` +
     (item.angel_id ? ` — angel ${item.angel_id}` : " — ORPHANED (no family)");
+  // Restore this child's saved audit-trail values: existing notes load
+  // (and clear when the child has none), special-needs checkbox too.
+  $("clarify").value = item.require_clarification ?? "";
+  $("special_needs").checked = item.special_needs === true;
   const banner = $("banner");
   if (item.angel_id === null || item.angel_id === undefined) {
     banner.className = "banner orphan";
@@ -130,14 +222,27 @@ function render() {
   } else {
     banner.className = "banner";
     banner.textContent = "";
-    if ($("clarify").value === ORPHAN_NOTE) $("clarify").value = "";
   }
-  $("raw").innerHTML = highlight(JSON.stringify(item.raw, null, 2));
-  $("adj").value = JSON.stringify(mergedAdj(item), null, 2);
-  $("special_needs").checked = false;
+  const adj = mergedAdj(item);
+  for (const field of fieldOrder(item)) {
+    const rawCell = $(`raw_${field}`);
+    if (rawCell) rawCell.textContent = item.raw[field] ?? "";
+    const adjCell = $(`adj_${field}`);
+    if (!adjCell) continue;  // raw-only field: greyed cell, no editor
+    const rawText = String(item.raw[field] ?? "");
+    const display = String(adj[field] ?? "");
+    adjCell.value = display;
+    adjCell.readOnly = !ADJ_FIELDS.includes(field);
+    // Yellow whenever the shown value differs from raw -- a screened
+    // correction, a previously saved edit, or a live user change.
+    adjCell.closest("td").classList.toggle(
+      "diff", display !== "" && display !== rawText
+    );
+  }
   $("audit").disabled = item.angel_id === null || item.angel_id === undefined;
   $("prev").disabled = pos === 0;
   $("next").disabled = pos >= queue.length - 1;
+  syncRowHeights();
 }
 
 async function refresh() {
@@ -150,19 +255,14 @@ async function refresh() {
 async function save(audited) {
   const item = queue[pos];
   if (!item) return;
-  let edited;
-  try {
-    edited = JSON.parse($("adj").value);
-    if (typeof edited !== "object" || edited === null || Array.isArray(edited)) throw new Error();
-  } catch {
-    const banner = $("banner");
-    banner.className = "banner error";
-    banner.textContent = "The adjudicated JSON does not parse; fix it before saving.";
-    return;
+  // Values come straight from the editors; empty means "no override"
+  // (the server keeps the raw value for null adj fields).
+  const body = {};
+  for (const field of ADJ_FIELDS) {
+    const value = $(`adj_${field}`).value;
+    body[field] = value === "" ? null : value;
   }
-  // Read-only fields are display-only; the server rejects them.
-  for (const field of ADJ_READ_ONLY) delete edited[field];
-  const body = Object.assign({}, edited, {
+  Object.assign(body, {
     special_needs: $("special_needs").checked,
     audited,
     require_clarification: $("clarify").value.trim() || null,
@@ -181,7 +281,11 @@ async function save(audited) {
   }
   await refresh();  // keep the current child on screen unless it left the queue
   if (!queue[pos] || queue[pos].zite_record_id !== item.zite_record_id) {
+    // The audited child left the queue: the next child took its slot.
     pos = Math.min(pos, Math.max(0, queue.length - 1));
+    render();
+  } else if (audited && pos < queue.length - 1) {
+    pos += 1;  // mark-audited advances to the next child
     render();
   }
   banner.className = "banner saved";
