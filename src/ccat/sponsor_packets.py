@@ -42,6 +42,7 @@ from pypdf import PdfWriter
 
 from ccat.config import Config
 from ccat.io import read_sheet
+from ccat.match import canonical_location
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,13 @@ def _sponsors_with_angels(cfg: Config) -> list[dict[str, Any]]:
                 "dropoff": location_by_family.get(
                     angels_by_id[angel_id].get("family_id")
                 ),
+                "location": canonical_location(
+                    location_by_family.get(
+                        angels_by_id[angel_id].get("family_id")
+                    ),
+                    cfg.location_groups,
+                )
+                or "unknown",
             }
             for angel_id in angel_ids
             if angel_id in angels_by_id
@@ -172,23 +180,28 @@ def _sponsors_with_angels(cfg: Config) -> list[dict[str, Any]]:
             }
         )
     if not packets:
-        raise SponsorPacketError(
-            "no sponsor has assigned angels; run `ccat match` first"
-        )
+        logger.info("no sponsor has assigned angels; no packets to build")
+        return []
     return packets
 
 
-def _sheet_pdf(cfg: Config, angel_id: str) -> Path:
+def _sheet_pdf(cfg: Config, angel_id: str, location: str) -> Path:
     """Path of one angel's generated child information sheet PDF.
 
     Args:
         cfg: The pipeline configuration.
         angel_id: The angel's ID (names the file, §13).
+        location: The angel's canonical pickup-location bucket (the
+            sheets nest under it, §13.4).
 
     Returns:
         The PDF path under ``info_sheet.output_dir``.
     """
-    return Path(cfg.info_sheet.output_dir) / f"AT{cfg.season}_{angel_id}.pdf"
+    return (
+        Path(cfg.info_sheet.output_dir)
+        / location
+        / f"AT{cfg.season}_{angel_id}.pdf"
+    )
 
 
 def _merge_sheets_pdf(
@@ -213,7 +226,7 @@ def _merge_sheets_pdf(
     writer = PdfWriter()
     missing: list[str] = []
     for angel in angels:
-        sheet = _sheet_pdf(cfg, str(angel["angel_id"]))
+        sheet = _sheet_pdf(cfg, str(angel["angel_id"]), angel["location"])
         if sheet.is_file():
             writer.append(str(sheet), outline_item=f"Angel {angel['angel_id']}")
         else:
@@ -232,12 +245,63 @@ def _merge_sheets_pdf(
     return pdf_path, missing
 
 
-def run(cfg: Config, overwrite: bool = False) -> None:
+def validate_all_sheets_exist(cfg: Config) -> None:
+    """Require a generated info sheet PDF for every sponsored angel (§13b).
+
+    The sponsor packets combine the child information sheets, so the
+    packet phase must never run with sheets missing.
+
+    Args:
+        cfg: The pipeline configuration.
+
+    Raises:
+        SponsorPacketError: If any child whose family has an assigned
+            sponsor lacks its ``AT<season>_<angel_id>.pdf`` file.
+    """
+    children = read_sheet(cfg.excel_file, "final_child")
+    if children is None or children.is_empty():
+        return
+    family = read_sheet(cfg.excel_file, "final_family")
+    if family is None:
+        return
+    sponsored_family_ids = {
+        row.get("family_id")
+        for row in family.to_dicts()
+        if row.get("assigned_sponsor_id") is not None
+    }
+    location_by_family = {
+        row.get("family_id"): row.get("gift_pickup_location")
+        for row in family.to_dicts()
+    }
+    missing = [
+        str(row["angel_id"])
+        for row in children.to_dicts()
+        if row.get("family_id") in sponsored_family_ids
+        and row.get("angel_id")
+        and not _sheet_pdf(
+            cfg,
+            str(row["angel_id"]),
+            canonical_location(
+                location_by_family.get(row.get("family_id")),
+                cfg.location_groups,
+            )
+            or "unknown",
+        ).is_file()
+    ]
+    if missing:
+        raise SponsorPacketError(
+            "cannot build sponsor packets: child information sheet(s)"
+            f" missing for angel(s) {sorted(missing)}; run `ccat generate`"
+            " first"
+        )
+
+
+def build_packets(cfg: Config, overwrite: bool = False) -> None:
     """Build one sponsor packet directory per assigned sponsor (§13b).
 
-    Each packet directory holds the HTML email draft, the combined
+    Each packet directory holds the HTML email draft and the combined
     child-information PDF (all the sponsor's angel sheets, ordered by
-    family ID then angel letter), and a copy of the sponsor
+    family ID then angel letter), plus a copy of the sponsor
     instruction PDF.  Sponsors without assigned angels produce no
     directory.
 
@@ -248,8 +312,7 @@ def run(cfg: Config, overwrite: bool = False) -> None:
             are never lost.
 
     Raises:
-        SponsorPacketError: If the sheets are unusable, the template
-            is missing, or no sponsor has assigned angels.
+        SponsorPacketError: If the template is missing.
     """
     spec = cfg.sponsor_packets
     template_file = Path(spec.email_template_html_file)

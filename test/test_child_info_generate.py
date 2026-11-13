@@ -5,6 +5,7 @@ from typing import Any
 
 import polars as pl
 import pytest
+from pypdf import PdfWriter
 
 import ccat.child_info_generate as gen
 from ccat.child_info_generate import InfoSheetError
@@ -176,7 +177,7 @@ SPONSOR_SCHEMA: dict[str, Any] = {
 
 @pytest.fixture
 def gen_cfg(cfg: Config, tmp_path: Path) -> Config:
-    """Config pointing at a stub template and a temp output directory."""
+    """Config pointing at a stub template and temp output directories."""
     template = tmp_path / "template.ott"
     template.touch()
     spec = cfg.info_sheet.model_copy(
@@ -185,7 +186,25 @@ def gen_cfg(cfg: Config, tmp_path: Path) -> Config:
             "output_dir": str(tmp_path / "sheets"),
         }
     )
-    return cfg.model_copy(update={"info_sheet": spec})
+    packets = cfg.sponsor_packets.model_copy(
+        update={
+            "output_dir": str(tmp_path / "packets"),
+            "instructions_file": str(_instructions_pdf(tmp_path)),
+        }
+    )
+    return cfg.model_copy(
+        update={"info_sheet": spec, "sponsor_packets": packets}
+    )
+
+
+def _instructions_pdf(tmp_path: Path) -> Path:
+    """Write a minimal real instruction PDF for the packet phase."""
+    path = tmp_path / "instructions.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    with path.open("wb") as output:
+        writer.write(output)
+    return path
 
 
 @pytest.fixture
@@ -599,8 +618,12 @@ class TestRun:
             soffice_binary: str,
             profile: Path,
         ) -> Path:
+            # Real PDF bytes: the packet phase merges these files.
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
             pdf_path = out_dir / f"{odt_path.stem}.pdf"
-            pdf_path.write_bytes(b"%PDF-fake")
+            with pdf_path.open("wb") as output:
+                writer.write(output)
             return pdf_path
 
         monkeypatch.setattr(gen, "_render_one", fake_render)
@@ -620,9 +643,13 @@ class TestRun:
         names = sorted(name for name, _data in render_calls)
         assert names == [f"{stem}1A.odt", f"{stem}1B.odt"]
         pdfs = sorted(
-            p.name for p in Path(gen_cfg.info_sheet.output_dir).glob("*.pdf")
+            str(p.relative_to(gen_cfg.info_sheet.output_dir))
+            for p in Path(gen_cfg.info_sheet.output_dir).rglob("*.pdf")
         )
-        assert pdfs == [f"{stem}1A.pdf", f"{stem}1B.pdf"]
+        assert pdfs == [
+            f"hancock/{stem}1A.pdf",
+            f"hancock/{stem}1B.pdf",
+        ]
         frame = read_sheet(gen_cfg.excel_file, "final_child")
         assert frame is not None
         assert frame["generated_info_sheet"].to_list() == [True, True]
@@ -704,6 +731,7 @@ class TestRun:
         gen_cfg: Config,
         two_children: list[dict[str, Any]],
         render_calls: list[tuple[str, dict[str, Any]]],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Rows already flagged True are not re-rendered (§13.4)."""
         _seed(
@@ -712,6 +740,16 @@ class TestRun:
             _family(),
             with_flag=True,
             flags=[True, False],
+        )
+        # Focus is the flag filter; stub out the packet phase (its
+        # sheets come from earlier runs in real pipelines).
+        monkeypatch.setattr(
+            gen.sponsor_packets,
+            "validate_all_sheets_exist",
+            lambda cfg: None,
+        )
+        monkeypatch.setattr(
+            gen.sponsor_packets, "build_packets", lambda cfg, overwrite: None
         )
         gen.run(gen_cfg)
         assert [name for name, _data in render_calls] == [
@@ -805,9 +843,10 @@ class TestRun:
             f"AT{gen_cfg.season}_2A.odt"
         ]
         pdfs = sorted(
-            p.name for p in Path(gen_cfg.info_sheet.output_dir).glob("*.pdf")
+            str(p.relative_to(gen_cfg.info_sheet.output_dir))
+            for p in Path(gen_cfg.info_sheet.output_dir).rglob("*.pdf")
         )
-        assert pdfs == [f"AT{gen_cfg.season}_2A.pdf"]
+        assert pdfs == [f"calumet/AT{gen_cfg.season}_2A.pdf"]
 
     def test_failure_keeps_flag_and_raises(
         self,
@@ -829,8 +868,11 @@ class TestRun:
             soffice_binary: str,
             profile: Path,
         ) -> Path:
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
             pdf_path = out_dir / f"{odt_path.stem}.pdf"
-            pdf_path.write_bytes(b"%PDF-fake")
+            with pdf_path.open("wb") as output:
+                writer.write(output)
             return pdf_path
 
         monkeypatch.setattr(gen, "_render_one", failing_render)
@@ -863,6 +905,15 @@ class TestRun:
             _family(),
             with_flag=True,
             flags=[True, True],
+        )
+        # Focus is the workbook untouched; stub out the packet phase.
+        monkeypatch.setattr(
+            gen.sponsor_packets,
+            "validate_all_sheets_exist",
+            lambda cfg: None,
+        )
+        monkeypatch.setattr(
+            gen.sponsor_packets, "build_packets", lambda cfg, overwrite: None
         )
         gen.run(gen_cfg)
         assert calls == []

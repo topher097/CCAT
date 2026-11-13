@@ -40,8 +40,10 @@ from typing import Any
 import polars as pl
 from py3o.template import Template
 
+from ccat import sponsor_packets
 from ccat.config import Config
 from ccat.io import read_sheet, write_sheets
+from ccat.match import canonical_location
 
 logger = logging.getLogger(__name__)
 
@@ -459,24 +461,31 @@ def _sheet_stem(cfg: Config, angel_id: str) -> str:
 
 
 def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
-    """Generate child info sheet PDFs for all pending children (§13).
+    """Generate child info sheet PDFs, then sponsor packets (§13, §13b).
 
-    Pending rows are children whose family has an **assigned sponsor**
-    and whose ``generated_info_sheet`` flag is False (all sponsored
-    rows when ``overwrite`` is set) -- unsponsored children get no
-    sheet.  Each pending row is
+    Sheet phase: pending rows are children whose family has an
+    **assigned sponsor** and whose ``generated_info_sheet`` flag is
+    False (all sponsored rows when ``overwrite`` is set) --
+    unsponsored children get no sheet.  Each pending row is
     rendered with py3o and converted to ``AT<season>_<angel_id>.pdf``
     in ``info_sheet.output_dir``; successfully generated rows flip
     their flag to ``True`` in one atomic sheet write at the end, so an
     interrupted run never leaves a half-updated workbook and failed
     rows are simply picked up again on the next run.
 
+    Packet phase: after every sponsored angel's sheet exists, one
+    sponsor packet directory per assigned sponsor is built under
+    ``sponsor_packets.output_dir`` (email draft + combined child
+    information PDF + instruction file copy, §13b).  ``--test`` stops
+    after the first sheet and skips packets.
+
     Args:
         cfg: The pipeline configuration.
-        test: Stop after the first successfully generated sheet.
+        test: Stop after the first successfully generated sheet (no
+            packets).
         overwrite: Ignore the ``generated_info_sheet`` column: every
             sponsored child's PDF is regenerated (existing files are
-            overwritten).
+            overwritten) and the packets are rebuilt.
     """
     spec = cfg.info_sheet
     template_file = Path(spec.template_file)
@@ -490,44 +499,73 @@ def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     base, enriched, schema_added = _load_enriched_rows(cfg)
     pending, _skipped = _pending_rows(enriched, overwrite=overwrite)
-    if pending.is_empty():
-        logger.info("no children pending an info sheet")
-        if schema_added:
-            write_sheets(cfg.excel_file, "generate", {"final_child": base})
-        return
-    known_sources = set(enriched.columns)
-    unknown_sources = sorted(set(spec.mappings.values()) - known_sources)
-    for column in unknown_sources:
-        logger.warning("mapping source not found in enriched row: %s", column)
     generated: list[Any] = []
     failed: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="ccat_info_sheets_") as tmp:
-        tmp_dir = Path(tmp)
-        profile = tmp_dir / "lo_profile"
-        profile.mkdir()
-        for row in pending.to_dicts():
-            stem = _sheet_stem(cfg, str(row["angel_id"]))
-            odt_path = tmp_dir / f"{stem}.odt"
-            try:
-                _render_one(
-                    template_file, _nested_data(row, spec.mappings), odt_path
+    if pending.is_empty():
+        logger.info("no children pending an info sheet")
+    else:
+        known_sources = set(enriched.columns)
+        unknown_sources = sorted(set(spec.mappings.values()) - known_sources)
+        for column in unknown_sources:
+            logger.warning(
+                "mapping source not found in enriched row: %s", column
+            )
+        with tempfile.TemporaryDirectory(prefix="ccat_info_sheets_") as tmp:
+            tmp_dir = Path(tmp)
+            profile = tmp_dir / "lo_profile"
+            profile.mkdir()
+            for row in pending.to_dicts():
+                stem = _sheet_stem(cfg, str(row["angel_id"]))
+                odt_path = tmp_dir / f"{stem}.odt"
+                # Sheets nest under the angel's canonical pickup
+                # location bucket (e.g. output/child_info_sheets/
+                # hancock/AT2026_1A.pdf); unmapped labels go to
+                # "unknown".
+                location = (
+                    canonical_location(
+                        row.get("gift_pickup_location"),
+                        cfg.location_groups,
+                    )
+                    or "unknown"
                 )
-                _convert_to_pdf(odt_path, out_dir, spec.soffice_binary, profile)
-            except Exception as error:  # noqa: BLE001 - per-row failures
-                failed.append(stem)
-                logger.error(
-                    "info sheet generation failed for %s: %s", stem, error
+                location_dir = out_dir / location
+                location_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    _render_one(
+                        template_file,
+                        _nested_data(row, spec.mappings),
+                        odt_path,
+                    )
+                    _convert_to_pdf(
+                        odt_path, location_dir, spec.soffice_binary, profile
+                    )
+                except Exception as error:  # noqa: BLE001 - per-row failures
+                    failed.append(stem)
+                    logger.error(
+                        "info sheet generation failed for %s: %s",
+                        stem,
+                        error,
+                    )
+                    continue
+                generated.append(row["zite_record_id"])
+                logger.info(
+                    "generated info sheet %s/%s.pdf", location_dir, stem
                 )
-                continue
-            generated.append(row["zite_record_id"])
-            logger.info("generated info sheet %s/%s.pdf", out_dir, stem)
-            if test:
-                logger.info("test mode: stopping after first info sheet")
-                break
+                if test:
+                    logger.info("test mode: stopping after first info sheet")
+                    break
     base = _record_flags(base, generated)
-    write_sheets(cfg.excel_file, "generate", {"final_child": base})
+    if schema_added or generated:
+        write_sheets(cfg.excel_file, "generate", {"final_child": base})
     logger.info(
         "generated %d info sheet(s); %d failed", len(generated), len(failed)
     )
     if failed:
         raise InfoSheetError(f"info sheet generation failed for: {failed}")
+    if test:
+        logger.info("test mode: skipping sponsor packet generation")
+        return
+    # The packets combine every sponsored angel's sheet, so all sheets
+    # must exist before the packet phase runs.
+    sponsor_packets.validate_all_sheets_exist(cfg)
+    sponsor_packets.build_packets(cfg, overwrite=overwrite)

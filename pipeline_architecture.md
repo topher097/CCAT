@@ -920,8 +920,11 @@ the `sponsor.*` section blank for hand-filling, as do unmapped
   sponsored row with `ccat generate --overwrite`, ignoring the flag column);
   unsponsored children are skipped (the sheet's purpose is the sponsor
   packet).  The output is
-  `output/child_info_sheets/AT<season>_<angel_id>.pdf` (existing files
-  are overwritten, so generation is idempotent).
+  `output/child_info_sheets/<location>/AT<season>_<angel_id>.pdf`, where
+  `<location>` is the angel's family pickup location reduced to its
+  canonical bucket via `config.location_groups` (`hancock`/`calumet`;
+  unmapped labels go to `unknown`) — existing files are overwritten, so
+  generation is idempotent.
 - Per-row failures are logged and skipped; after the loop the flags of
   successful rows flip to `TRUE` in one atomic sheet write, then a typed
   `InfoSheetError` reports any failed angel ids.  Reruns pick up exactly
@@ -957,7 +960,8 @@ non-empty), builds one packet directory:
   box above the body).
 - `Sponsor <sponsor_id> - Child Information <season>.pdf` — the
   sponsor's angel child information sheets combined into one PDF
-  (`output/child_info_sheets/AT<season>_<angel_id>.pdf`, module 5),
+  (`output/child_info_sheets/<location>/AT<season>_<angel_id>.pdf`,
+  module 5 — sheets nest under their canonical pickup location),
   ordered by family ID then angel letter (natural letter order:
   `1A < 1B < 1Z < 1AA`).  PDF outline bookmarks mark each angel.
 - a copy of the sponsor instruction file

@@ -13,7 +13,8 @@ from ccat.sponsor_packets import (
     SponsorPacketError,
     _angel_sort_key,
     _sponsors_with_angels,
-    run,
+    build_packets,
+    validate_all_sheets_exist,
 )
 from pypdf.generic import Destination
 
@@ -35,6 +36,7 @@ CHILD_SCHEMA: dict[str, Any] = {
 FAMILY_SCHEMA: dict[str, Any] = {
     "family_id": pl.Int64,
     "gift_pickup_location": pl.String,
+    "assigned_sponsor_id": pl.Int64,
 }
 
 
@@ -94,11 +96,15 @@ def _seed(
 ) -> None:
     """Write final_sponsor, final_child, and final_family sheets."""
     if families is None:
-        # Default: every seeded child's family at one site.
+        # Default: every seeded child's family at one site, assigned
+        # to the first sponsor.
         families = [
             {
                 "family_id": child["family_id"],
                 "gift_pickup_location": "Hancock",
+                "assigned_sponsor_id": (
+                    sponsors[0]["sponsor_id"] if sponsors else None
+                ),
             }
             for child in children
         ]
@@ -201,15 +207,14 @@ class TestSponsorsWithAngels:
         with pytest.raises(SponsorPacketError, match="final_sponsor"):
             _sponsors_with_angels(cfg)
 
-    def test_no_assigned_sponsors_raises(self, cfg: Config) -> None:
-        """A workbook where nobody is assigned raises a typed error."""
+    def test_no_assigned_sponsors_returns_empty(self, cfg: Config) -> None:
+        """A workbook where nobody is assigned yields no packets."""
         _seed(
             cfg,
             [sponsor_row(7, "Sam", "sam@x.com", None)],
             [child_row("2A", "Male", 7)],
         )
-        with pytest.raises(SponsorPacketError, match="no sponsor has"):
-            _sponsors_with_angels(cfg)
+        assert _sponsors_with_angels(cfg) == []
 
 
 class TestRun:
@@ -236,7 +241,7 @@ class TestRun:
             ],
         )
         email_cfg = _email_cfg(cfg, tmp_path)
-        run(email_cfg)
+        build_packets(email_cfg)
         packets = Path(email_cfg.sponsor_packets.output_dir)
         prefix = email_cfg.sponsor_packets.filename_prefix
         packet_dir = packets / "7"
@@ -285,13 +290,29 @@ class TestRun:
                 child_row("1B", "Male", 5, family_id=1),
                 child_row("2A", "Female", 12, family_id=2),
             ],
+            families=[
+                {
+                    "family_id": 1,
+                    "gift_pickup_location": "Hancock",
+                    "assigned_sponsor_id": 7,
+                },
+                {
+                    "family_id": 2,
+                    "gift_pickup_location": "Calumet",
+                    "assigned_sponsor_id": 7,
+                },
+            ],
         )
         email_cfg = _email_cfg(cfg, tmp_path)
         # Stand in for module 5's generated child information sheets.
         sheets_dir = Path(email_cfg.info_sheet.output_dir)
-        for angel_id in ("1A", "1B", "2A"):
-            _blank_pdf(sheets_dir / f"AT{cfg.season}_{angel_id}.pdf")
-        run(email_cfg)
+        for angel_id, location in (
+            ("1A", "hancock"),
+            ("1B", "hancock"),
+            ("2A", "calumet"),
+        ):
+            _blank_pdf(sheets_dir / location / f"AT{cfg.season}_{angel_id}.pdf")
+        build_packets(email_cfg)
         packet_pdf = (
             Path(email_cfg.sponsor_packets.output_dir)
             / "7"
@@ -313,7 +334,13 @@ class TestRun:
     def test_child_information_pdf_skips_missing_sheets(
         self, cfg: Config, tmp_path: Path
     ) -> None:
-        """Angels without a generated sheet contribute no pages."""
+        """Merging warns and skips when a sheet is absent.
+
+        Only reachable directly: ``build_packets`` validates first, so
+        a full run never reaches the merge with sheets missing.
+        """
+        from ccat.sponsor_packets import _merge_sheets_pdf
+
         _seed(
             cfg,
             [sponsor_row(7, "Sam", "sam@x.com", "1A,1B")],
@@ -324,20 +351,68 @@ class TestRun:
         )
         email_cfg = _email_cfg(cfg, tmp_path)
         sheets_dir = Path(email_cfg.info_sheet.output_dir)
-        _blank_pdf(sheets_dir / f"AT{cfg.season}_1B.pdf")  # 1A missing
-        run(email_cfg)
-        packet_pdf = (
-            Path(email_cfg.sponsor_packets.output_dir)
-            / "7"
-            / f"Sponsor 7 - Child Information {email_cfg.season}.pdf"
+        _blank_pdf(
+            sheets_dir / "hancock" / f"AT{cfg.season}_1B.pdf"
+        )  # 1A missing
+        packet_dir = Path(email_cfg.sponsor_packets.output_dir) / "7"
+        packet_dir.mkdir(parents=True)
+        pdf_path, missing = _merge_sheets_pdf(
+            email_cfg,
+            packet_dir,
+            7,
+            [
+                {"angel_id": "1A", "location": "hancock"},
+                {"angel_id": "1B", "location": "hancock"},
+            ],
         )
-        reader = PdfReader(str(packet_pdf))
+        assert missing == ["1A"]
+        reader = PdfReader(str(pdf_path))
         titles = [
             item.title
             for item in reader.outline
             if isinstance(item, Destination)
         ]
         assert titles == ["Angel 1B"]
+
+    def test_validate_raises_when_sheets_missing(
+        self, cfg: Config, tmp_path: Path
+    ) -> None:
+        """A sponsored angel without a sheet blocks the packet phase."""
+        _seed(
+            cfg,
+            [sponsor_row(7, "Sam", "sam@x.com", "1A,1B")],
+            [
+                child_row("1A", "Male", 8, family_id=1),
+                child_row("1B", "Male", 5, family_id=1),
+            ],
+        )
+        email_cfg = _email_cfg(cfg, tmp_path)
+        sheets_dir = Path(email_cfg.info_sheet.output_dir)
+        _blank_pdf(
+            sheets_dir / "hancock" / f"AT{cfg.season}_1B.pdf"
+        )  # 1A missing
+        with pytest.raises(SponsorPacketError, match=r"\['1A'\]"):
+            validate_all_sheets_exist(email_cfg)
+
+    def test_validate_passes_when_all_sheets_exist(
+        self, cfg: Config, tmp_path: Path
+    ) -> None:
+        """No error when every sponsored angel's sheet is present."""
+        _seed(
+            cfg,
+            [sponsor_row(7, "Sam", "sam@x.com", "1A,1B")],
+            [
+                child_row("1A", "Male", 8, family_id=1),
+                child_row("1B", "Male", 5, family_id=1),
+            ],
+        )
+        email_cfg = _email_cfg(cfg, tmp_path)
+        sheets_dir = Path(email_cfg.info_sheet.output_dir)
+        for angel_id in ("1A", "1B"):
+            _blank_pdf(
+                sheets_dir / "hancock" / f"AT{cfg.season}_{angel_id}.pdf"
+            )
+        validate_all_sheets_exist(email_cfg)  # no raise
 
     def test_bcc_emails_render_in_draft(
         self, cfg: Config, tmp_path: Path
@@ -353,7 +428,7 @@ class TestRun:
             update={"bcc_emails": ["bcc.program@example.org", "lead@ccat.org"]}
         )
         email_cfg = email_cfg.model_copy(update={"sponsor_packets": spec})
-        run(email_cfg)
+        build_packets(email_cfg)
         draft = (
             Path(email_cfg.sponsor_packets.output_dir)
             / "7"
@@ -376,15 +451,15 @@ class TestRun:
             [child_row("1A", "Male", 8)],
         )
         email_cfg = _email_cfg(cfg, tmp_path)
-        run(email_cfg)
+        build_packets(email_cfg)
         packet_dir = Path(email_cfg.sponsor_packets.output_dir) / "7"
         html = packet_dir / (
             f"{email_cfg.sponsor_packets.filename_prefix}_7.html"
         )
         html.write_text("manually edited", encoding="utf-8")
-        run(email_cfg)
+        build_packets(email_cfg)
         assert html.read_text(encoding="utf-8") == "manually edited"
-        run(email_cfg, overwrite=True)
+        build_packets(email_cfg, overwrite=True)
         assert "Dear Sam," in html.read_text(encoding="utf-8")
 
     def test_missing_template_raises(self, cfg: Config, tmp_path: Path) -> None:
@@ -395,10 +470,10 @@ class TestRun:
         )
         broken = email_cfg.model_copy(update={"sponsor_packets": spec})
         with pytest.raises(SponsorPacketError, match="template file not found"):
-            run(broken)
+            build_packets(broken)
 
     def test_missing_sheets_raise(self, cfg: Config, tmp_path: Path) -> None:
         """An empty workbook raises a typed error."""
         email_cfg = _email_cfg(cfg, tmp_path)
         with pytest.raises(SponsorPacketError, match="final_sponsor"):
-            run(email_cfg)
+            build_packets(email_cfg)
