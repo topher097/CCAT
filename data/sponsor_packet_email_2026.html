@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ subject }}</title>
+</head>
+<body style="font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a;
+             max-width: 40rem; margin: 1rem auto; padding: 0 1rem;">
+<p style="background: #f0f4f8; border: 1px solid #cbd5e1; border-radius: 6px;
+          padding: 0.5rem 0.75rem; font-family: sans-serif; font-size: 0.85rem;
+          color: #334155;">
+  <strong>Email subject:</strong> {{ subject }}<br>
+  <strong>To:</strong> {{ sponsor.email }}<br>
+  <strong>BCC:</strong> {{ bcc_emails | join(", ") if bcc_emails else
+  "—" }}<br>
+  <span style="color: #64748b;">Copy everything below this box into
+  your email client; put the sponsor in To, the program addresses in
+  BCC, and attach the two PDF files before sending.</span>
+</p>
+<hr style="border: none; border-top: 1px solid #cbd5e1;">
+
+<p style="font-size: 1.05rem;">Dear {{ sponsor.first_name }},</p>
+
+<p>Thank you for sponsoring children through the {{ season }} Christmas
+Angel Tree program! Attached you will find two PDF files:</p>
+<ul>
+  <li><strong>{{ instructions_filename }}</strong> — our sponsor
+      instructions, with drop-off details and important dates, and</li>
+  <li><strong>{{ child_information_filename }}</strong> — one
+      <strong>child information sheet</strong> per Angel, listing
+      their wish list and other information.</li>
+</ul>
+
+<p>Your assigned Angel{{ 's' if angel_count != 1 }}:</p>
+<table cellpadding="8" cellspacing="0"
+       style="border-collapse: collapse; font-size: 0.95rem;">
+  <tr>
+    <th style="border: 1px solid #9aa5b1; background: #e8edf2;
+               text-align: left;">Angel&nbsp;ID</th>
+    <th style="border: 1px solid #9aa5b1; background: #e8edf2;
+               text-align: left;">Gender</th>
+    <th style="border: 1px solid #9aa5b1; background: #e8edf2;
+               text-align: left;">Age</th>
+    <th style="border: 1px solid #9aa5b1; background: #e8edf2;
+               text-align: left;">Drop-off location</th>
+  </tr>
+  {% for angel in angels %}
+  <tr>
+    <td style="border: 1px solid #9aa5b1;"><strong>{{ angel.angel_id
+        }}</strong></td>
+    <td style="border: 1px solid #9aa5b1;">{{ angel.gender or "—"
+        }}</td>
+    <td style="border: 1px solid #9aa5b1;">{{ angel.age if angel.age is
+        not none else "—" }}</td>
+    <td style="border: 1px solid #9aa5b1;">{{ angel.dropoff or "—"
+        }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<p style="margin-top: 1rem;">Please bag or box the gifts with the
+Angel's ID, and bring the gifts to the drop-off location shown in the
+sponsor instructions by the deadline there. If you have any questions
+about your Angels, just reply to this email.</p>
+
+<p>With gratitude,<br>
+<strong>The Copper Country Angel Tree Team</strong></p>
+</body>
+</html>

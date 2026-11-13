@@ -41,13 +41,19 @@ configuration lives in one JSON file.
                   (4) Match  ----------> final_family / final_sponsor / match_report
                                         |
                                         v
-                  (5) Generate --------> output/child_info_sheets/<angel_id>.pdf
+                  (5) Generate --------> output/child_info_sheets/AT<season>_<angel_id>.pdf
+                                        |
+                                        v
+                  (5b) Sponsor packets > output/sponsor_packets/<sponsor_id>/
+                                         (email.html draft + combined packet PDF)
 ```
 
 - Modules run individually via CLI (`ccat acquire`, `ccat screen`, `ccat audit`,
-  `ccat match`, `ccat generate`), each taking an optional `--config` path
-  (default `config/ccat_2026.json`); screen/audit/match/generate accept
-  `--test` and `--overwrite` (§6.3, §7.2, §8.6, §13.4).
+  `ccat match`, `ccat generate`, `ccat sponsor_packets`, `ccat stats`), each
+  taking an optional `--config` path (default `config/ccat_2026.json`);
+  screen/audit/match/generate accept `--test` and `--overwrite` (§6.3, §7.2,
+  §8.6, §13.4); match also `--skip-match` (§8.7); audit also `--restart`
+  (§7.4); stats also `--raw` (§14); sponsor_packets `--overwrite` (§13b).
 - `final_*` sheets are ground truth: only their owning module writes them, all
   other modules treat them read-only (see §9 Ownership Matrix).
 
@@ -270,6 +276,18 @@ Structure:
     }
   },
 
+  // Sponsor packets (module 5b). One <sponsor_id>/ directory per
+  // assigned sponsor under output_dir, holding the rendered email
+  // draft HTML and the combined child information PDF (angel sheets
+  // only) plus a copy of the instructions PDF (instructions file first,
+  // then each angel's child information sheet).
+  "sponsor_packets": {
+    "email_template_html_file": "data/sponsor_packet_email_2026.html",
+    "instructions_file": "data/Sponsor Instruction 2026.pdf",
+    "output_dir": "./output/sponsor_packets",
+    "filename_prefix": "sponsor_packet"
+  },
+
   // Logging / reports. match_report is also exported as CSV for the
   // program coordinator.
   "log_file": "../IO/ccat_2026.log",
@@ -304,8 +322,8 @@ One workbook (`excel_file` from config). Sheets:
 |-----------------|-----------------------------------------------------------------|------------|
 | `raw_sponsor`   | Cleaned, deduplicated, ID-assigned sponsor rows                 | module 1   |
 | `raw_family`    | Cleaned, deduplicated (by primary email), ID-assigned families | module 1   |
-| `raw_child`     | Cleaned child rows with `age_at_xmas` and `angel_id`            | module 1   |
-| `dedup_log`     | One row per merged duplicate family record (§5.4)               | module 1   |
+| `raw_child`     | Cleaned, deduplicated (same family + name keeps latest) child rows with `age_at_xmas` and `angel_id` | module 1   |
+| `dedup_log`     | One row per merged duplicate family or child record (§5.4)      | module 1   |
 | `dob_conflict_log` | One row per same-family pair born <=9 months apart (§5.6)    | module 1   |
 | `adj_child`     | Screening results, one row per screened child (keyed by `zite_record_id`, sparse cells) | module 2   |
 | `final_child`   | Ground-truth audited child rows (plus `generated_info_sheet`, module 5) | modules 3, 5 |
@@ -390,6 +408,20 @@ The `family` table may contain multiple rows per `primary_email`:
   `zite_created_at` are excluded), and `kept_record`/`duplicate_record`
   (the full recorded contents of both rows as JSON). Rows without an
   email are never merged and never logged.
+
+### 5.4b Child dedup
+
+The `child` table may contain multiple submissions for the same child in
+the same family:
+
+- Group by (`primary_email`, `first_name`) on cleaned rows before
+  validation.
+- Keep the most recent submission (latest `created`, ties broken by
+  `zite_record_id`) as-is — no coalescing, unlike families.
+- Every dropped duplicate submission is recorded in the `dedup_log`
+  sheet exactly like the family rows, with `sheet` set to `"child"`.
+- Rows without an email or without a first name are never merged and
+  never logged.
 
 ### 5.5 Derived columns and IDs
 
@@ -767,6 +799,8 @@ src/ccat/
   screening.py         # module 2
   match.py             # module 4
   child_info_generate.py  # module 5
+  sponsor_packets.py   # module 5b: sponsor email draft + combined packet PDF
+  stats.py             # module 6
   audit/
     __init__.py
     server.py          # module 3: http.server + JSON API
@@ -779,6 +813,8 @@ test/
   test_audit.py         # queue filter, merge rules, orphan flagging, frozen-row 409
   test_match.py         # indivisibility, exact counts, phase order, scoring
   test_child_info_generate.py  # flag handling, enrichment, render/convert wiring
+  test_sponsor_packets.py  # per-sponsor email draft + combined packet PDF
+  test_stats.py         # report figures, tables, raw mode
 ```
 
 Style: ruff format/check, `ty` type checking, google docstrings, snake_case
@@ -790,7 +826,8 @@ Run via `just ready-py` for the venv.
 - All modules log to `config.log_file` (plain text, timestamped, level INFO;
   DEBUG for per-row detail). Failures raise typed exceptions
   (`ConfigError`, `AcquisitionError`, `ScreeningError`, `AuditError`,
-  `MatchError`, `InfoSheetError`) so the CLI can print actionable messages.
+  `MatchError`, `InfoSheetError`, `SponsorPacketError`, `StatsError`) so
+  the CLI can print actionable messages.
 - Zite/network errors surface from `zite.py` unchanged; acquire retries are
   already handled inside the Zite client (429 with backoff).
 - **Zite is strictly read-only**: the pipeline only ever pulls data from
@@ -878,9 +915,12 @@ the `sponsor.*` section blank for hand-filling, as do unmapped
 
 ### 13.4 Run semantics
 
-- Only rows with `generated_info_sheet == FALSE` are processed (every
-  row with `ccat generate --overwrite`, ignoring the flag column); the
-  output is `output/child_info_sheets/<angel_id>.pdf` (existing files
+- Only rows whose family has an **assigned sponsor** (`assigned_sponsor_id`
+  non-null) and whose `generated_info_sheet == FALSE` are processed (every
+  sponsored row with `ccat generate --overwrite`, ignoring the flag column);
+  unsponsored children are skipped (the sheet's purpose is the sponsor
+  packet).  The output is
+  `output/child_info_sheets/AT<season>_<angel_id>.pdf` (existing files
   are overwritten, so generation is idempotent).
 - Per-row failures are logged and skipped; after the loop the flags of
   successful rows flip to `TRUE` in one atomic sheet write, then a typed
@@ -895,6 +935,53 @@ the `sponsor.*` section blank for hand-filling, as do unmapped
   `family_size`, and the `sponsor_*` join/computed columns) are never
   written back to the workbook; `final_child` gains only
   `generated_info_sheet`.
+
+## 13b. Module 5b — Sponsor Packets
+
+Entry point: `src/ccat/sponsor_packets.py`, CLI
+`ccat sponsor_packets [--config PATH] [--overwrite]`.
+
+For every `final_sponsor` row with assigned angels (`assigned_angel_ids`
+non-empty), builds one packet directory:
+`output/sponsor_packets/<sponsor_id>/` containing:
+
+- `sponsor_packet_<sponsor_id>.html` — the email draft, rendered from
+  the Jinja2 template `sponsor_packets.email_template_html_file`
+  (default `data/sponsor_packet_email_2026.html`) with: a subject
+  line, a personalized greeting ("Dear {first_name},"), and a table
+  of the sponsor's assigned angels — angel ID, gender, age at
+  Christmas, and per-angel drop-off location (the angel's family
+  `gift_pickup_location`).  All styling is inline CSS so the draft
+  survives copy-paste into an email client (manual sending; the
+  subject, To (sponsor email), and BCC lines are shown in a header
+  box above the body).
+- `Sponsor <sponsor_id> - Child Information <season>.pdf` — the
+  sponsor's angel child information sheets combined into one PDF
+  (`output/child_info_sheets/AT<season>_<angel_id>.pdf`, module 5),
+  ordered by family ID then angel letter (natural letter order:
+  `1A < 1B < 1Z < 1AA`).  PDF outline bookmarks mark each angel.
+- a copy of the sponsor instruction file
+  (`sponsor_packets.instructions_file`, default `data/Sponsor
+  Instruction 2026.pdf`), copied as-is into the directory.
+
+The email draft names both PDF attachments (`instructions_filename`
+and `child_information_filename` template variables) so the body
+always matches the files in the directory.
+
+Run semantics:
+
+- Reruns skip sponsors whose packet files already exist;
+  `--overwrite` regenerates (manual email edits are lost only then).
+- Sponsors without assigned angels produce no directory; unknown angel
+  ids in `assigned_angel_ids` are dropped with a warning.
+- Angels whose child information sheet PDF has not been generated yet
+  contribute no pages (warning logged); the packet PDF is still
+  written.
+- Missing template file, missing `final_sponsor`/`final_child`, or a
+  workbook where no sponsor has assigned angels are typed errors
+  (`SponsorPacketError`, §11).
+- `final_sponsor`/`final_family`/`final_child` are read-only here;
+  the module writes only files under `sponsor_packets.output_dir`.
 
 
 ## Appendix A — Form Vocabularies

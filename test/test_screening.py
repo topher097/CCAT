@@ -24,6 +24,19 @@ from ccat.screening import (
 )
 
 
+@pytest.fixture(autouse=True)
+def fake_opencode_v2(monkeypatch) -> None:
+    """Assume opencode v2 is installed unless a test overrides it."""
+
+    class Result:
+        stdout = "2.0.0"
+        stderr = ""
+
+    monkeypatch.setattr(
+        screening.subprocess, "run", lambda *args, **kwargs: Result()
+    )
+
+
 def child(**overrides: Any) -> dict[str, Any]:
     """One raw_child row for screening tests."""
     base = {
@@ -376,6 +389,58 @@ def test_run_requires_raw_child(screen_cfg: Config) -> None:
     """Missing raw_child fails with an actionable error."""
     with pytest.raises(screening.ScreeningError, match="acquire"):
         run(screen_cfg)
+
+
+def test_run_requires_opencode_v2(cfg: Config, monkeypatch) -> None:
+    """Opencode < 2 is refused before any work happens (§6.2)."""
+    monkeypatch.setattr(screening, "_opencode_major_version", lambda: 1)
+    with pytest.raises(screening.ScreeningError, match="upgrade --major"):
+        screening._require_opencode_v2()
+
+
+def test_run_requires_opencode_installed(cfg: Config, monkeypatch) -> None:
+    """A missing/unparseable opencode CLI is refused (§6.2)."""
+    monkeypatch.setattr(screening, "_opencode_major_version", lambda: None)
+    with pytest.raises(screening.ScreeningError, match="install opencode"):
+        screening._require_opencode_v2()
+
+
+def test_opencode_major_version_parses_cli_output(monkeypatch) -> None:
+    """The helper parses both `opencode --version` output forms."""
+
+    def make_result(stdout: str) -> Any:
+        return SimpleNamespace(stdout=stdout, stderr="")
+
+    monkeypatch.setattr(
+        screening.subprocess,
+        "run",
+        lambda *args, **kwargs: make_result("2.0.21\n"),
+    )
+    assert screening._opencode_major_version() == 2
+    # Newer builds prefix the name and a "v".
+    monkeypatch.setattr(
+        screening.subprocess,
+        "run",
+        lambda *args, **kwargs: make_result("opencode v2.2.5\n"),
+    )
+    assert screening._opencode_major_version() == 2
+    # Garbage output yields None rather than raising.
+    monkeypatch.setattr(
+        screening.subprocess,
+        "run",
+        lambda *args, **kwargs: make_result("hello world"),
+    )
+    assert screening._opencode_major_version() is None
+
+
+def test_opencode_major_version_handles_missing_binary(monkeypatch) -> None:
+    """A missing opencode binary yields None, not an exception."""
+
+    def fake_run(*args: Any, **kwargs: Any) -> Any:
+        raise FileNotFoundError("opencode")
+
+    monkeypatch.setattr(screening.subprocess, "run", fake_run)
+    assert screening._opencode_major_version() is None
 
 
 def test_run_fails_on_todo_model(cfg: Config) -> None:

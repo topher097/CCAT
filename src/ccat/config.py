@@ -219,6 +219,35 @@ class ReportSpec(BaseModel):
     filename_prefix: str = "report"
 
 
+class SponsorPacketSpec(BaseModel):
+    """Sponsor packet settings (module 5b).
+
+    Attributes:
+        email_template_html_file: Path to the Jinja2 HTML email
+            template; rendered once per sponsor with assigned angels.
+        instructions_file: PDF copied as-is into each sponsor's packet
+            directory (the emailed sponsor instructions).
+        output_dir: Root directory receiving one
+            ``<sponsor_id>/`` packet directory per sponsor with
+            assigned angels, holding the email draft
+            (``<prefix>_<sponsor_id>.html``) and the combined PDF
+            (``Sponsor <sponsor_id> - Child Information <season>.pdf``).
+        filename_prefix: Prefix for the email draft filename inside
+            each sponsor directory (e.g.
+            ``sponsor_packet_<sponsor_id>.html``).
+        bcc_emails: Addresses copied into every draft's BCC line
+            (typically program coordinators).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    email_template_html_file: str = "data/sponsor_packet_email_2026.html"
+    instructions_file: str = "data/Sponsor Instruction 2026.pdf"
+    output_dir: str = "output/sponsor_packets"
+    filename_prefix: str = "sponsor_packet"
+    bcc_emails: list[str] = []
+
+
 class Config(BaseModel):
     """Root configuration model for one pipeline run."""
 
@@ -237,6 +266,7 @@ class Config(BaseModel):
     matchmaking: MatchmakingSpec
     info_sheet: InfoSheetSpec
     report: ReportSpec = ReportSpec()
+    sponsor_packets: SponsorPacketSpec = SponsorPacketSpec()
     log_file: str
     match_report_csv: str
 

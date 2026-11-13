@@ -10,6 +10,7 @@ modules runnable independently, each taking an optional ``--config`` path
     ccat audit    [--config PATH] [--test] [--overwrite] [--restart]
     ccat match    [--config PATH] [--test] [--overwrite] [--skip-match]
     ccat generate [--config PATH] [--test] [--overwrite]
+    ccat sponsor_packets [--config PATH] [--overwrite]
     ccat stats    [--config PATH] [--raw]
 
 The ``--test`` flag (screen/audit/match/generate) stops the run after the
@@ -33,6 +34,15 @@ starting.
 and only reconciles ``final_family`` with the current ``raw_family``
 (previously assigned sponsors carry over; new families get rows with
 no sponsor) so downstream modules see every current family.
+
+``ccat sponsor_packets`` builds one packet directory per sponsor with
+assigned angels under ``sponsor_packets.output_dir`` (default
+``output/sponsor_packets``): an HTML email draft (personalized
+greeting plus a table of angel IDs, genders, ages, and drop-off
+locations) and a combined PDF — the sponsor instruction file first,
+then each angel's child information sheet ordered by family ID and
+angel letter.  Open the HTML in a browser and copy it into your email
+client for manual sending.
 
 ``ccat stats`` renders a dated statistics report (daily admissions per
 pickup site, per-location table, gender/age distributions) as HTML and
@@ -62,6 +72,7 @@ def _typed_errors() -> tuple[type[BaseException], ...]:
     from ccat.child_info_generate import InfoSheetError
     from ccat.match import MatchError
     from ccat.screening import ScreeningError
+    from ccat.sponsor_packets import SponsorPacketError
     from ccat.stats import StatsError
 
     return (
@@ -71,6 +82,7 @@ def _typed_errors() -> tuple[type[BaseException], ...]:
         AuditError,
         MatchError,
         InfoSheetError,
+        SponsorPacketError,
         StatsError,
         SheetOwnershipError,
     )
@@ -226,6 +238,24 @@ def _stats_cmd(config: str = DEFAULT_CONFIG, raw: bool = False) -> None:
     _dispatch("stats", "stats:run", config, raw=raw)
 
 
+def _sponsor_packets_cmd(
+    config: str = DEFAULT_CONFIG, overwrite: bool = False
+) -> None:
+    """Build sponsor packet directories (module 5b).
+
+    Args:
+        config: Path to the JSON configuration file.
+        overwrite: Regenerate packet files that already exist; the
+            default skips them so manual edits survive.
+    """
+    _dispatch(
+        "sponsor_packets",
+        "sponsor_packets:run",
+        config,
+        overwrite=overwrite,
+    )
+
+
 def main() -> None:
     """Entry point for the ``ccat`` CLI."""
     fire.Fire(
@@ -235,6 +265,7 @@ def main() -> None:
             "audit": _audit_cmd,
             "match": _match_cmd,
             "generate": _generate_cmd,
+            "sponsor_packets": _sponsor_packets_cmd,
             "stats": _stats_cmd,
         }
     )

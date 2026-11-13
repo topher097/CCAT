@@ -1,7 +1,8 @@
 """Module 1 — data acquisition and validation (§5).
 
 Pulls the sponsor/family/child tables from Zite, validates and cleans them
-against the config schema, deduplicates families, assigns stable IDs
+    against the config schema, deduplicates families and children, assigns
+    stable IDs
 (``family_id``, ``sponsor_id``, ``angel_id``) and derived columns
 (``age_at_xmas``, ``pref_age_min``/``pref_age_max``), and persists the
 ``raw_*`` sheets plus the ``dedup_log`` sheet recording every merged
@@ -304,6 +305,8 @@ def process_table(
 
     Family rows are deduplicated (§5.4) on cleaned rows before validation so
     that coalescing can fill nulls a duplicate row would otherwise fail on.
+    Child rows are likewise deduplicated (§5.4) before validation, keeping
+    the most recent submission per (``primary_email``, ``first_name``).
 
     Args:
         frame: Raw records from ``zite.get_table_data``.
@@ -313,7 +316,8 @@ def process_table(
     Returns:
         A tuple of (kept rows, rejected-row records, dedup-log rows) where
         each rejected record has table, index, column, value, and reason
-        keys; the dedup log is empty except for the family table.
+        keys; the dedup log is empty except for the family and child
+        tables.
     """
     rows = import_table(frame, table_name, cfg)
     specs = cfg.tables[table_name].columns
@@ -352,6 +356,8 @@ def process_table(
             cleaned.append(out)
     if table_name == "family":
         cleaned, dedup_log = dedup_families(cleaned, cfg)
+    elif table_name == "child":
+        cleaned, dedup_log = dedup_children(cleaned, cfg)
     else:
         dedup_log = []
     kept, schema_rejected = validate_rows(cleaned, table_name, cfg)
@@ -510,6 +516,75 @@ def dedup_log_frame(log_rows: list[dict[str, Any]]) -> pl.DataFrame:
         The typed frame (empty when nothing was deduplicated).
     """
     return pl.DataFrame(log_rows, schema=DEDUP_LOG_SCHEMA)
+
+
+def dedup_children(
+    rows: list[dict[str, Any]], cfg: Config
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Drop duplicate child submissions, keeping the most recent (§5.4).
+
+    A family may submit the same child (same ``first_name``) more than
+    once.  Rows are grouped by (``primary_email``, ``first_name``); the
+    most recent submission (latest ``created``, breaking ties by
+    ``zite_record_id``) is kept as-is -- unlike families, no coalescing
+    happens -- and every earlier submission is dropped and recorded in
+    the dedup log.  Rows without an email or without a first name are
+    never merged and never logged.
+
+    Args:
+        rows: Cleaned child rows (before validation).
+        cfg: Pipeline configuration (unused, kept for signature symmetry).
+
+    Returns:
+        A tuple of (deduplicated rows, dedup-log rows).  One log row is
+        produced per dropped duplicate submission, with the same columns
+        as the family dedup log rows (``sheet`` is ``"child"``).
+    """
+    del cfg  # signature symmetry only
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            row.get("created") or "",
+            row.get("zite_record_id") or "",
+        ),
+        reverse=True,
+    )
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    unkeyed: list[dict[str, Any]] = []
+    for row in ordered:
+        email = row.get("primary_email")
+        name = row.get("first_name")
+        if email is None or name is None:
+            # No email or no name: nothing to deduplicate on; keep the
+            # row as-is so such children are never merged.
+            unkeyed.append(row)
+            continue
+        groups.setdefault((email, name), []).append(row)
+    kept_rows: list[dict[str, Any]] = []
+    log_rows: list[dict[str, Any]] = []
+    for (email, name), group in groups.items():
+        kept = group[0]
+        kept_rows.append(kept)
+        if len(group) > 1:
+            logger.warning(
+                "child dedup for %s: %r submitted %d time(s); kept %s"
+                " (%s), dropped %s",
+                email,
+                name,
+                len(group),
+                kept.get("zite_record_id"),
+                kept.get("created"),
+                [row.get("zite_record_id") for row in group[1:]],
+            )
+            log_rows.extend(_dedup_log_rows("child", email, kept, group[1:]))
+    kept_rows.extend(unkeyed)
+    kept_rows.sort(
+        key=lambda row: (
+            row.get("created") or "",
+            row.get("zite_record_id") or "",
+        )
+    )
+    return kept_rows, log_rows
 
 
 #: Same-family children whose birth dates are at most

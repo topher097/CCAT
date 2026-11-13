@@ -22,6 +22,7 @@ replacing all existing ``adj_child`` rows (§6.3).
 import json
 import logging
 import re
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -40,6 +41,56 @@ logger = logging.getLogger(__name__)
 
 class ScreeningError(Exception):
     """Raised when screening cannot complete."""
+
+
+def _opencode_major_version() -> int | None:
+    """Return the major version of the ``opencode`` CLI, or None.
+
+    Runs ``opencode --version``; None means the binary is missing or its
+    output is unparseable.  Output forms seen in the wild: ``2.2.5``
+    (older builds) and ``opencode v2.2.5`` (newer builds), so the first
+    ``major.`` number is matched anywhere in the text.
+
+    Returns:
+        The CLI major version, or None when opencode cannot be run.
+    """
+    try:
+        result = subprocess.run(
+            ["opencode", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"\bv?(\d+)\.", (result.stdout or "").strip())
+    return int(match.group(1)) if match else None
+
+
+def _require_opencode_v2() -> None:
+    """Fail fast unless opencode v2 is installed (§6.2).
+
+    The embedded server relies on ``opencode serve --stdio``, which only
+    exists in opencode 2.x; older versions print a usage message and
+    exit, so screening must refuse to run.
+
+    Raises:
+        ScreeningError: If opencode is missing, unparseable, or older
+            than version 2.
+    """
+    version = _opencode_major_version()
+    if version is None:
+        raise ScreeningError(
+            "opencode CLI not found on PATH or `opencode --version`"
+            " failed; install opencode v2 (https://opencode.ai) before"
+            " running the screen module"
+        )
+    if version < 2:
+        raise ScreeningError(
+            f"opencode {version}.x is installed but the screen module"
+            " needs opencode v2 (the embedded server requires"
+            " `opencode serve --stdio`); run `opencode upgrade --major`"
+        )
 
 
 #: adj_child columns (§6.3), in sheet order.
@@ -621,9 +672,11 @@ def run(
             is re-screened and its adj row replaced (§6.3).
 
     Raises:
-        ScreeningError: If raw_child is missing, a redo target is unknown,
-            or the opencode session cannot be created.
+        ScreeningError: If opencode v2 is not installed, raw_child is
+            missing, a redo target is unknown, or the opencode session
+            cannot be created.
     """
+    _require_opencode_v2()
     if cfg.ai_screening.model == "TODO":
         raise ScreeningError(
             "config.ai_screening.model is still TODO; fill in the model id"
