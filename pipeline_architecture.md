@@ -272,7 +272,7 @@ Structure:
       "sponsor.phone": "sponsor_phone",
       "sponsor.sponsor_id": "assigned_sponsor_id",
       "sponsor.angel_id": "angel_id",
-      "sponsor.family_size": "sponsor_family_size"
+      "sponsor.family_size": "family_size"
     }
   },
 
@@ -895,9 +895,9 @@ Mapped sources resolve against an *enriched* row: the `final_child`
 columns plus the family join plus computed `family_size` (number of
 `final_child` rows sharing the child's `family_id`), plus the sponsor
 join (aliased `sponsor_*` columns) plus computed `sponsor_name`
-(`organization_name` when set, else first + last name) and
-`sponsor_family_size` (number of `final_child` rows assigned to the
-child's sponsor).  `info.age` maps to `age_at_xmas`.
+(`organization_name` when set, else first + last name).
+`info.age` maps to `age_at_xmas`, and `sponsor.family_size` maps to
+`family_size` (the angels in the child's own family).
 
 Children without an assigned sponsor (null `assigned_sponsor_id`) render
 the `sponsor.*` section blank for hand-filling, as do unmapped

@@ -21,7 +21,8 @@ assigned ``final_sponsor`` row (joined by ``assigned_sponsor_id``):
 name (organization name, falling back to first + last name), email,
 phone, and sponsor id; ``sponsor.angel_id`` shows the child's own
 ``angel_id`` (the same value as ``info.angel_id``), and
-``sponsor.family_size`` counts the children assigned to that sponsor.
+``sponsor.family_size`` maps to ``family_size`` (the number of angels
+in the child's family).
 Children without an assigned sponsor render that section blank for
 hand-filling, as do unmapped ``sponsor.*`` placeholders.  Only the
 original ``final_child`` columns plus ``generated_info_sheet`` are
@@ -78,7 +79,7 @@ SPONSOR_JOIN_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 #: Computed columns added on top of the ``final_child`` schema (§13).
-COMPUTED_COLUMNS = ("family_size", "sponsor_name", "sponsor_family_size")
+COMPUTED_COLUMNS = ("family_size", "sponsor_name")
 
 #: Hard ceiling for one headless LibreOffice conversion, in seconds.
 CONVERT_TIMEOUT_SECONDS = 300
@@ -244,12 +245,6 @@ def _load_enriched_rows(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame, bool]:
         enriched.group_by("family_id").len().rename({"len": "family_size"})
     )
     enriched = enriched.join(family_size, on="family_id", how="left")
-    sponsor_size = (
-        enriched.group_by("assigned_sponsor_id")
-        .len()
-        .rename({"len": "sponsor_family_size"})
-    )
-    enriched = enriched.join(sponsor_size, on="assigned_sponsor_id", how="left")
     return frame, enriched, schema_added
 
 

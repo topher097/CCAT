@@ -564,7 +564,7 @@
       "sponsor.phone": "sponsor_phone",
       "sponsor.sponsor_id": "assigned_sponsor_id",
       "sponsor.angel_id": "angel_id",
-      "sponsor.family_size": "sponsor_family_size"
+      "sponsor.family_size": "family_size"
     }
   },
   "report": {

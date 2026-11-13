@@ -376,7 +376,8 @@ class TestLoadEnriched:
             "Sam Sponsor",
             "Sam Sponsor",
         ]
-        assert enriched["sponsor_family_size"].to_list() == [2, 2]
+        # sponsor.family_size maps to the child's own family_size.
+        assert enriched["family_size"].to_list() == [2, 2]
 
     def test_missing_final_child(self, gen_cfg: Config) -> None:
         """An empty workbook raises a typed error."""
@@ -494,7 +495,8 @@ class TestLoadEnriched:
         _base, enriched, _added = gen._load_enriched_rows(gen_cfg)
         assert enriched["sponsor_email"].to_list() == [None, None]
         assert enriched["sponsor_name"].to_list() == ["", ""]
-        assert enriched["sponsor_family_size"].to_list() == [None, None]
+        # family_size is still computed (number of angels in family).
+        assert enriched["family_size"].to_list() == [2, 2]
 
 
 class TestPendingRows:
