@@ -54,7 +54,7 @@ class SponsorPacketError(Exception):
 ANGEL_COLUMNS = ("angel_id", "gender", "age_at_xmas", "dropoff")
 
 _SUBJECT_TEMPLATE = (
-    "Angel Tree {{ season }} — your {{ angel_count }} angel"
+    "Angel Tree {{ season }} — your {{ angel_count }} Angel"
     "{{ 's' if angel_count != 1 }}"
 )
 
