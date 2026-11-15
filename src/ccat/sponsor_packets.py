@@ -37,6 +37,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import polars as pl
 from jinja2 import Environment
 from pypdf import PdfWriter
 
@@ -88,11 +89,14 @@ def _angel_sort_key(angel: dict[str, Any]) -> tuple[int, str, int, str]:
     )
 
 
-def _sponsors_with_angels(cfg: Config) -> list[dict[str, Any]]:
+def _sponsors_with_angels(
+    cfg: Config, sponsor_id: int | None = None
+) -> list[dict[str, Any]]:
     """Join each assigned sponsor with their angels' details (§13b).
 
     Args:
         cfg: The pipeline configuration.
+        sponsor_id: Restrict to one ``sponsor_id``.
 
     Returns:
         One packet payload per sponsor with assigned angels, angels
@@ -101,13 +105,22 @@ def _sponsors_with_angels(cfg: Config) -> list[dict[str, Any]]:
 
     Raises:
         SponsorPacketError: If ``final_sponsor``/``final_child`` is
-            missing, or the workbook has no matched sponsors.
+            missing, the workbook has no matched sponsors, or
+            ``sponsor_id`` is given but that sponsor has no assigned
+            angels.
     """
     sponsors = read_sheet(cfg.excel_file, "final_sponsor")
     if sponsors is None or sponsors.is_empty():
         raise SponsorPacketError(
             "final_sponsor sheet is missing or empty; run `ccat match` first"
         )
+    if sponsor_id is not None:
+        sponsors = sponsors.filter(pl.col("sponsor_id") == sponsor_id)
+        if sponsors.is_empty():
+            raise SponsorPacketError(
+                f"sponsor {sponsor_id} has no row in final_sponsor;"
+                " run `ccat match` first"
+            )
     children = read_sheet(cfg.excel_file, "final_child")
     if children is None or children.is_empty():
         raise SponsorPacketError(
@@ -180,6 +193,11 @@ def _sponsors_with_angels(cfg: Config) -> list[dict[str, Any]]:
             }
         )
     if not packets:
+        if sponsor_id is not None:
+            raise SponsorPacketError(
+                f"sponsor {sponsor_id} has no assigned angels;"
+                " run `ccat match` first"
+            )
         logger.info("no sponsor has assigned angels; no packets to build")
         return []
     return packets
@@ -245,18 +263,23 @@ def _merge_sheets_pdf(
     return pdf_path, missing
 
 
-def validate_all_sheets_exist(cfg: Config) -> None:
+def validate_all_sheets_exist(
+    cfg: Config, sponsor_id: int | None = None
+) -> None:
     """Require a generated info sheet PDF for every sponsored angel (§13b).
 
     The sponsor packets combine the child information sheets, so the
-    packet phase must never run with sheets missing.
+    packet phase must never run with sheets missing.  With
+    ``sponsor_id``, only the angels assigned to that sponsor count.
 
     Args:
         cfg: The pipeline configuration.
+        sponsor_id: Restrict the check to one ``sponsor_id``.
 
     Raises:
         SponsorPacketError: If any child whose family has an assigned
-            sponsor lacks its ``AT<season>_<angel_id>.pdf`` file.
+            sponsor (the given sponsor when scoped) lacks its
+            ``AT<season>_<angel_id>.pdf`` file.
     """
     children = read_sheet(cfg.excel_file, "final_child")
     if children is None or children.is_empty():
@@ -264,10 +287,12 @@ def validate_all_sheets_exist(cfg: Config) -> None:
     family = read_sheet(cfg.excel_file, "final_family")
     if family is None:
         return
+    family_rows = family.to_dicts()
     sponsored_family_ids = {
         row.get("family_id")
-        for row in family.to_dicts()
+        for row in family_rows
         if row.get("assigned_sponsor_id") is not None
+        and (sponsor_id is None or row.get("assigned_sponsor_id") == sponsor_id)
     }
     location_by_family = {
         row.get("family_id"): row.get("gift_pickup_location")
@@ -296,7 +321,9 @@ def validate_all_sheets_exist(cfg: Config) -> None:
         )
 
 
-def build_packets(cfg: Config, overwrite: bool = False) -> None:
+def build_packets(
+    cfg: Config, overwrite: bool = False, sponsor_id: int | None = None
+) -> None:
     """Build one sponsor packet directory per assigned sponsor (§13b).
 
     Each packet directory holds the HTML email draft and the combined
@@ -310,9 +337,12 @@ def build_packets(cfg: Config, overwrite: bool = False) -> None:
         overwrite: Regenerate packet files that already exist; the
             default skips sponsors whose files exist so manual edits
             are never lost.
+        sponsor_id: Build only this sponsor's packet.
 
     Raises:
-        SponsorPacketError: If the template is missing.
+        SponsorPacketError: If the template is missing, or
+            ``sponsor_id`` is given but that sponsor has no assigned
+            angels.
     """
     spec = cfg.sponsor_packets
     template_file = Path(spec.email_template_html_file)
@@ -333,7 +363,7 @@ def build_packets(cfg: Config, overwrite: bool = False) -> None:
         )
     out_dir = Path(spec.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    packets = _sponsors_with_angels(cfg)
+    packets = _sponsors_with_angels(cfg, sponsor_id=sponsor_id)
     written = 0
     for packet in packets:
         packet_dir = out_dir / str(packet["sponsor_id"])

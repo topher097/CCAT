@@ -29,6 +29,37 @@ def test_acquire_spec_gap_days_must_be_positive() -> None:
         AcquireSpec(sibling_dob_max_gap_days=0)
 
 
+def test_contact_placeholder_configured() -> None:
+    """The season config carries the placeholder settings (§13.2)."""
+    from ccat.config import InfoSheetSpec
+
+    config = load_config(CONFIG_PATH)
+    assert config.info_sheet.contact_placeholder_length == 30
+    assert config.info_sheet.contact_placeholder_affiliations == (
+        "Organization",
+        "Walmart",
+    )
+    plain = InfoSheetSpec(
+        template_file="t.ott", output_dir="o", mappings={"a.b": "c"}
+    )
+    assert plain.contact_placeholder_length == 30
+    assert plain.contact_placeholder_affiliations == ()
+    with pytest.raises(ValueError, match="contact_placeholder_length"):
+        InfoSheetSpec(
+            template_file="t.ott",
+            output_dir="o",
+            contact_placeholder_length=0,
+            mappings={"a.b": "c"},
+        )
+    with pytest.raises(ValueError, match="contact_placeholder_affiliations"):
+        InfoSheetSpec(
+            template_file="t.ott",
+            output_dir="o",
+            contact_placeholder_affiliations=["Organization", ""],
+            mappings={"a.b": "c"},
+        )
+
+
 def test_enum_values_resolved_from_vocabularies() -> None:
     """Enum columns resolve their vocabulary by name."""
     config = load_config(CONFIG_PATH)

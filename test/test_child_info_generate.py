@@ -1,16 +1,25 @@
 """Tests for module 5 — child info sheet generation (§13)."""
 
+import shutil
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 import pytest
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
 
 import ccat.child_info_generate as gen
 from ccat.child_info_generate import InfoSheetError
 from ccat.config import Config, InfoSheetSpec
 from ccat.io import read_sheet, write_sheets
+from ccat.sponsor_packets import SponsorPacketError
+
+#: The real season template, for the end-to-end PDF placeholder test.
+REAL_TEMPLATE = (
+    Path(__file__).resolve().parent.parent
+    / "data"
+    / "child_information_sheet_2026.ott"
+)
 
 CHILD_COLUMNS = [
     "zite_record_id",
@@ -149,10 +158,13 @@ def _unassigned_family() -> list[dict[str, Any]]:
     ]
 
 
-def _sponsor(sponsor_id: int = 7, **overrides: Any) -> dict[str, Any]:
+def _sponsor(
+    sponsor_id: int = 7, sponsor_type: str = "Individual", **overrides: Any
+) -> dict[str, Any]:
     """One final_sponsor row for generate tests."""
     row: dict[str, Any] = {
         "sponsor_id": sponsor_id,
+        "sponsor_type": sponsor_type,
         "first_name": "Sam",
         "last_name": "Sponsor",
         "organization_name": None,
@@ -166,6 +178,7 @@ def _sponsor(sponsor_id: int = 7, **overrides: Any) -> dict[str, Any]:
 
 SPONSOR_SCHEMA: dict[str, Any] = {
     "sponsor_id": pl.Int64,
+    "sponsor_type": pl.String,
     "first_name": pl.String,
     "last_name": pl.String,
     "organization_name": pl.String,
@@ -363,6 +376,127 @@ class TestNestedData:
         """The sponsor hand-fill section always renders blank."""
         data = gen._nested_data({}, {"info.angel_id": "angel_id"})
         assert all(v == "" for v in data["sponsor"].values())
+
+    def test_sponsor_contact_missing_renders_placeholder(self) -> None:
+        """A listed-affiliation sponsor missing contact gets placeholder.
+
+        Underscore line (§13.2).
+        """
+        mappings = {
+            "sponsor.full_name": "sponsor_name",
+            "sponsor.email": "sponsor_email",
+            "sponsor.phone": "sponsor_phone",
+            "sponsor.sponsor_id": "assigned_sponsor_id",
+        }
+        row = {
+            "assigned_sponsor_id": 7,
+            "sponsor_type": "Organization",
+            "sponsor_name": None,
+            "sponsor_email": "",
+            "sponsor_phone": "   ",
+        }
+        data = gen._nested_data(
+            row,
+            mappings,
+            placeholder_affiliations=frozenset({"Organization", "Walmart"}),
+        )
+        placeholder = gen.SPONSOR_CONTACT_PLACEHOLDER
+        assert placeholder == "_" * 30
+        assert data["sponsor"]["full_name"] == placeholder
+        assert data["sponsor"]["email"] == placeholder
+        assert data["sponsor"]["phone"] == placeholder
+        # Always-known values stay blank, never placeholders.
+        assert data["sponsor"]["sponsor_id"] == 7
+
+    def test_sponsor_contact_individual_renders_blank(self) -> None:
+        """An Individual sponsor with missing contact info stays blank."""
+        mappings = {
+            "sponsor.full_name": "sponsor_name",
+            "sponsor.email": "sponsor_email",
+        }
+        row = {
+            "assigned_sponsor_id": 7,
+            "sponsor_type": "Individual",
+            "sponsor_name": None,
+            "sponsor_email": None,
+        }
+        data = gen._nested_data(
+            row,
+            mappings,
+            placeholder_affiliations=frozenset({"Organization", "Walmart"}),
+        )
+        assert data["sponsor"]["full_name"] == ""
+        assert data["sponsor"]["email"] == ""
+
+    def test_sponsor_contact_partial_placeholders_all_three(
+        self,
+    ) -> None:
+        """One missing field placeholders all three (§13.2)."""
+        mappings = {
+            "sponsor.full_name": "sponsor_name",
+            "sponsor.email": "sponsor_email",
+            "sponsor.phone": "sponsor_phone",
+        }
+        row = {
+            "assigned_sponsor_id": 7,
+            "sponsor_type": "Organization",
+            "sponsor_name": "Sam Sponsor",
+            "sponsor_email": "sam@example.com",
+            "sponsor_phone": None,
+        }
+        data = gen._nested_data(
+            row,
+            mappings,
+            placeholder_affiliations=frozenset({"Organization", "Walmart"}),
+        )
+        placeholder = gen.SPONSOR_CONTACT_PLACEHOLDER
+        assert data["sponsor"]["full_name"] == placeholder
+        assert data["sponsor"]["email"] == placeholder
+        assert data["sponsor"]["phone"] == placeholder
+
+    def test_sponsor_contact_complete_renders_values(self) -> None:
+        """A fully documented sponsor keeps all real values."""
+        mappings = {
+            "sponsor.full_name": "sponsor_name",
+            "sponsor.email": "sponsor_email",
+            "sponsor.phone": "sponsor_phone",
+        }
+        row = {
+            "assigned_sponsor_id": 7,
+            "sponsor_type": "Organization",
+            "sponsor_name": "Sam Sponsor",
+            "sponsor_email": "sam@example.com",
+            "sponsor_phone": "555-0100",
+        }
+        data = gen._nested_data(
+            row,
+            mappings,
+            placeholder_affiliations=frozenset({"Organization", "Walmart"}),
+        )
+        assert data["sponsor"]["full_name"] == "Sam Sponsor"
+        assert data["sponsor"]["email"] == "sam@example.com"
+        assert data["sponsor"]["phone"] == "555-0100"
+
+    def test_sponsor_contact_unassigned_child_stays_blank(self) -> None:
+        """A child without an assigned sponsor keeps blank contact."""
+        mappings = {"sponsor.phone": "sponsor_phone"}
+        data = gen._nested_data({"sponsor_phone": None}, mappings)
+        assert data["sponsor"]["phone"] == ""
+
+    def test_sponsor_contact_placeholder_length_configurable(self) -> None:
+        """The placeholder length comes from the config (§13.2)."""
+        mappings = {"sponsor.phone": "sponsor_phone"}
+        data = gen._nested_data(
+            {
+                "assigned_sponsor_id": 7,
+                "sponsor_type": "Walmart",
+                "sponsor_phone": None,
+            },
+            mappings,
+            contact_placeholder="_" * 10,
+            placeholder_affiliations=frozenset({"Walmart"}),
+        )
+        assert data["sponsor"]["phone"] == "_" * 10
 
     def test_sponsor_angel_id_matches_info_angel_id(self) -> None:
         """``sponsor.angel_id`` fills with the child's own angel id."""
@@ -726,6 +860,82 @@ class TestRun:
         assert data["sponsor"]["full_name"] == "CCAM Group"
         assert data["sponsor"]["email"] == "group@example.org"
 
+    def test_missing_sponsor_contact_renders_placeholder(
+        self,
+        gen_cfg: Config,
+        two_children: list[dict[str, Any]],
+        render_calls: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """A sponsor lacking contact info renders placeholders.
+
+        Full run passes them into the template data (§13.2).
+        """
+        _seed(
+            gen_cfg,
+            two_children,
+            _family(),
+            sponsors=[
+                _sponsor(
+                    sponsor_type="Organization",
+                    email=None,
+                    phone=None,
+                )
+            ],
+        )
+        gen.run(gen_cfg)
+        _name, data = render_calls[0]
+        placeholder = gen.SPONSOR_CONTACT_PLACEHOLDER
+        # All-or-nothing: missing email/phone placeholders the name too.
+        assert data["sponsor"]["full_name"] == placeholder
+        assert data["sponsor"]["email"] == placeholder
+        assert data["sponsor"]["phone"] == placeholder
+
+    def test_individual_sponsor_missing_contact_renders_blank(
+        self,
+        gen_cfg: Config,
+        two_children: list[dict[str, Any]],
+        render_calls: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """An Individual sponsor missing contact info stays blank.
+
+        Not in the configured placeholder affiliations (§13.2).
+        """
+        _seed(
+            gen_cfg,
+            two_children,
+            _family(),
+            sponsors=[_sponsor(email=None, phone=None)],
+        )
+        gen.run(gen_cfg)
+        _name, data = render_calls[0]
+        assert data["sponsor"]["full_name"] == "Sam Sponsor"
+        assert data["sponsor"]["email"] == ""
+        assert data["sponsor"]["phone"] == ""
+
+    def test_contact_placeholder_length_from_config(
+        self,
+        gen_cfg: Config,
+        two_children: list[dict[str, Any]],
+        render_calls: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """The rendered placeholder uses the configured length (§13.2)."""
+        spec = gen_cfg.info_sheet.model_copy(
+            update={"contact_placeholder_length": 12}
+        )
+        scoped = gen_cfg.model_copy(update={"info_sheet": spec})
+        _seed(
+            scoped,
+            two_children,
+            _family(),
+            sponsors=[
+                _sponsor(sponsor_type="Organization", email=None, phone=None)
+            ],
+        )
+        gen.run(scoped)
+        _name, data = render_calls[0]
+        assert data["sponsor"]["email"] == "_" * 12
+        assert data["sponsor"]["phone"] == "_" * 12
+
     def test_skips_true_rows(
         self,
         gen_cfg: Config,
@@ -926,3 +1136,82 @@ class TestRun:
         broken = gen_cfg.model_copy(update={"info_sheet": spec})
         with pytest.raises(InfoSheetError, match="template file not found"):
             gen.run(broken)
+
+
+@pytest.mark.skipif(
+    shutil.which("soffice") is None, reason="LibreOffice not installed"
+)
+def test_placeholder_shown_in_converted_pdf(
+    gen_cfg: Config, tmp_path: Path
+) -> None:
+    """The underscore placeholder survives the ODT -> PDF conversion.
+
+    Real template + real headless LibreOffice (§13.2).
+    """
+    spec = gen_cfg.info_sheet.model_copy(
+        update={"template_file": str(REAL_TEMPLATE)}
+    )
+    real = gen_cfg.model_copy(update={"info_sheet": spec})
+    _seed(
+        real,
+        [child_row("c1", "1A", 1)],
+        _family(),
+        sponsors=[
+            _sponsor(sponsor_type="Organization", email=None, phone=None)
+        ],
+    )
+
+    gen.run(real, test=True)
+
+    pdfs = list(Path(real.info_sheet.output_dir).rglob("*.pdf"))
+    assert len(pdfs) == 1
+    text = "".join(
+        page.extract_text() or "" for page in PdfReader(str(pdfs[0])).pages
+    )
+    assert gen.SPONSOR_CONTACT_PLACEHOLDER in text
+
+    def test_sponsor_option_limits_sheets_and_packet(
+        self,
+        gen_cfg: Config,
+        render_calls: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """--sponsor renders only that sponsor's children and packet."""
+        children = [child_row("c1", "1A", 1), child_row("c2", "2A", 2)]
+        families = [
+            {
+                "family_id": 1,
+                "gift_pickup_location": "Hancock",
+                "assigned_sponsor_id": 7,
+            },
+            {
+                "family_id": 2,
+                "gift_pickup_location": "Calumet",
+                "assigned_sponsor_id": 8,
+            },
+        ]
+        _seed(
+            gen_cfg,
+            children,
+            families,
+            sponsors=[_sponsor(sponsor_id=7), _sponsor(sponsor_id=8)],
+        )
+        gen.run(gen_cfg, sponsor=7)
+        # Only sponsor 7's child was rendered.
+        assert [name for name, _data in render_calls] == [
+            f"AT{gen_cfg.season}_1A.odt"
+        ]
+        # Only sponsor 7's packet directory was built.
+        packets_root = Path(gen_cfg.sponsor_packets.output_dir)
+        assert [d.name for d in sorted(packets_root.iterdir())] == ["7"]
+
+    def test_sponsor_option_unknown_sponsor_raises(
+        self,
+        gen_cfg: Config,
+        two_children: list[dict[str, Any]],
+        render_calls: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """--sponsor with an unknown sponsor id raises a typed error."""
+        _seed(gen_cfg, two_children, _family())
+        with pytest.raises(SponsorPacketError, match="sponsor 9"):
+            gen.run(gen_cfg, sponsor=9)
+        assert render_calls == []

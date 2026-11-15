@@ -1,7 +1,7 @@
 """Module 4 — matchmaking (§8).
 
 Assigns whole families to sponsors: special-needs sponsors first, then
-Individuals, then Group/Organization sponsors, honoring exact child counts
+Individuals, then Organization/Walmart sponsors, honoring exact child counts
 and lexicographic preference tiers.  Writes ``final_family``,
 ``final_sponsor``, and ``match_report`` (archiving previous versions to
 timestamped sheets), and exports the report as CSV.  ``final_child`` is
@@ -515,7 +515,7 @@ def match_sponsors(
         plan
         for plan in sponsor_plans
         if not plan.is_special_needs
-        and plan.sponsor_row.get("sponsor_type") in {"Group", "Organization"}
+        and plan.sponsor_row.get("sponsor_type") in {"Organization", "Walmart"}
     ]
     individual_ids = {plan.sponsor_id for plan in individuals}
     organization_ids = {plan.sponsor_id for plan in organizations}
@@ -532,7 +532,7 @@ def match_sponsors(
             [p for p in sponsor_plans if p.is_special_needs],
         ),
         ("individual sponsors", individuals),
-        ("group/organization sponsors", organizations + other),
+        ("organization/walmart sponsors", organizations + other),
     ]
     ordered: list[tuple[str, SponsorPlan]] = []
     for phase_name, phase in phases:
@@ -665,6 +665,214 @@ def _reconcile_family_rows(
     return rows, warnings
 
 
+def _reconcile_sponsor_rows(
+    sponsor_rows: list[dict[str, Any]],
+    existing_final: pl.DataFrame | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Reconcile ``final_sponsor`` with the current raw rows (§8.6).
+
+    Every current ``raw_sponsor`` row gets a ``final_sponsor`` row.
+    A non-empty ``prior_assigned_angel_ids`` is propagated to
+    ``assigned_angel_ids``; otherwise any previously assigned angel list
+    carries over unchanged; new sponsors get none.  This is the
+    ``--skip-match`` path: sync the sheet without running the matching
+    algorithm.
+
+    Args:
+        sponsor_rows: All ``raw_sponsor`` rows, sorted by ``sponsor_id``.
+        existing_final: The previous ``final_sponsor`` frame (or None
+            when the sheet has never been written).
+
+    Returns:
+        A tuple of (reconciled final_sponsor rows, warning messages for
+        anomalies the auditor should know about).
+
+    Raises:
+        MatchError: If the same angel_id ends up assigned to more than
+            one sponsor.
+    """
+    existing_by_id: dict[Any, dict[str, Any]] = {}
+    if existing_final is not None:
+        for row in existing_final.to_dicts():
+            existing_by_id[row.get("sponsor_id")] = row
+    warnings: list[str] = []
+    dropped = sorted(
+        set(existing_by_id) - {row["sponsor_id"] for row in sponsor_rows}
+    )
+    if dropped:
+        message = (
+            "final_sponsor sponsors no longer in raw_sponsor (dropped):"
+            f" {dropped}"
+        )
+        warnings.append(message)
+        logger.warning("%s", message)
+    rows: list[dict[str, Any]] = []
+    owners: dict[str, set[int]] = {}
+    for row in sponsor_rows:
+        sponsor_id = row["sponsor_id"]
+        prior_row = existing_by_id.get(sponsor_id, {})
+        prior_text = row.get("prior_assigned_angel_ids")
+        prior_ids = parse_prior_assigned(str(prior_text)) if prior_text else []
+        if prior_ids:
+            # Raw manual entry wins over the carried-over list (§8.5).
+            assigned: str | None = ",".join(
+                sorted(prior_ids, key=_angel_sort_key)
+            )
+        else:
+            assigned = prior_row.get("assigned_angel_ids")
+        rows.append(
+            {
+                **row,
+                "assigned_angel_ids": assigned,
+                "num_angels_assigned": len(parse_prior_assigned(assigned))
+                if assigned
+                else 0,
+            }
+        )
+        for angel_id in parse_prior_assigned(assigned) if assigned else []:
+            owners.setdefault(angel_id, set()).add(sponsor_id)
+    duplicates = {
+        angel_id: sorted(sponsor_ids)
+        for angel_id, sponsor_ids in owners.items()
+        if len(sponsor_ids) > 1
+    }
+    if duplicates:
+        detail = "; ".join(
+            f"angel {angel_id} assigned to sponsors {sponsor_ids}"
+            for angel_id, sponsor_ids in sorted(duplicates.items())
+        )
+        raise MatchError(
+            "duplicate angel assignments in final_sponsor:"
+            f" {detail}; resolve manually and rerun"
+        )
+    return rows, warnings
+
+
+def _angel_family_map(cfg: Config) -> dict[str, Any]:
+    """Map ``angel_id`` to ``family_id`` from ``final_child`` (§8.5).
+
+    Includes every row with a non-null ``angel_id``, regardless of audit
+    state — reconciliation syncs assignments, it does not matchmake.
+
+    Args:
+        cfg: Pipeline configuration.
+
+    Returns:
+        Mapping of ``angel_id`` to the child's ``family_id``.
+    """
+    final_child = read_sheet(cfg.excel_file, "final_child")
+    if final_child is None or "angel_id" not in final_child.columns:
+        return {}
+    mapping: dict[str, Any] = {}
+    for row in final_child.to_dicts():
+        angel_id = row.get("angel_id")
+        family_id = row.get("family_id")
+        if angel_id and family_id is not None:
+            mapping[str(angel_id)] = family_id
+    return mapping
+
+
+def _apply_prior_to_family_rows(
+    family_rows: list[dict[str, Any]],
+    sponsor_rows: list[dict[str, Any]],
+    angel_family: dict[str, Any],
+    valid_sponsor_ids: set[int],
+    unassigned_only: bool = False,
+) -> list[str]:
+    """Point families at sponsors via propagated prior angels (§8.5).
+
+    For every sponsor with a non-empty ``prior_assigned_angel_ids``, each
+    prior angel's family gets ``assigned_sponsor_id`` set to that sponsor
+    and ``assigned_angel_ids`` set to that sponsor's prior angels of the
+    family.  Sibling carry-over lists are replaced, not merged — the raw
+    manual entry is authoritative.  Unknown angel ids and families absent
+    from ``raw_family`` warn.  A family assigned to another current
+    ``raw_sponsor`` sponsor keeps that assignment and warns (split
+    family); iterating in ``sponsor_id`` order makes the earlier sponsor
+    win deterministically.  A family assigned to a sponsor no longer in
+    ``raw_sponsor`` is a stale assignment: the prior wins.
+
+    With ``unassigned_only`` (the full-match path), families that already
+    carry an assignment are skipped entirely — the §8.5 machinery and
+    pool matching stay authoritative — and only previously unassigned
+    families are filled in.
+
+    Args:
+        family_rows: ``final_family`` rows, updated in place.
+        sponsor_rows: Reconciled ``raw_sponsor`` rows, sorted by
+            ``sponsor_id``.
+        angel_family: ``angel_id`` to ``family_id`` map from
+            ``final_child``.
+        valid_sponsor_ids: ``sponsor_id``s present in ``raw_sponsor``.
+        unassigned_only: Only fill families with no current assignment.
+
+    Returns:
+        Warning messages for anomalies the auditor should know about.
+    """
+    by_family = {row["family_id"]: row for row in family_rows}
+    warnings: list[str] = []
+    for row in sponsor_rows:
+        sponsor_id = row["sponsor_id"]
+        prior_text = row.get("prior_assigned_angel_ids")
+        prior_ids = parse_prior_assigned(str(prior_text)) if prior_text else []
+        if not prior_ids:
+            continue
+        per_family: dict[Any, list[str]] = {}
+        for angel_id in prior_ids:
+            family_id = angel_family.get(angel_id)
+            if family_id is None:
+                message = (
+                    f"sponsor {sponsor_id} prior angel {angel_id} is not"
+                    " in final_child; family assignment skipped"
+                )
+                warnings.append(message)
+                logger.warning("%s", message)
+                continue
+            per_family.setdefault(family_id, []).append(angel_id)
+        for family_id, angel_ids in per_family.items():
+            family_row = by_family.get(family_id)
+            if family_row is None:
+                message = (
+                    f"sponsor {sponsor_id} prior angel(s) {angel_ids}"
+                    f" reference family {family_id}, which is not in"
+                    " raw_family; skipped"
+                )
+                warnings.append(message)
+                logger.warning("%s", message)
+                continue
+            current = family_row.get("assigned_sponsor_id")
+            if unassigned_only:
+                if current is not None:
+                    # §8.5/pool assignment already in place; leave it.
+                    continue
+            elif current is not None and current != sponsor_id:
+                if current not in valid_sponsor_ids:
+                    # Stale pointer to a vanished sponsor; prior wins.
+                    message = (
+                        f"family {family_id} had stale assignment to"
+                        f" sponsor {current}, who is no longer in"
+                        f" raw_sponsor; reassigned to sponsor"
+                        f" {sponsor_id} via prior angels {angel_ids}"
+                    )
+                    warnings.append(message)
+                    logger.warning("%s", message)
+                else:
+                    message = (
+                        f"family {family_id} is assigned to sponsor"
+                        f" {current} but sponsor {sponsor_id}'s prior"
+                        f" includes its angels {angel_ids}; keeping"
+                        f" sponsor {current}"
+                    )
+                    warnings.append(message)
+                    logger.warning("%s", message)
+                    continue
+            family_row["assigned_sponsor_id"] = sponsor_id
+            family_row["assigned_angel_ids"] = ",".join(
+                sorted(angel_ids, key=_angel_sort_key)
+            )
+    return warnings
+
+
 def run(
     cfg: Config,
     test: bool = False,
@@ -682,11 +890,20 @@ def run(
             children with an angel_id participate) and replace any
             previous ``final_family``/``final_sponsor``/``match_report``
             outputs in place instead of archiving them (§8.6).
-        skip_match: Reconcile ``final_family`` without running the
-            matching algorithm: every current ``raw_family`` family gets
-            a row, previously assigned sponsors and angel lists carry
-            over, new families get no sponsor.  ``final_sponsor`` and
-            ``match_report`` are left untouched.
+            In both modes a non-empty ``prior_assigned_angel_ids`` is
+            propagated to the sponsor's ``assigned_angel_ids``; in the
+            full run the §8.5 reconciliation stays authoritative for
+            already-assigned families and only fills in families the
+            matching left unassigned.
+        skip_match: Reconcile ``final_family`` and ``final_sponsor``
+            without running the matching algorithm: every current
+            ``raw_family`` family gets a row, previously assigned sponsors
+            and angel lists carry over, new families and sponsors get no
+            assignment.  A non-empty ``prior_assigned_angel_ids`` is
+            propagated to the sponsor's ``assigned_angel_ids`` and the
+            angel's family is pointed at that sponsor in
+            ``final_family``; duplicate angel ids across sponsors raise
+            ``MatchError``.  ``match_report`` is left untouched.
 
     Raises:
         MatchError: If required sheets are missing.
@@ -706,12 +923,23 @@ def run(
     if skip_match:
         if test:
             logger.warning("--test has no effect with --skip-match")
-        existing_final = read_sheet(cfg.excel_file, "final_family")
+        existing_final_family = read_sheet(cfg.excel_file, "final_family")
+        existing_final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+        reconciled_sponsors, _sponsor_warnings = _reconcile_sponsor_rows(
+            sponsor_rows,
+            existing_final_sponsor,
+        )
         reconciled, _warnings = _reconcile_family_rows(
             family_rows,
             {row["sponsor_id"] for row in sponsor_rows},
             _children_per_family(cfg),
-            existing_final,
+            existing_final_family,
+        )
+        _prior_warnings = _apply_prior_to_family_rows(
+            reconciled,
+            sponsor_rows,
+            _angel_family_map(cfg),
+            {row["sponsor_id"] for row in sponsor_rows},
         )
         final_family = _augmented_frame(
             raw_family,
@@ -722,12 +950,20 @@ def run(
                 "num_angels_in_family": pl.Int64,
             },
         )
+        final_sponsor = _augmented_frame(
+            raw_sponsor,
+            reconciled_sponsors,
+            {
+                "assigned_angel_ids": pl.String,
+                "num_angels_assigned": pl.Int64,
+            },
+        )
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         existing = set(list_sheets(cfg.excel_file))
         renames = (
             {
                 name: _archive_name(existing, name, timestamp)
-                for name in ("final_family",)
+                for name in ("final_family", "final_sponsor")
                 if name in existing
             }
             if not overwrite
@@ -736,15 +972,16 @@ def run(
         write_sheets(
             cfg.excel_file,
             "match",
-            {"final_family": final_family},
+            {"final_family": final_family, "final_sponsor": final_sponsor},
             renames=renames,
         )
         logger.info(
-            "skip-match: reconciled %d final_family rows (%s);"
-            " matching algorithm skipped, final_sponsor and match_report"
-            " untouched",
+            "skip-match: reconciled %d final_family rows;"
+            " reconciled %d final_sponsor rows (%s);"
+            " matching algorithm skipped, match_report untouched",
             final_family.height,
-            "archived previous sheet" if renames else "first write",
+            final_sponsor.height,
+            "archived previous sheets" if renames else "first write",
         )
         return
     children = _participating_children(cfg, overwrite=overwrite)
@@ -876,6 +1113,15 @@ def run(
                 "num_angels_in_family": children_per_family.get(family_id, 0),
             }
         )
+    # Prior angels also point their family at the sponsor when the §8.5
+    # machinery left the family unassigned (e.g. partially covered).
+    _apply_prior_to_family_rows(
+        final_family_rows,
+        sponsor_rows,
+        _angel_family_map(cfg),
+        {row["sponsor_id"] for row in sponsor_rows},
+        unassigned_only=True,
+    )
     final_sponsor_rows: list[dict[str, Any]] = []
     sponsor_plans = {
         plan.sponsor_id: plan

@@ -114,10 +114,17 @@ function syncRowHeights() {
   }
 }
 
-// Row order: every raw_child column in sheet order, then adj-only fields.
+// Row order: every raw_child column in sheet order, then adj-only
+// fields.  The computed age_at_xmas is moved beside age_reported.
 function fieldOrder(item) {
   const fields = Object.keys(item.raw);
   for (const field of ADJ_ALL) if (!fields.includes(field)) fields.push(field);
+  const ageIndex = fields.indexOf("age_at_xmas");
+  const reportedIndex = fields.indexOf("age_reported");
+  if (ageIndex > -1 && reportedIndex > -1) {
+    fields.splice(ageIndex, 1);
+    fields.splice(reportedIndex + 1, 0, "age_at_xmas");
+  }
   return fields;
 }
 

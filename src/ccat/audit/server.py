@@ -176,7 +176,11 @@ class AuditState:
     """Reads and writes the audit queue and final_child rows (§7)."""
 
     def __init__(
-        self, cfg: Config, test_mode: bool = False, overwrite: bool = False
+        self,
+        cfg: Config,
+        test_mode: bool = False,
+        overwrite: bool = False,
+        hide_completed: bool = False,
     ) -> None:
         """Bind the state to one pipeline configuration.
 
@@ -187,10 +191,14 @@ class AuditState:
             overwrite: Ignore the ``audited`` column of ``final_child``:
                 audited children re-enter the queue and frozen rows may
                 be re-saved (§7).
+            hide_completed: Queue only children with no ``final_child``
+                row at all; children already saved (audited or not) are
+                hidden, even with ``overwrite`` set.
         """
         self.cfg = cfg
         self.test_mode = test_mode
         self.overwrite = overwrite
+        self.hide_completed = hide_completed
         self.on_complete: Callable[[], None] | None = None
 
     def _load_sheets(
@@ -227,7 +235,8 @@ class AuditState:
         Every child in raw_child whose zite_record_id has no final_child
         row, or has one with ``audited == false``.  With ``overwrite``
         set, every child is queued regardless of the ``audited`` column.
-        In test mode the queue
+        With ``hide_completed`` set, only children with no
+        ``final_child`` row at all are queued.  In test mode the queue
         is limited to the first family's children.
 
         Returns:
@@ -257,6 +266,8 @@ class AuditState:
         for raw_row in raw_child.to_dicts():
             record_id = raw_row.get("zite_record_id")
             final_row = final_by_id.get(record_id)
+            if self.hide_completed and final_row is not None:
+                continue
             if not self.overwrite and (
                 final_row is not None
                 and _as_bool(final_row.get("audited")) is True
@@ -478,7 +489,13 @@ def build_final_child_row(
 def _final_child_frame(
     rows: list[dict[str, Any]], raw_child: pl.DataFrame
 ) -> pl.DataFrame:
-    """Build the final_child DataFrame preserving column order and dtypes."""
+    """Build the final_child DataFrame preserving column order and dtypes.
+
+    Boolean columns tolerate the workbook round-trip: another module's
+    rewrite can leave ``audited``/``special_needs``/
+    ``generated_info_sheet`` reading back as strings ("true"/"false"),
+    which would poison the Boolean-typed builder.
+    """
     schema: dict[str, PolarsDataType] = dict(raw_child.schema)
     schema.update(
         {
@@ -490,9 +507,14 @@ def _final_child_frame(
             "generated_info_sheet": pl.Boolean,
         }
     )
-    frame = pl.DataFrame(
-        [{key: row.get(key) for key in schema} for row in rows], schema=schema
-    )
+    boolean_columns = ("special_needs", "audited", "generated_info_sheet")
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        row = {key: row.get(key) for key in schema}
+        for column in boolean_columns:
+            row[column] = _as_bool(row.get(column))
+        normalized.append(row)
+    frame = pl.DataFrame(normalized, schema=schema)
     frame = frame.with_columns(pl.col("generated_info_sheet").fill_null(False))
     return frame.select(list(schema))
 
@@ -695,6 +717,7 @@ def run(
     test: bool = False,
     overwrite: bool = False,
     restart: bool = False,
+    hide_completed: bool = False,
 ) -> None:
     """Run module 3: serve the audit tool until interrupted (§7).
 
@@ -709,6 +732,8 @@ def run(
             re-saved (§7).
         restart: Stop any currently running audit tool process before
             starting, so a stale server does not block the port.
+        hide_completed: Queue only children with no ``final_child`` row
+            at all; children saved earlier (audited or not) are hidden.
 
     Raises:
         AuditError: If the configured port cannot be bound even after a
@@ -720,7 +745,12 @@ def run(
             stop_audit_processes(stale)
         else:
             logger.info("restart: no running audit tool process found")
-    state = AuditState(cfg, test_mode=test, overwrite=overwrite)
+    state = AuditState(
+        cfg,
+        test_mode=test,
+        overwrite=overwrite,
+        hide_completed=hide_completed,
+    )
     if test and not state.queue():
         logger.info(
             "test mode: first family already audited; nothing to review"

@@ -216,6 +216,33 @@ class TestSponsorsWithAngels:
         )
         assert _sponsors_with_angels(cfg) == []
 
+    def test_sponsor_id_restricts_payload(self, cfg: Config) -> None:
+        """``sponsor_id`` scopes the payload to one sponsor."""
+        _seed(
+            cfg,
+            [
+                sponsor_row(7, "Sam", "sam@x.com", "1A"),
+                sponsor_row(8, "Riley", "riley@x.com", "2A"),
+            ],
+            [
+                child_row("1A", "Male", 8, family_id=1),
+                child_row("2A", "Female", 9, family_id=2),
+            ],
+        )
+        packets = _sponsors_with_angels(cfg, sponsor_id=8)
+        assert [p["sponsor_id"] for p in packets] == [8]
+        assert [a["angel_id"] for a in packets[0]["angels"]] == ["2A"]
+
+    def test_unknown_sponsor_id_raises(self, cfg: Config) -> None:
+        """A ``sponsor_id`` with no assigned angels raises a typed error."""
+        _seed(
+            cfg,
+            [sponsor_row(7, "Sam", "sam@x.com", "1A")],
+            [child_row("1A", "Male", 8, family_id=1)],
+        )
+        with pytest.raises(SponsorPacketError, match="sponsor 9"):
+            _sponsors_with_angels(cfg, sponsor_id=9)
+
 
 class TestRun:
     """The end-to-end packet build."""
@@ -277,6 +304,29 @@ class TestRun:
         # Angels of other sponsors never leak into this packet.
         assert ">Calumet<" not in html
         assert "2A" not in html
+
+    def test_build_only_requested_sponsor(
+        self, cfg: Config, tmp_path: Path
+    ) -> None:
+        """``sponsor_id`` builds only that sponsor's packet."""
+        _seed(
+            cfg,
+            [
+                sponsor_row(7, "Sam", "sam@x.com", "1A,1B"),
+                sponsor_row(9, "Casey", "casey@x.com", "2A"),
+            ],
+            [
+                child_row("1A", "Male", 8, family_id=1),
+                child_row("1B", None, 5, family_id=1),
+                child_row("2A", "Female", 12, family_id=2),
+            ],
+        )
+        email_cfg = _email_cfg(cfg, tmp_path)
+        build_packets(email_cfg, sponsor_id=9)
+        packets = Path(email_cfg.sponsor_packets.output_dir)
+        prefix = email_cfg.sponsor_packets.filename_prefix
+        assert (packets / "9" / f"{prefix}_9.html").is_file()
+        assert not (packets / "7").exists()
 
     def test_child_information_pdf_order(
         self, cfg: Config, tmp_path: Path

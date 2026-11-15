@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ subject }}</title>
+</head>
+<body style="font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a;
+             background: #ffffff; max-width: 40rem; margin: 1rem auto;
+             padding: 0 1rem;">
+<p style="background: #f0f4f8; border: 1px solid #cbd5e1; border-radius: 6px;
+          padding: 0.5rem 0.75rem; font-family: sans-serif; font-size: 0.85rem;
+          color: #334155;">
+  <strong>Email subject:</strong> {{ subject }}<br>
+  <strong>To:</strong> {{ family.family_email or "— no email on file —" }}<br>
+  <span style="color: #64748b;">Copy everything below this box into your
+  email client (subject line included), then send it to the family's
+  email above.</span>
+</p>
+<hr style="border: none; border-top: 1px solid #cbd5e1;">
+
+<p style="font-size: 1.05rem;">{{ email.greeting }}</p>
+
+<p>{{ email.intro }}</p>
+
+{% for paragraph in email.angel_paragraphs %}
+<p>{{ paragraph }}</p>
+{% endfor %}
+
+<p>{{ email.closing }}</p>
+
+<p>Warmly,<br>
+<strong>The Copper Country Angel Tree Team</strong></p>
+</body>
+</html>

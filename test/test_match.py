@@ -375,20 +375,26 @@ def test_run_phase_order_special_needs_first(cfg: Config) -> None:
     ]  # SN sponsor first
 
 
-def test_run_group_organization_after_individuals(cfg: Config) -> None:
-    """Group and Organization sponsors follow Individuals (§8.2)."""
+def test_run_organization_walmart_after_individuals(cfg: Config) -> None:
+    """Organization and Walmart sponsors follow Individuals (§8.2)."""
     sponsors = [
-        sponsor_row(1, num_children=1, sponsor_type="Organization"),
-        sponsor_row(2, num_children=1, sponsor_type="Individual"),
+        sponsor_row(1, num_children=1, sponsor_type="Walmart"),
+        sponsor_row(2, num_children=1, sponsor_type="Organization"),
+        sponsor_row(3, num_children=1, sponsor_type="Individual"),
     ]
-    families = [family_row(1), family_row(2)]
-    children = [child_row("1A", 1, 8), child_row("2A", 2, 8)]
+    families = [family_row(1), family_row(2), family_row(3)]
+    children = [
+        child_row("1A", 1, 8),
+        child_row("2A", 2, 8),
+        child_row("3A", 3, 8),
+    ]
     _seed_match_workbook(cfg, sponsors, families, children)
     run(cfg)
     final_family = read_sheet(cfg.excel_file, "final_family")
     assert final_family is not None
-    # sponsor 2 (Individual) picks first even though sponsor_id is higher
-    assert final_family["assigned_sponsor_id"].to_list() == [2, 1]
+    # sponsor 3 (Individual) picks first (lowest family_id), then
+    # Organization/Walmart phase in sponsor_id order
+    assert final_family["assigned_sponsor_id"].to_list() == [3, 1, 2]
 
 
 def test_run_nonbinary_family_unmatched_with_reason(cfg: Config) -> None:
@@ -453,6 +459,52 @@ def test_run_pre_assigned_sponsor_excluded_from_pool(cfg: Config) -> None:
     assert by_id[1]["assigned_angel_ids"] == "1A"
     assert by_id[2]["assigned_angel_ids"] == "2A,2B"
     assert final_family["assigned_sponsor_id"].to_list() == [1, 2]
+
+
+def test_run_prior_fills_unassigned_partial_family(cfg: Config) -> None:
+    """Full run: a partially covered prior family gets assigned.
+
+    §8.5 reconciliation leaves it unassigned; propagation fills it in.
+    """
+    sponsors = [sponsor_row(1, num_children=1, prior="1A")]
+    families = [family_row(1)]
+    children = [child_row("1A", 1, 8), child_row("1B", 1, 9)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+
+    run(cfg)
+
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    row = final_family.to_dicts()[0]
+    # Sibling 1B exceeds num_children, so the §8.5 reconciliation left
+    # the family unassigned; the prior propagation fills it in.
+    assert row["assigned_sponsor_id"] == 1
+    assert row["assigned_angel_ids"] == "1A"
+    assert row["num_angels_in_family"] == 2
+    # match_report keeps the split flag for manual follow-up.
+    report = read_sheet(cfg.excel_file, "match_report")
+    assert report is not None
+    assert any("would be split" in r["reason"] for r in report.to_dicts())
+    final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+    assert final_sponsor is not None
+    assert final_sponsor["assigned_angel_ids"].to_list() == ["1A"]
+
+
+def test_run_prior_leaves_fully_covered_family_untouched(cfg: Config) -> None:
+    """Full run: a fully covered family keeps its all-children list."""
+    sponsors = [sponsor_row(1, num_children=2, prior="1A")]
+    families = [family_row(1)]
+    children = [child_row("1A", 1, 8), child_row("1B", 1, 9)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+
+    run(cfg)
+
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    row = final_family.to_dicts()[0]
+    # Sibling integrity: 1B was added, list stays the full family.
+    assert row["assigned_sponsor_id"] == 1
+    assert row["assigned_angel_ids"] == "1A,1B"
 
 
 def test_run_archives_previous_sheets_and_exports_csv(cfg: Config) -> None:
@@ -678,8 +730,27 @@ FINAL_FAMILY_SCHEMA = {
 }
 
 
+FINAL_SPONSOR_SCHEMA = {
+    "sponsor_id": pl.Int64,
+    "email": pl.String,
+    "sponsor_type": pl.String,
+    "num_children": pl.Int64,
+    "age_preference": pl.String,
+    "gender_preference": pl.String,
+    "dropoff_location": pl.String,
+    "pref_age_min": pl.Int64,
+    "pref_age_max": pl.Int64,
+    "prior_assigned_angel_ids": pl.String,
+    "assigned_angel_ids": pl.String,
+    "num_angels_assigned": pl.Int64,
+}
+
+
 def test_run_skip_match_reconciles_without_matching(cfg: Config) -> None:
-    """--skip-match syncs final_family, keeping old assignments."""
+    """--skip-match syncs final_family and final_sponsor.
+
+    Previously assigned angel lists and sponsor assignments carry over.
+    """
     sponsors = [sponsor_row(1, num_children=2)]
     # Raw now has families 1 and 3; the old final_family snapshot had
     # 1 (matched to sponsor 1) and 2 (since removed from raw).
@@ -719,6 +790,16 @@ def test_run_skip_match_reconciles_without_matching(cfg: Config) -> None:
                     "reason": pl.String,
                 },
             ),
+            "final_sponsor": pl.DataFrame(
+                [
+                    {
+                        **sponsor_row(1, num_children=2),
+                        "assigned_angel_ids": "1A",
+                        "num_angels_assigned": 1,
+                    }
+                ],
+                schema=FINAL_SPONSOR_SCHEMA,
+            ),
         },
     )
 
@@ -735,12 +816,294 @@ def test_run_skip_match_reconciles_without_matching(cfg: Config) -> None:
     # New family 3 has no sponsor; angel counts refresh from final_child.
     assert rows[3]["assigned_sponsor_id"] is None
     assert rows[3]["num_angels_in_family"] == 2
-    # final_sponsor and match_report are untouched.
+    # final_sponsor reconciles the same way: raw columns carry over.
+    final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+    assert final_sponsor is not None
+    sponsors_by_id = {
+        row["sponsor_id"]: row for row in final_sponsor.to_dicts()
+    }
+    assert sponsors_by_id[1]["assigned_angel_ids"] == "1A"
+    assert sponsors_by_id[1]["num_angels_assigned"] == 1
+    assert sponsors_by_id[1]["email"] == sponsor_row(1, num_children=2)["email"]
+    # match_report is untouched.
     report = read_sheet(cfg.excel_file, "match_report")
     assert report is not None
     assert report.to_dicts() == [
         {"kind": "family", "ref": "2", "reason": "unmatched"}
     ]
+
+
+def test_run_skip_match_reconciles_sponsors_without_matching(
+    cfg: Config, caplog
+) -> None:
+    """--skip-match syncs final_sponsor: carry-over, new, dropped."""
+    # Raw now has sponsors 1 and 3; the old final_sponsor snapshot had
+    # 1 (assigned "1A") and 2 (since removed from raw).
+    sponsors = [sponsor_row(1, num_children=2), sponsor_row(3, num_children=1)]
+    families = [family_row(1)]
+    children = [child_row("1A", 1, 8)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+    write_sheets(
+        cfg.excel_file,
+        "match",
+        {
+            "final_sponsor": pl.DataFrame(
+                [
+                    {
+                        **sponsor_row(1, num_children=2),
+                        "assigned_angel_ids": "1A",
+                        "num_angels_assigned": 1,
+                    },
+                    {
+                        **sponsor_row(2, num_children=1),
+                        "assigned_angel_ids": "2A",
+                        "num_angels_assigned": 1,
+                    },
+                ],
+                schema=FINAL_SPONSOR_SCHEMA,
+            )
+        },
+    )
+
+    run(cfg, skip_match=True)
+
+    assert "final_sponsor sponsors no longer in raw_sponsor" in caplog.text
+
+    final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+    assert final_sponsor is not None
+    rows = {row["sponsor_id"]: row for row in final_sponsor.to_dicts()}
+    # Every current raw sponsor has a row; stale sponsor 2 is dropped.
+    assert sorted(rows) == [1, 3]
+    # Existing assignment carries over untouched, count refreshed.
+    assert rows[1]["assigned_angel_ids"] == "1A"
+    assert rows[1]["num_angels_assigned"] == 1
+    # New sponsor 3 has no angels.
+    assert rows[3]["assigned_angel_ids"] is None
+    assert rows[3]["num_angels_assigned"] == 0
+
+
+def test_run_skip_match_propagates_prior_assigned_angel_ids(
+    cfg: Config,
+) -> None:
+    """--skip-match propagates prior_assigned_angel_ids.
+
+    The raw prior overrides any stale carried-over value.
+    """
+    sponsors = [
+        sponsor_row(1, num_children=2, prior="3b, 1A"),
+        sponsor_row(2, num_children=1),
+    ]
+    families = [family_row(1)]
+    children = [child_row("1A", 1, 8)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+    write_sheets(
+        cfg.excel_file,
+        "match",
+        {
+            "final_sponsor": pl.DataFrame(
+                [
+                    {
+                        **sponsor_row(1, num_children=2),
+                        "assigned_angel_ids": "9Z",
+                        "num_angels_assigned": 1,
+                    }
+                ],
+                schema=FINAL_SPONSOR_SCHEMA,
+            )
+        },
+    )
+
+    run(cfg, skip_match=True)
+
+    final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+    assert final_sponsor is not None
+    rows = {row["sponsor_id"]: row for row in final_sponsor.to_dicts()}
+    # Raw manual entry wins: parsed, uppercased, sorted.
+    assert rows[1]["assigned_angel_ids"] == "1A,3B"
+    assert rows[1]["num_angels_assigned"] == 2
+    # No prior -> carry-over/none as before.
+    assert rows[2]["assigned_angel_ids"] is None
+
+
+def test_run_skip_match_prior_points_family_at_sponsor(cfg: Config) -> None:
+    """A propagated prior angel sets its family's sponsor assignment."""
+    # Raw has families 1 and 3; old final_family snapshot assigned
+    # family 1 to sponsor 2 (stale) and family 2 (since removed).
+    sponsors = [sponsor_row(1, num_children=2, prior="1A,1B")]
+    families = [family_row(1), family_row(3)]
+    children = [
+        child_row("1A", 1, 8),
+        child_row("1B", 1, 9),
+        child_row("3A", 3, 5),
+    ]
+    _seed_match_workbook(cfg, sponsors, families, children)
+    write_sheets(
+        cfg.excel_file,
+        "match",
+        {
+            "final_family": pl.DataFrame(
+                [
+                    {
+                        **family_row(1),
+                        "assigned_sponsor_id": 2,
+                        "assigned_angel_ids": "1A",
+                        "num_angels_in_family": 2,
+                    }
+                ],
+                schema=FINAL_FAMILY_SCHEMA,
+            )
+        },
+    )
+
+    run(cfg, skip_match=True)
+
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    rows = {row["family_id"]: row for row in final_family.to_dicts()}
+    # Prior is authoritative: family 1 points at sponsor 1 with the
+    # sponsor's prior angels for that family, replacing the stale list.
+    assert rows[1]["assigned_sponsor_id"] == 1
+    assert rows[1]["assigned_angel_ids"] == "1A,1B"
+    assert rows[1]["num_angels_in_family"] == 2
+    # Family without prior angels keeps its reconciled (null) assignment.
+    assert rows[3]["assigned_sponsor_id"] is None
+    assert rows[3]["assigned_angel_ids"] is None
+    # final_sponsor still carries the propagated list.
+    final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+    assert final_sponsor is not None
+    assert final_sponsor["assigned_angel_ids"].to_list() == ["1A,1B"]
+
+
+def test_run_skip_match_prior_split_family_keeps_existing(
+    cfg: Config, caplog
+) -> None:
+    """A prior touching a family assigned elsewhere warns and keeps it."""
+    sponsors = [
+        sponsor_row(1, num_children=2, prior="1A"),
+        sponsor_row(2, num_children=1, prior="1B"),
+    ]
+    families = [family_row(1)]
+    children = [child_row("1A", 1, 8), child_row("1B", 1, 9)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+
+    with caplog.at_level("WARNING"):
+        run(cfg, skip_match=True)
+
+    # No duplicate angel ids, so no error: the split is only warned about.
+    assert "keeping sponsor 1" in caplog.text
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    row = final_family.to_dicts()[0]
+    # Earlier sponsor_id wins deterministically.
+    assert row["assigned_sponsor_id"] == 1
+    assert row["assigned_angel_ids"] == "1A"
+    final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+    assert final_sponsor is not None
+    by_id = {r["sponsor_id"]: r for r in final_sponsor.to_dicts()}
+    assert by_id[1]["assigned_angel_ids"] == "1A"
+    assert by_id[2]["assigned_angel_ids"] == "1B"
+
+
+def test_run_skip_match_prior_unknown_angel_warns(cfg: Config, caplog) -> None:
+    """A prior angel missing from final_child warns; family untouched."""
+    sponsors = [sponsor_row(1, num_children=2, prior="9Z")]
+    families = [family_row(1)]
+    children = [child_row("1A", 1, 8)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+
+    with caplog.at_level("WARNING"):
+        run(cfg, skip_match=True)
+
+    assert "prior angel 9Z is not in final_child" in caplog.text
+    final_family = read_sheet(cfg.excel_file, "final_family")
+    assert final_family is not None
+    row = final_family.to_dicts()[0]
+    assert row["assigned_sponsor_id"] is None
+    # The prior still propagates to the sponsor's own assigned list.
+    final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+    assert final_sponsor is not None
+    assert final_sponsor["assigned_angel_ids"].to_list() == ["9Z"]
+
+
+def test_run_skip_match_prior_empty_string_falls_back(cfg: Config) -> None:
+    """A whitespace-only prior counts as absent; carry-over applies."""
+    sponsors = [sponsor_row(1, num_children=2, prior="  ")]
+    families = [family_row(1)]
+    children = [child_row("1A", 1, 8)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+    write_sheets(
+        cfg.excel_file,
+        "match",
+        {
+            "final_sponsor": pl.DataFrame(
+                [
+                    {
+                        **sponsor_row(1, num_children=2),
+                        "assigned_angel_ids": "1A",
+                        "num_angels_assigned": 1,
+                    }
+                ],
+                schema=FINAL_SPONSOR_SCHEMA,
+            )
+        },
+    )
+
+    run(cfg, skip_match=True)
+
+    final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+    assert final_sponsor is not None
+    row = final_sponsor.to_dicts()[0]
+    assert row["assigned_angel_ids"] == "1A"
+    assert row["num_angels_assigned"] == 1
+
+
+def test_run_skip_match_prior_conflicts_with_carried_over(
+    cfg: Config,
+) -> None:
+    """A prior id already on another sponsor's carried-over list errors."""
+    sponsors = [sponsor_row(1, num_children=2, prior="1A"), sponsor_row(2)]
+    families = [family_row(1)]
+    children = [child_row("1A", 1, 8)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+    write_sheets(
+        cfg.excel_file,
+        "match",
+        {
+            "final_sponsor": pl.DataFrame(
+                [
+                    {
+                        **sponsor_row(2),
+                        "assigned_angel_ids": "1A,2A",
+                        "num_angels_assigned": 2,
+                    }
+                ],
+                schema=FINAL_SPONSOR_SCHEMA,
+            )
+        },
+    )
+
+    from ccat.match import MatchError
+
+    with pytest.raises(MatchError, match="duplicate angel assignments"):
+        run(cfg, skip_match=True)
+
+
+def test_run_skip_match_prior_conflicts_with_prior(cfg: Config) -> None:
+    """Two sponsors claiming the same prior id error out."""
+    sponsors = [
+        sponsor_row(1, num_children=2, prior="1A"),
+        sponsor_row(2, num_children=1, prior="1a"),  # case-insensitive
+    ]
+    families = [family_row(1)]
+    children = [child_row("1A", 1, 8)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+
+    from ccat.match import MatchError
+
+    with pytest.raises(MatchError, match="1A.*sponsors \\[1, 2\\]"):
+        run(cfg, skip_match=True)
+    # Nothing written: the conflicting final_sponsor never lands.
+    assert read_sheet(cfg.excel_file, "final_sponsor") is None
 
 
 def test_run_skip_match_without_previous_final_family(cfg: Config) -> None:
@@ -757,6 +1120,10 @@ def test_run_skip_match_without_previous_final_family(cfg: Config) -> None:
     assert final_family.height == 1
     assert final_family["assigned_sponsor_id"].to_list() == [None]
     assert final_family["num_angels_in_family"].to_list() == [1]
+    final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+    assert final_sponsor is not None
+    assert final_sponsor["assigned_angel_ids"].to_list() == [None]
+    assert final_sponsor["num_angels_assigned"].to_list() == [0]
 
 
 def test_run_skip_match_warns_on_vanished_sponsor(cfg: Config, caplog) -> None:

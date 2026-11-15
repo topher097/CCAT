@@ -132,6 +132,47 @@ class AuditSpec(BaseModel):
     port: int = 8642
 
 
+class ClarifySpec(BaseModel):
+    """Clarification email tool settings (module 7).
+
+    Attributes:
+        host: Bind address of the local NiceGUI web app.
+        port: Bind port of the local NiceGUI web app.
+        model: Model reference (``provider/model``) writing the email
+            prose, via the opencode SDK (same pattern as module 2).
+        system_prompt: Instructions for the email-writing model; the
+            family record JSON is appended at send time.
+        email_template_html_file: Jinja2 HTML template wrapping the
+            model's prose fragments in paste-safe inline-CSS markup.
+        output_dir: Directory receiving one ``family_<id>.html`` draft
+            and its ``family_<id>.json`` companion (the editable
+            subject/fragment data) per generated email (in addition
+            to the copy shown in the web app).
+        clarifications_csv: CSV path refreshed from the workbook on
+            every ``ccat clarify`` / ``ccat clarify-export`` run; it
+            carries a ``clarification_email_file`` column referencing
+            each family's saved draft when one exists.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = "127.0.0.1"
+    port: int = 8643
+    model: str
+    system_prompt: str
+    email_template_html_file: str = "data/clarification_email_2026.html"
+    output_dir: str = "output/clarify_emails"
+    clarifications_csv: str = "output/clarifications.csv"
+
+    @field_validator("port")
+    @classmethod
+    def _check_port(cls, value: int) -> int:
+        """Require a bindable TCP port."""
+        if not 1 <= value <= 65535:
+            raise ValueError("clarify.port must be between 1 and 65535")
+        return value
+
+
 class AcquireSpec(BaseModel):
     """Data acquisition settings (module 1)."""
 
@@ -175,6 +216,12 @@ class InfoSheetSpec(BaseModel):
         mappings: py3o template variable (dotted, e.g.
             ``"entry.colors"``) mapped onto the column key of the
             enriched ``final_child`` row (see module 5).
+        contact_placeholder_length: Number of underscore characters in
+            the hand-fill placeholder rendered for missing sponsor
+            contact info (§13.2).
+        contact_placeholder_affiliations: Sponsor affiliations whose
+            missing contact info renders the placeholder (§13.2);
+            other affiliations render blank.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -182,11 +229,22 @@ class InfoSheetSpec(BaseModel):
     template_file: str
     output_dir: str
     soffice_binary: str = "soffice"
+    contact_placeholder_length: int = 30
+    contact_placeholder_affiliations: tuple[str, ...] = ()
     mappings: dict[str, str]
 
     @model_validator(mode="after")
     def _check_mappings(self) -> "InfoSheetSpec":
         """Require non-empty, well-formed variable mappings."""
+        if self.contact_placeholder_length < 1:
+            raise ValueError(
+                "info_sheet.contact_placeholder_length must be at least 1"
+            )
+        if any(not label for label in self.contact_placeholder_affiliations):
+            raise ValueError(
+                "info_sheet.contact_placeholder_affiliations entries"
+                " must be non-empty"
+            )
         if not self.mappings:
             raise ValueError("info_sheet.mappings must not be empty")
         for variable, column in self.mappings.items():
@@ -263,6 +321,7 @@ class Config(BaseModel):
     acquire: AcquireSpec
     ai_screening: AIScreeningSpec
     audit: AuditSpec
+    clarify: ClarifySpec
     matchmaking: MatchmakingSpec
     info_sheet: InfoSheetSpec
     report: ReportSpec = ReportSpec()

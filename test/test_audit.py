@@ -191,6 +191,22 @@ def test_queue_overwrite_requeues_audited_children(cfg: Config) -> None:
     ]
 
 
+def test_queue_hide_completed_hides_saved_children(cfg: Config) -> None:
+    """--hide-completed queues only children with no final_child row."""
+    _seed(cfg)
+    state = AuditState(cfg)
+    # c1 saved needing clarification, c2 audited.
+    state.save("c1", {"audited": False, "special_needs": False})
+    state.save("c2", {"audited": True, "special_needs": False})
+    hidden = AuditState(cfg, hide_completed=True).queue()
+    assert [item["zite_record_id"] for item in hidden] == ["orphan1"]
+    # Wins even combined with --overwrite.
+    hidden_overwrite = AuditState(
+        cfg, overwrite=True, hide_completed=True
+    ).queue()
+    assert [item["zite_record_id"] for item in hidden_overwrite] == ["orphan1"]
+
+
 def test_queue_adj_object_null_vs_sparse(cfg: Config) -> None:
     """Adj is the adj row, an all-null object, or null when unscreened (§7.1)."""
     adj = pl.DataFrame(
@@ -258,6 +274,64 @@ def test_save_writes_sheet_for_both_buttons(cfg: Config, audited: bool) -> None:
     # The raw columns carry through into the final row (§7.3).
     assert row["first_name"] == "Kiddo"
     assert row["primary_email"] == "fam@example.com"
+
+
+def test_save_survives_string_boolean_round_trip(cfg: Config) -> None:
+    """Saving after another module rewrote final_child works (§7.3).
+
+    A generate run rewrites the workbook and the Boolean columns read
+    back as strings; the save must normalize them, not crash.
+    """
+    _seed(cfg)
+    final = pl.DataFrame(
+        [
+            {
+                "zite_record_id": "c1",
+                "first_name": "Kiddo",
+                "primary_email": "fam@example.com",
+                "dob": "2018-05-10",
+                "age_at_xmas": 8,
+                "age_reported": 7,
+                "need_1": "winter coat taht fits",
+                "shoe_size": "13",
+                "family_id": 1,
+                "angel_id": "1A",
+                "potential_anomoly": None,
+                "special_needs": "false",
+                "audited": "false",
+                "require_clarification": None,
+                "audited_at": "2026-11-12T00:00:00+00:00",
+                "generated_info_sheet": "false",
+            }
+        ],
+        schema={
+            "zite_record_id": pl.String,
+            "first_name": pl.String,
+            "primary_email": pl.String,
+            "dob": pl.String,
+            "age_at_xmas": pl.Int64,
+            "age_reported": pl.Int64,
+            "need_1": pl.String,
+            "shoe_size": pl.String,
+            "family_id": pl.Int64,
+            "angel_id": pl.String,
+            "potential_anomoly": pl.String,
+            "special_needs": pl.String,
+            "audited": pl.String,
+            "require_clarification": pl.String,
+            "audited_at": pl.String,
+            "generated_info_sheet": pl.String,
+        },
+    )
+    write_sheets(cfg.excel_file, "audit", {"final_child": final})
+    state = AuditState(cfg)
+    row = state.save("c1", {"audited": True, "special_needs": False})
+    assert row["audited"] is True
+    saved = read_sheet(cfg.excel_file, "final_child")
+    assert saved is not None
+    assert saved.schema["audited"] == pl.Boolean
+    assert saved["audited"].to_list() == [True]
+    assert saved["generated_info_sheet"].to_list() == [False]
 
 
 def test_dob_conflict_notes_match_either_side(cfg: Config) -> None:

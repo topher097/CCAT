@@ -86,6 +86,8 @@ convention = "google"
 "*_test.py" = ["ANN001"]
 # Implicit namespace package + pytest fixture arguments (§10).
 "test/**" = ["INP001", "ANN001"]
+# Standalone scripts are an implicit namespace package.
+"scripts/**" = ["INP001"]
 
 [lint.flake8-quotes]
 # Make all docstrings double-quoted

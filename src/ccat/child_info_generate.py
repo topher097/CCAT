@@ -23,8 +23,17 @@ phone, and sponsor id; ``sponsor.angel_id`` shows the child's own
 ``angel_id`` (the same value as ``info.angel_id``), and
 ``sponsor.family_size`` maps to ``family_size`` (the number of angels
 in the child's family).
-Children without an assigned sponsor render that section blank for
-hand-filling, as do unmapped ``sponsor.*`` placeholders.  Only the
+A sponsor whose affiliation is listed in
+``contact_placeholder_affiliations`` (season config: Organization,
+Walmart — everyone but Individual) but has missing contact info
+(name, email, phone) renders **all three** of "Assigned Sponsor
+Name", "Sponsor Email", and "Sponsor Phone" as underscore
+placeholders (length ``info_sheet.contact_placeholder_length``,
+default 30) for hand-filling; the placeholder text is kept in the
+converted PDF.  Individual sponsors with missing contact info render
+blank, as do unassigned children.  Children without an
+assigned sponsor render that section blank for hand-filling, as do
+unmapped ``sponsor.*`` placeholders.  Only the
 original ``final_child`` columns plus ``generated_info_sheet`` are
 written back to the workbook; the enrichment columns never reach the
 sheet.
@@ -78,7 +87,21 @@ SPONSOR_JOIN_COLUMNS: tuple[tuple[str, str], ...] = (
     ("organization_name", "sponsor_organization_name"),
     ("email", "sponsor_email"),
     ("phone", "sponsor_phone"),
+    ("sponsor_type", "sponsor_type"),
 )
+
+#: ``sponsor.*`` template variables treated as sponsor contact info
+#: (§13.2): when the assigned sponsor's sheet lacks the value, these
+#: render as the underscore placeholder so the sponsor can hand-fill it.
+CONTACT_PLACEHOLDERS: frozenset[str] = frozenset(
+    {"full_name", "email", "phone"}
+)
+
+#: Underscore placeholder rendered for missing sponsor contact info
+#: (§13.2) — a hand-fill line of a fixed length, kept visible in the
+#: converted PDF.  Default length; the configured value is
+#: ``info_sheet.contact_placeholder_length``.
+SPONSOR_CONTACT_PLACEHOLDER = "_" * 30
 
 #: Computed columns added on top of the ``final_child`` schema (§13).
 COMPUTED_COLUMNS = ("family_size", "sponsor_name")
@@ -309,7 +332,10 @@ def _pending_rows(
 
 
 def _nested_data(
-    row: dict[str, Any], mappings: dict[str, str]
+    row: dict[str, Any],
+    mappings: dict[str, str],
+    contact_placeholder: str = SPONSOR_CONTACT_PLACEHOLDER,
+    placeholder_affiliations: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Build the nested py3o data dict for one row (§13).
 
@@ -320,13 +346,42 @@ def _nested_data(
     and render blank otherwise (unassigned child or unmapped
     placeholder).
 
+    Missing sponsor contact info (``sponsor.full_name``/``email``/
+    ``phone`` — null, empty, or whitespace-only) renders the underscore
+    placeholder for hand-filling when the child has an assigned sponsor
+    whose affiliation is in ``placeholder_affiliations`` (§13.2).
+    All-or-nothing: when any of the three is missing, all three render
+    the placeholder so the coordinator hand-fills the whole block.
+    Everyone else — unassigned children, unlisted affiliations — keeps
+    the blank section.
+
     Args:
         row: One enriched ``final_child`` row as a plain dict.
         mappings: Config template-variable -> column-key mappings.
+        contact_placeholder: The underscore hand-fill line rendered for
+            missing sponsor contact info.
+        placeholder_affiliations: Affiliations receiving the
+            placeholder (joined ``sponsor_type`` column).
 
     Returns:
         The py3o data dict, e.g. ``{"entry": {"footwear": {"size": 2}}}``.
     """
+    sponsored = row.get("assigned_sponsor_id") is not None
+    placeholder_sponsor = sponsored and (
+        row.get("sponsor_type") in placeholder_affiliations
+    )
+    contact_missing = False
+    if placeholder_sponsor:
+        for variable, column in mappings.items():
+            parts = variable.split(".")
+            if parts[0] != "sponsor" or parts[-1] not in CONTACT_PLACEHOLDERS:
+                continue
+            value = row.get(column)
+            contact_missing = (
+                contact_missing
+                or value is None
+                or (isinstance(value, str) and not value.strip())
+            )
     data: dict[str, Any] = {}
     for variable, column in mappings.items():
         parts = variable.split(".")
@@ -334,6 +389,12 @@ def _nested_data(
         for part in parts[:-1]:
             node = node.setdefault(part, {})
         value = row.get(column)
+        if (
+            contact_missing
+            and parts[0] == "sponsor"
+            and parts[-1] in CONTACT_PLACEHOLDERS
+        ):
+            value = contact_placeholder
         node[parts[-1]] = "" if value is None else value
     for placeholder in SPONSOR_PLACEHOLDERS:
         data.setdefault("sponsor", {}).setdefault(placeholder, "")
@@ -460,7 +521,12 @@ def _sheet_stem(cfg: Config, angel_id: str) -> str:
     return f"AT{cfg.season}_{angel_id}"
 
 
-def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
+def run(
+    cfg: Config,
+    test: bool = False,
+    overwrite: bool = False,
+    sponsor: int | None = None,
+) -> None:
     """Generate child info sheet PDFs, then sponsor packets (§13, §13b).
 
     Sheet phase: pending rows are children whose family has an
@@ -486,6 +552,9 @@ def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
         overwrite: Ignore the ``generated_info_sheet`` column: every
             sponsored child's PDF is regenerated (existing files are
             overwritten) and the packets are rebuilt.
+        sponsor: Restrict the run to one sponsor: the sheet phase only
+            renders children assigned to that ``sponsor_id`` and only
+            that sponsor's packet is built (its sheets must all exist).
     """
     spec = cfg.info_sheet
     template_file = Path(spec.template_file)
@@ -499,6 +568,15 @@ def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     base, enriched, schema_added = _load_enriched_rows(cfg)
     pending, _skipped = _pending_rows(enriched, overwrite=overwrite)
+    if sponsor is not None:
+        scoped = pending.filter(pl.col("assigned_sponsor_id") == sponsor)
+        logger.info(
+            "--sponsor %s: %d of %d pending row(s) belong to it",
+            sponsor,
+            scoped.height,
+            pending.height,
+        )
+        pending = scoped
     generated: list[Any] = []
     failed: list[str] = []
     if pending.is_empty():
@@ -533,7 +611,12 @@ def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
                 try:
                     _render_one(
                         template_file,
-                        _nested_data(row, spec.mappings),
+                        _nested_data(
+                            row,
+                            spec.mappings,
+                            "_" * spec.contact_placeholder_length,
+                            frozenset(spec.contact_placeholder_affiliations),
+                        ),
                         odt_path,
                     )
                     _convert_to_pdf(
@@ -564,6 +647,13 @@ def run(cfg: Config, test: bool = False, overwrite: bool = False) -> None:
         raise InfoSheetError(f"info sheet generation failed for: {failed}")
     if test:
         logger.info("test mode: skipping sponsor packet generation")
+        return
+    if sponsor is not None:
+        # Only this sponsor's packet; its own sheets must all exist.
+        sponsor_packets.validate_all_sheets_exist(cfg, sponsor_id=sponsor)
+        sponsor_packets.build_packets(
+            cfg, overwrite=overwrite, sponsor_id=sponsor
+        )
         return
     # The packets combine every sponsored angel's sheet, so all sheets
     # must exist before the packet phase runs.

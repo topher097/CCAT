@@ -178,7 +178,7 @@ Structure:
   // the Zite form schema export ("Copper Country Angel Tree - 2026.json").
   // Enum-typed columns above reference these by name; see Appendix A.
   "vocabularies": {
-    "sponsor_affiliation":   ["Individual", "Group", "Organization"],
+    "sponsor_affiliation":   ["Individual", "Organization", "Walmart"],
     "sponsor_num_children":  ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "15", "20", "25"],
     "sponsor_age_preference": [
       "Any Age", "Newborn through Toddler (0-3 yrs)",
@@ -582,7 +582,8 @@ dependencies, single human user.
   {...}, adj: {...}}` where `raw` is the full raw row and `adj` is the
   `adj_child` row (all-null fields when the child was screened with no
   changes; `null` object when the child has not been screened yet).
-  `angel_id` is null for orphaned children.
+  `angel_id` is null for orphaned children.  `--hide-completed` (§7.2)
+  restricts the queue to children with no `final_child` row.
 - `PUT /api/children/{zite_record_id}` — body: edited adj JSON. Server
   validates (JSON parses; keys are known child columns), then writes the
   child's `final_child` row (see 7.3).
@@ -615,7 +616,10 @@ dependencies, single human user.
 - The tool never displays children whose `final_child` row exists with
   `audited == true` (`ccat audit --overwrite` re-queues audited children
   and allows re-saving frozen rows; the `audited`/`audited_at` columns
-  stop gating anything for that session).
+  stop gating anything for that session).  With `ccat audit
+  --hide-completed`, the queue shows only children with no
+  `final_child` row at all (children saved earlier — audited or
+  needing clarification — are hidden, even with `--overwrite`).
 
 ### 7.3 `final_child` row
 
@@ -659,9 +663,9 @@ Entry point: `src/ccat/match.py`, CLI `ccat match [--config PATH]`.
   `match_report`).
 - **Sponsor class ordering**: sponsors whose `age_preference` is "Special
   Needs (any age)" are matched first (their special-needs preference is the
-  highest preference, §8.3). Then `Individual` sponsors, then `Group` and
-  `Organization` sponsors together — `Group` is treated as an organization
-  class. Within each phase, sponsors are ordered by `sponsor_id` ascending.
+  highest preference, §8.3). Then `Individual` sponsors, then
+  `Organization` and `Walmart` sponsors together. Within each phase,
+  sponsors are ordered by `sponsor_id` ascending.
 - **Pre-assigned sponsors are excluded from matchmaking**: sponsors whose
   `prior_assigned_angel_ids` is non-null keep their manual assignment and
   never draw from the pool (§8.5).
@@ -701,8 +705,8 @@ tens of sponsors/families):
   with `child_count`, aggregated age/gender/location signals — **minus every
   child pre-assigned via `prior_assigned_angel_ids`** (§8.5).
 - Process sponsors in phases: special-needs sponsors first, then
-  `Individual`, then `Group` and `Organization` together (Group treated as
-  organization), each ordered by `sponsor_id` ascending (creation order).
+  `Individual`, then `Organization` and `Walmart` together, each ordered
+  by `sponsor_id` ascending (creation order).
   Pre-assigned sponsors (§8.5) are skipped entirely.
 - For each sponsor, search subsets of remaining families whose child counts
   sum exactly to the sponsor's `num_children`; score each subset by the sum
@@ -733,7 +737,12 @@ Some sponsors already have manually assigned angels recorded in the
   `family_id`) not covered by that sponsor's pre-assigned list, the siblings
   are added to the same sponsor when the sponsor's `num_children` allows;
   otherwise the family is flagged in `match_report` (family would otherwise
-  be split between a pre-assignment and the pool).
+  be split between a pre-assignment and the pool).  A family the §8.5
+  reconciliation leaves unassigned (e.g. partially covered, siblings
+  exceeding `num_children`) is still pointed at the pre-assigned sponsor
+  in `final_family`, with `assigned_angel_ids` limited to that sponsor's
+  prior angels of the family; the `match_report` split flag remains for
+  manual follow-up.
 - Pre-assigned sponsors do **not** participate in pool matchmaking, and
   their pre-assigned children are removed from the pool available to
   everyone else.
@@ -761,6 +770,35 @@ Some sponsors already have manually assigned angels recorded in the
   matchings are never silently lost. `ccat match --overwrite` skips the
   archiving and replaces the sheets in place.
 - `final_child` is read-only here (never rewritten).
+
+### 8.7 `--skip-match` reconciliation
+
+`ccat match --skip-match` never runs the matching algorithm or touches
+`match_report`.  Instead it reconciles the output sheets against the current
+raw rows (§8.6 ownership still applies):
+
+- `final_family`: one row per current `raw_family` family; previously
+  assigned sponsors and angel lists carry over unchanged; new families get
+  no sponsor; stale families are dropped with a warning;
+  `num_angels_in_family` refreshes from `final_child`.
+- `final_sponsor`: one row per current `raw_sponsor` sponsor; a non-empty
+  `prior_assigned_angel_ids` is propagated to `assigned_angel_ids`
+  (parsed per §8.5, uppercased, sorted); otherwise the previously assigned
+  angel list carries over unchanged; new sponsors get none; stale sponsors
+  are dropped with a warning; `num_angels_assigned` refreshes from the
+  resulting list.  If the same angel_id ends up assigned to more than one
+  sponsor, a `MatchError` is raised before anything is written.
+- `final_family` follow-through: each propagated prior angel's family gets
+  `assigned_sponsor_id` set to that sponsor and `assigned_angel_ids` set to
+  that sponsor's prior angels of the family (replacing any carried-over
+  list).  Prior angels not in `final_child`, or whose family is not in
+  `raw_family`, warn and are skipped.  A family already assigned to a
+  different current `raw_sponsor` sponsor keeps that assignment and warns
+  (split family; earlier `sponsor_id` wins deterministically).  A family
+  assigned to a sponsor no longer in `raw_sponsor` is stale: the prior
+  reassigns it.
+- Previous `final_family`/`final_sponsor` sheets are archived
+  (timestamped) unless `--overwrite`.
 
 ## 9. Idempotency and Ground-Truth Protection
 
@@ -857,8 +895,8 @@ Resolved decisions (for the record):
 - ~~Gender vocabulary~~ — `Non-binary` children pair only with `Any Gender`
   sponsors, as a hard rule (§8.3).
 - ~~Location vocabulary~~ — canonicalized via `location_groups` (§3, §8.3).
-- ~~Affiliation ordering~~ — `Group` is treated as an organization; phases
-  are special-needs, Individual, then Group + Organization (§8.2).
+- ~~Affiliation ordering~~ — phases are special-needs, Individual, then
+  Organization + Walmart (§8.2).
 - ~~Infant threshold~~ — `age_at_xmas < 2` (Appendix B prompt).
 - ~~`prior_assigned_angel_ids`~~ — reconciliation rules in §8.5.
 - ~~Zite write-back~~ — never; Zite is read-only (§11).
@@ -901,7 +939,18 @@ join (aliased `sponsor_*` columns) plus computed `sponsor_name`
 
 Children without an assigned sponsor (null `assigned_sponsor_id`) render
 the `sponsor.*` section blank for hand-filling, as do unmapped
-`sponsor.*` placeholders.
+`sponsor.*` placeholders.  A sponsor **with** assigned angels whose
+contact info is missing (null, empty, or whitespace-only name, email,
+or phone) renders that variable as an underscore placeholder
+(`sponsor_contact_placeholder_length`, config-driven, default 30 `_`
+characters) when the sponsor's affiliation is listed in
+`contact_placeholder_affiliations` (season config: Organization,
+Walmart — every affiliation except Individual).  All-or-nothing: when
+any of the three is missing, all three render the placeholder
+("Assigned Sponsor Name", "Sponsor Email", "Sponsor Phone") so the
+coordinator hand-fills the whole block; Individual sponsors
+and unassigned children render blank.  The placeholder is plain text,
+so it survives the ODT -> PDF conversion unchanged.
 
 ### 13.3 `generated_info_sheet` flag
 
@@ -930,6 +979,11 @@ the `sponsor.*` section blank for hand-filling, as do unmapped
   `InfoSheetError` reports any failed angel ids.  Reruns pick up exactly
   the failed rows.
 - `--test` stops after the first successfully generated sheet.
+- `--sponsor <id>` scopes the run to one sponsor: the sheet phase only
+  renders that sponsor's pending children (respecting the flag, unless
+  `--overwrite`), and the packet phase builds only that sponsor's packet
+  (its sheets must all exist; an unknown or angel-less sponsor id is a
+  typed `SponsorPacketError`).
 - Pending rows need a non-null `zite_record_id` and a safe `angel_id`
   filename (no separators); missing family/sponsor rows or duplicate
   `family_id`/`sponsor_id`s in `final_family`/`final_sponsor` are hard
@@ -976,6 +1030,8 @@ Run semantics:
 
 - Reruns skip sponsors whose packet files already exist;
   `--overwrite` regenerates (manual email edits are lost only then).
+  `ccat generate --sponsor <id>` (module 5, §13.4) builds only that
+  sponsor's packet.
 - Sponsors without assigned angels produce no directory; unknown angel
   ids in `assigned_angel_ids` are dropped with a warning.
 - Angels whose child information sheet PDF has not been generated yet
@@ -998,7 +1054,7 @@ use these exact labels.
 
 | Column | Options |
 |--------|---------|
-| Affiliation | Individual, Group, Organization |
+| Affiliation | Individual, Organization, Walmart |
 | Number of Angels to Sponsor | 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25 |
 | Age Preference | Any Age; Newborn through Toddler (0-3 yrs); Pre-K through Grade 5 (4-10 yrs); Middle School (11-13 yrs); High School (14-18+ yrs); Special Needs (any age) |
 | Gender Preference | Any Gender, Male, Female |

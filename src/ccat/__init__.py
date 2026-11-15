@@ -8,9 +8,12 @@ modules runnable independently, each taking an optional ``--config`` path
     ccat screen   [--config PATH] [--redo ZITE_RECORD_ID] [--test]
                   [--overwrite]
     ccat audit    [--config PATH] [--test] [--overwrite] [--restart]
+                  [--hide-completed]
     ccat match    [--config PATH] [--test] [--overwrite] [--skip-match]
     ccat generate [--config PATH] [--test] [--overwrite]
     ccat stats    [--config PATH] [--raw]
+    ccat clarify  [--config PATH] [--generate] [--overwrite]
+    ccat clarify-export [--config PATH] [--output PATH]
 
 The ``--test`` flag (screen/audit/match/generate) stops the run after the
 first full family (screening: only the first family's children are
@@ -27,7 +30,9 @@ regardless of the ``generated_info_sheet`` column.
 
 The audit tool's ``--restart`` flag stops any currently running audit
 tool process (e.g. a stale server still holding the port) before
-starting.
+starting.  With ``--hide-completed`` the queue shows only children
+that have no ``final_child`` row at all (children saved earlier —
+audited or needing clarification — are hidden).
 
 ``ccat match --skip-match`` skips the automatic assignment algorithm
 and only reconciles ``final_family`` with the current ``raw_family``
@@ -49,10 +54,32 @@ PDF into ``report.output_dir`` (default ``output/reports``).  With
 ``--raw`` it reads ``raw_child``/``raw_family`` instead of the final
 sheets, so the report works before audit/match has run; sponsor counts
 are zero in that mode (``raw_family`` has no ``assigned_sponsor_id``).
+
+``ccat clarify`` serves a local NiceGUI web app with one card per
+family whose Angels carry a ``require_clarification`` note
+(module 7).  A per-family button generates a polite clarification
+email to the family's primary email — prose written by the configured
+LLM via the opencode SDK, wrapped in a paste-safe HTML template —
+shown in an editable copy dialog and saved under ``clarify.output_dir``
+(``family_<id>.html`` plus its editable ``family_<id>.json``
+companion).  Each card also tracks contact status ("Mark contacted"
+stamps the time, a "Reply received" switch records the answer),
+persisted in a JSON sidecar and merged into the CSV's ``contacted``,
+``contacted_at``, and ``replied`` columns.  The CSV copy
+(``clarify.clarifications_csv``) is refreshed on start and after
+every save/status change; its ``clarification_email_file`` column
+references each family's saved draft.  ``ccat clarify --generate``
+skips the server entirely and headlessly generates every missing
+family's draft; adding ``--overwrite`` regenerates existing drafts
+too.  ``--overwrite`` without ``--generate`` does nothing (the
+server starts normally).  ``ccat clarify-export`` only refreshes the
+CSV (no server, no generation), the successor of the old
+``scripts/find_clarification.py``.
 """
 
 import importlib
 import logging
+from pathlib import Path
 
 import fire
 
@@ -69,6 +96,7 @@ def _typed_errors() -> tuple[type[BaseException], ...]:
     from ccat.acquire import AcquisitionError
     from ccat.audit.server import AuditError
     from ccat.child_info_generate import InfoSheetError
+    from ccat.clarify import ClarifyError
     from ccat.match import MatchError
     from ccat.screening import ScreeningError
     from ccat.sponsor_packets import SponsorPacketError
@@ -79,6 +107,7 @@ def _typed_errors() -> tuple[type[BaseException], ...]:
         AcquisitionError,
         ScreeningError,
         AuditError,
+        ClarifyError,
         MatchError,
         InfoSheetError,
         SponsorPacketError,
@@ -154,6 +183,7 @@ def _audit_cmd(
     test: bool = False,
     overwrite: bool = False,
     restart: bool = False,
+    hide_completed: bool = False,
 ) -> None:
     """Run module 3: local human audit web tool (§7).
 
@@ -164,6 +194,8 @@ def _audit_cmd(
             the queue and frozen rows may be re-saved.
         restart: Stop any currently running audit tool process before
             starting.
+        hide_completed: Queue only children with no final_child row at
+            all; children saved earlier are hidden.
     """
     _dispatch(
         "audit",
@@ -172,6 +204,7 @@ def _audit_cmd(
         test=test,
         overwrite=overwrite,
         restart=restart,
+        hide_completed=hide_completed,
     )
 
 
@@ -189,10 +222,16 @@ def _match_cmd(
         overwrite: Ignore the audited column and replace previous
             final_family/final_sponsor/match_report in place instead of
             archiving them.
-        skip_match: Reconcile final_family with the current raw_family
-            without running the matching algorithm: every family gets a
-            row, existing sponsor assignments carry over, new families
-            get none.  final_sponsor and match_report are untouched.
+        skip_match: Reconcile final_family and final_sponsor with the
+            current raw rows without running the matching algorithm: every
+            family and sponsor gets a row, existing assignments carry
+            over, new ones get none.  prior_assigned_angel_ids propagates
+            to assigned_angel_ids and points the angel's family at that
+            sponsor in final_family; duplicate angel ids across sponsors
+            raise an error.  match_report is untouched.
+            Without skip_match the §8.5 reconciliation stays
+            authoritative; prior angels only fill in families the
+            matching left unassigned.
     """
     _dispatch(
         "match",
@@ -208,6 +247,7 @@ def _generate_cmd(
     config: str = DEFAULT_CONFIG,
     test: bool = False,
     overwrite: bool = False,
+    sponsor: int | None = None,
 ) -> None:
     """Run module 5 + 5b: info sheets, then sponsor packets (§13, §13b).
 
@@ -217,6 +257,9 @@ def _generate_cmd(
             sponsor packets).
         overwrite: Regenerate every child's info sheet, ignoring the
             generated_info_sheet column, and rebuild the packets.
+        sponsor: Restrict the run to one sponsor id: the sheet phase
+            renders only that sponsor's pending children and only that
+            sponsor's packet is built.
     """
     _dispatch(
         "generate",
@@ -224,6 +267,7 @@ def _generate_cmd(
         config,
         test=test,
         overwrite=overwrite,
+        sponsor=sponsor,
     )
 
 
@@ -238,6 +282,48 @@ def _stats_cmd(config: str = DEFAULT_CONFIG, raw: bool = False) -> None:
     _dispatch("stats", "stats:run", config, raw=raw)
 
 
+def _clarify_cmd(
+    config: str = DEFAULT_CONFIG,
+    generate: bool = False,
+    overwrite: bool = False,
+) -> None:
+    """Run module 7: clarification email web app or headless generation.
+
+    Args:
+        config: Path to the JSON configuration file.
+        generate: Headless mode (no server): generate an email draft
+            for every family that does not have one yet, then exit.
+        overwrite: With ``generate``, regenerate even families that
+            already have a saved draft; without ``generate`` this
+            flag is ignored and the server starts normally.
+    """
+    _dispatch(
+        "clarify",
+        "clarify.server:run",
+        config,
+        generate=generate,
+        overwrite=overwrite,
+    )
+
+
+def _clarify_export_cmd(
+    config: str = DEFAULT_CONFIG, output: str | None = None
+) -> None:
+    """Run module 7 (headless): refresh the clarifications CSV.
+
+    Args:
+        config: Path to the JSON configuration file.
+        output: Output CSV path; defaults to
+            ``clarify.clarifications_csv``.
+    """
+    _dispatch(
+        "clarify-export",
+        "clarify.extract:write_csv",
+        config,
+        output=Path(output) if output else None,
+    )
+
+
 def main() -> None:
     """Entry point for the ``ccat`` CLI."""
     fire.Fire(
@@ -248,6 +334,8 @@ def main() -> None:
             "match": _match_cmd,
             "generate": _generate_cmd,
             "stats": _stats_cmd,
+            "clarify": _clarify_cmd,
+            "clarify-export": _clarify_export_cmd,
         }
     )
 
