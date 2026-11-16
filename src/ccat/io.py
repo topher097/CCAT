@@ -58,6 +58,10 @@ SHEETS = (
     "raw_sponsor",
     "raw_family",
     "raw_child",
+    "family_submissions",
+    "child_submissions",
+    "adj_sponsor",
+    "adj_family",
     "adj_child",
     "final_child",
     "final_family",
@@ -67,31 +71,82 @@ SHEETS = (
     "dob_conflict_log",
 )
 
-#: Ownership matrix (§9): module -> sheets it may write.
+#: Ownership matrix (§9 as amended by the audit architecture §4.4): module
+#: -> sheets it may write.  The matrix is sheet-level; column scoping
+#: (match writes assignment columns only, audit never touches them,
+#: generate writes ``generated_info_sheet`` only) is enforced by the
+#: modules through the shared store helpers and by tests.
 WRITABLE_SHEETS: dict[str, frozenset[str]] = {
     "acquire": frozenset(
         {
             "raw_sponsor",
             "raw_family",
             "raw_child",
+            "family_submissions",
+            "child_submissions",
             "dedup_log",
             "dob_conflict_log",
         }
     ),
     "screen": frozenset({"adj_child"}),
-    "audit": frozenset({"final_child"}),
-    "match": frozenset({"final_family", "final_sponsor", "match_report"}),
-    "generate": frozenset({"final_child"}),
+    "audit": frozenset(
+        {"adj_child", "adj_family", "adj_sponsor", "final_child"}
+    ),
+    "match": frozenset(
+        {
+            "adj_family",
+            "adj_sponsor",
+            "final_family",
+            "final_sponsor",
+            "match_report",
+        }
+    ),
+    "generate": frozenset({"adj_child", "final_child"}),
     "stats": frozenset({"final_child", "final_family", "final_sponsor"}),
+    "migrate": frozenset(
+        {
+            "raw_sponsor",
+            "raw_family",
+            "raw_child",
+            "family_submissions",
+            "child_submissions",
+            "dedup_log",
+            "dob_conflict_log",
+            "adj_child",
+            "adj_family",
+            "adj_sponsor",
+            "final_child",
+            "final_family",
+            "final_sponsor",
+        }
+    ),
 }
 
 #: Read access matrix (§9); listed for documentation, all modules may read.
 READABLE_SHEETS: dict[str, frozenset[str]] = {
     "acquire": frozenset(),
-    "screen": frozenset({"raw_child", "adj_child", "final_child"}),
-    "audit": frozenset({"raw_child", "adj_child", "final_child"}),
-    "match": frozenset({"raw_family", "raw_sponsor", "final_child"}),
-    "generate": frozenset({"final_child", "final_family", "final_sponsor"}),
+    "screen": frozenset({"raw_child", "adj_child"}),
+    "audit": frozenset(
+        {
+            "raw_sponsor",
+            "raw_family",
+            "raw_child",
+            "family_submissions",
+            "child_submissions",
+            "adj_child",
+            "adj_family",
+            "adj_sponsor",
+            "final_child",
+            "dob_conflict_log",
+        }
+    ),
+    "match": frozenset(
+        {"adj_child", "adj_family", "adj_sponsor", "final_child"}
+    ),
+    "generate": frozenset(
+        {"adj_child", "final_child", "final_family", "final_sponsor"}
+    ),
+    "migrate": frozenset(SHEETS),
 }
 
 

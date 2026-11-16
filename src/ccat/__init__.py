@@ -7,32 +7,38 @@ modules runnable independently, each taking an optional ``--config`` path
     ccat acquire  [--config PATH]
     ccat screen   [--config PATH] [--redo ZITE_RECORD_ID] [--test]
                   [--overwrite]
-    ccat audit    [--config PATH] [--test] [--overwrite] [--restart]
-                  [--hide-completed]
+    ccat audit    [--config PATH] [--test] [--restart]
     ccat match    [--config PATH] [--test] [--overwrite] [--skip-match]
-    ccat generate [--config PATH] [--test] [--overwrite]
+    ccat generate [--config PATH] [--test] [--overwrite] [--sponsor ID]
+                  [--max-workers N]
     ccat stats    [--config PATH] [--raw]
     ccat clarify  [--config PATH] [--generate] [--overwrite]
     ccat clarify-export [--config PATH] [--output PATH]
+    ccat audit-migrate [--config PATH] --from PATH [--force]
 
 The ``--test`` flag (screen/audit/match/generate) stops the run after the
 first full family (screening: only the first family's children are
-screened; audit: the queue is limited to the first family and the server
-stops once it is fully audited; match: only the first sponsor in phase
+screened; audit: the lists are limited to the first family, its
+children, and the first sponsor; match: only the first sponsor in phase
 order is matched; generate: only the first info sheet PDF is generated).
 
-The ``--overwrite`` flag (screen/audit/match/generate) ignores previously
-generated output: screening replaces every ``adj_child`` row; the audit
-tool re-queues audited children and allows re-saving frozen rows;
-matchmaking ignores the ``audited`` column and replaces its outputs in
-place instead of archiving; info sheet generation re-renders every PDF
-regardless of the ``generated_info_sheet`` column.
+The audit tool (module 3) is a multi-page NiceGUI app: a dashboard with
+sponsor/family stats, sponsor and family lists with status filters, and
+detail pages where every adjudicable field is edited against the raw
+submissions side by side.  ``audited`` is a revocable checkbox and the
+status (new / in_progress / needs_clarification / ignored / audited) is
+recomputed on every save; ignored rows are reduced to their identity
+skeleton and disappear from the final sheets.  ``--restart`` stops a
+stale audit tool process before starting.
 
-The audit tool's ``--restart`` flag stops any currently running audit
-tool process (e.g. a stale server still holding the port) before
-starting.  With ``--hide-completed`` the queue shows only children
-that have no ``final_child`` row at all (children saved earlier —
-audited or needing clarification — are hidden).
+``ccat audit-migrate`` bootstraps the v2 workbook
+(``output/ccat_2026_v2.xlsx`` via ``config/ccat_2026_v2.json``) from the
+old one given by ``--from``: the raw layer is copied verbatim (the old
+workbook is never written), the dense adj sheets are built from the old
+sparse adj_child plus the old final rows, and all three finals are
+projected so downstream modules work immediately.  It refuses to run
+when the target already contains adj/final sheets unless ``--force``
+is given.
 
 ``ccat match --skip-match`` skips the automatic assignment algorithm
 and only reconciles ``final_family`` with the current ``raw_family``
@@ -79,6 +85,7 @@ CSV (no server, no generation), the successor of the old
 
 import importlib
 import logging
+import os
 from pathlib import Path
 
 import fire
@@ -88,13 +95,18 @@ from ccat.io import SheetOwnershipError, setup_logging
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG = "config/ccat_2026.json"
+#: Default config path for every ``ccat`` command.  The
+#: ``DEFAULT_CONFIG`` environment variable overrides it (exported by
+#: ``.envrc``); the fallback is the original 2026 season config, so the
+#: repo default only changes when the user cuts over (audit arch §14
+#: Q1).
+DEFAULT_CONFIG = os.environ.get("DEFAULT_CONFIG", "config/ccat_2026.json")
 
 
 def _typed_errors() -> tuple[type[BaseException], ...]:
     """Collect the typed exceptions modules may raise (§11)."""
     from ccat.acquire import AcquisitionError
-    from ccat.audit.server import AuditError
+    from ccat.audit import AuditError
     from ccat.child_info_generate import InfoSheetError
     from ccat.clarify import ClarifyError
     from ccat.match import MatchError
@@ -181,30 +193,56 @@ def _screen_cmd(
 def _audit_cmd(
     config: str = DEFAULT_CONFIG,
     test: bool = False,
-    overwrite: bool = False,
     restart: bool = False,
-    hide_completed: bool = False,
 ) -> None:
-    """Run module 3: local human audit web tool (§7).
+    """Run module 3: local human audit web tool (§7 audit architecture).
 
     Args:
         config: Path to the JSON configuration file.
-        test: Stop after the first full family is audited.
-        overwrite: Ignore the audited column: audited children re-enter
-            the queue and frozen rows may be re-saved.
+        test: Limit every list to the first family (lowest family_id),
+            its children, and the first sponsor; the dashboard reflects
+            the reduced scope.
         restart: Stop any currently running audit tool process before
             starting.
-        hide_completed: Queue only children with no final_child row at
-            all; children saved earlier are hidden.
     """
     _dispatch(
         "audit",
         "audit.server:run",
         config,
         test=test,
-        overwrite=overwrite,
         restart=restart,
-        hide_completed=hide_completed,
+    )
+
+
+def _audit_migrate_cmd(config: str = DEFAULT_CONFIG, **kwargs: object) -> None:
+    """Bootstrap the v2 workbook from the old one (§11 audit arch).
+
+    Args:
+        config: Path to the **new** JSON configuration file (typically
+            ``config/ccat_2026_v2.json``).
+        kwargs: ``from`` (passed as ``--from``; the old workbook,
+            opened read-only) and the optional ``force`` flag that
+            re-creates adj/final sheets in a non-empty target.
+
+    Raises:
+        SystemExit: On unknown flags.
+    """
+    from_path = kwargs.pop("from", None)
+    if from_path is None:
+        from_path = kwargs.pop("from_path", None)
+    force = bool(kwargs.pop("force", False))
+    if kwargs:
+        raise SystemExit(f"unknown flags: {sorted(kwargs)}")
+    if not from_path:
+        raise SystemExit(
+            "audit-migrate requires --from PATH (the old workbook)"
+        )
+    _dispatch(
+        "audit-migrate",
+        "audit.migrate:run",
+        config,
+        from_path=str(from_path),
+        force=force,
     )
 
 
@@ -336,6 +374,7 @@ def main() -> None:
             "acquire": _acquire_cmd,
             "screen": _screen_cmd,
             "audit": _audit_cmd,
+            "audit-migrate": _audit_migrate_cmd,
             "match": _match_cmd,
             "generate": _generate_cmd,
             "stats": _stats_cmd,

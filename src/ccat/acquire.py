@@ -300,7 +300,12 @@ def _parse_reported_age(value: Any) -> int | None:
 
 def process_table(
     frame: pl.DataFrame, table_name: str, cfg: Config
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     """Import, clean, and validate one table (§5.1–§5.3).
 
     Family rows are deduplicated (§5.4) on cleaned rows before validation so
@@ -314,10 +319,12 @@ def process_table(
         cfg: Pipeline configuration.
 
     Returns:
-        A tuple of (kept rows, rejected-row records, dedup-log rows) where
-        each rejected record has table, index, column, value, and reason
-        keys; the dedup log is empty except for the family and child
-        tables.
+        A tuple of (kept rows, rejected-row records, dedup-log rows,
+        cleaned pre-dedup submission rows) where each rejected record has
+        table, index, column, value, and reason keys; the dedup log is
+        empty except for the family and child tables; the submission
+        rows feed the ``family_submissions``/``child_submissions``
+        sheets (§4.2 of the audit architecture).
     """
     rows = import_table(frame, table_name, cfg)
     specs = cfg.tables[table_name].columns
@@ -354,6 +361,7 @@ def process_table(
                 )
         else:
             cleaned.append(out)
+    submissions = list(cleaned)
     if table_name == "family":
         cleaned, dedup_log = dedup_families(cleaned, cfg)
     elif table_name == "child":
@@ -362,7 +370,44 @@ def process_table(
         dedup_log = []
     kept, schema_rejected = validate_rows(cleaned, table_name, cfg)
     rejected.extend(schema_rejected)
-    return kept, rejected, dedup_log
+    return kept, rejected, dedup_log, submissions
+
+
+def submissions_frame(
+    rows: list[dict[str, Any]], table_name: str, cfg: Config
+) -> pl.DataFrame:
+    """Build one ``{table}_submissions`` sheet frame (§4.2 audit arch).
+
+    Exactly the table's config columns -- no ``family_id``/``angel_id``/
+    ``age_at_xmas`` (post-link derived) -- sorted by
+    (``created``, ``zite_record_id``) ascending, the same order dedup
+    uses.  Rows that later fail pandera validation are included (they
+    are real submissions the auditor should see); rows rejected during
+    cleaning never reach this frame.
+
+    Args:
+        rows: Cleaned pre-dedup rows from :func:`process_table`.
+        table_name: "family" or "child".
+        cfg: Pipeline configuration.
+
+    Returns:
+        The typed frame, sorted for the sheet.
+    """
+    specs = cfg.tables[table_name].columns
+    schema: dict[str, PolarsDataType] = {
+        key: PL_DTYPES[spec.type] for key, spec in specs.items()
+    }
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            row.get("created") or "",
+            row.get("zite_record_id") or "",
+        ),
+    )
+    return pl.DataFrame(
+        [{key: row.get(key) for key in schema} for row in ordered],
+        schema=schema,
+    )
 
 
 def dedup_families(
@@ -1059,10 +1104,14 @@ def run(cfg: Config) -> None:
     dedup_log_rows: list[dict[str, Any]] = []
     dob_conflict_rows: list[dict[str, Any]] = []
     for table_name in ("sponsor", "family", "child"):
-        kept, rejected, log_rows = process_table(
+        kept, rejected, log_rows, submission_rows = process_table(
             frames[table_name], table_name, cfg
         )
         dedup_log_rows.extend(log_rows)
+        if table_name in ("family", "child"):
+            sheets[f"{table_name}_submissions"] = submissions_frame(
+                submission_rows, table_name, cfg
+            )
         for record in rejected:
             logger.warning(
                 "rejected %s row %s column %s value %r: %s",

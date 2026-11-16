@@ -8,7 +8,12 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 from ccat.config import Config
-from ccat.io import SheetFormulaError, read_sheet, write_sheets
+from ccat.io import (
+    SheetFormulaError,
+    list_sheets,
+    read_sheet,
+    write_sheets,
+)
 
 FINAL_SCHEMA: dict[str, Any] = {
     "zite_record_id": pl.String,
@@ -220,3 +225,72 @@ class TestFormulaPersistence:
         )
         assert age_cells(cfg) == ['=DATEDIF(B2, DATE(2026,12,25), "y")']
         assert read_ages(cfg).to_list() == [14]
+
+
+class TestOwnershipMatrix:
+    """The §4.4 ownership matrix extended by the audit architecture."""
+
+    def test_matrix_writers(self, cfg: Config) -> None:
+        """Every v2 module writes exactly its owned sheets."""
+        from ccat.io import WRITABLE_SHEETS
+
+        assert "family_submissions" in WRITABLE_SHEETS["acquire"]
+        assert "child_submissions" in WRITABLE_SHEETS["acquire"]
+        assert WRITABLE_SHEETS["audit"] == frozenset(
+            {"adj_child", "adj_family", "adj_sponsor", "final_child"}
+        )
+        assert "adj_family" in WRITABLE_SHEETS["match"]
+        assert "adj_sponsor" in WRITABLE_SHEETS["match"]
+        assert "adj_child" in WRITABLE_SHEETS["generate"]
+        assert "adj_sponsor" in WRITABLE_SHEETS["migrate"]
+        assert "adj_sponsor" not in WRITABLE_SHEETS["screen"]
+        assert "adj_child" not in WRITABLE_SHEETS["acquire"]
+
+    def test_audit_writes_adj_sheets(self, cfg: Config) -> None:
+        """The audit module may write every adj sheet plus final_child."""
+        write_sheets(
+            cfg.excel_file,
+            "audit",
+            {"adj_child": pl.DataFrame(), "adj_family": pl.DataFrame()},
+        )
+        assert "adj_family" in list_sheets(cfg.excel_file)
+
+    def test_match_writes_adj_assignments(self, cfg: Config) -> None:
+        """Match may write the adj family/sponsor sheets."""
+        write_sheets(
+            cfg.excel_file,
+            "match",
+            {
+                "adj_family": pl.DataFrame(),
+                "adj_sponsor": pl.DataFrame(),
+                "final_family": pl.DataFrame(),
+                "final_sponsor": pl.DataFrame(),
+            },
+        )
+        assert "adj_sponsor" in list_sheets(cfg.excel_file)
+
+    def test_screen_cannot_write_adj_family(self, cfg: Config) -> None:
+        """Screening still owns only adj_child."""
+        from ccat.io import SheetOwnershipError
+
+        with pytest.raises(SheetOwnershipError):
+            write_sheets(
+                cfg.excel_file, "screen", {"adj_family": pl.DataFrame()}
+            )
+
+    def test_migrate_writer_bootstraps_fresh_workbook(
+        self, cfg: Config
+    ) -> None:
+        """The migrate writer may create every bootstrap sheet at once."""
+        from ccat.io import SHEETS
+
+        sheets = {
+            name: pl.DataFrame()
+            for name in SHEETS
+            if name not in {"match_report"}
+        }
+        write_sheets(cfg.excel_file, "migrate", sheets, xmas=cfg.xmas)
+        names = set(list_sheets(cfg.excel_file))
+        assert "adj_sponsor" in names
+        assert "family_submissions" in names
+        assert "final_child" in names

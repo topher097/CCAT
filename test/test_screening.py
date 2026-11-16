@@ -20,7 +20,6 @@ from ccat.screening import (
     screen_child,
     screen_children,
     validate_adj_response,
-    _audited_count,
 )
 
 
@@ -214,10 +213,10 @@ def test_screen_child_null_response_has_no_age_key(screen_cfg: Config) -> None:
     assert row["age_at_xmas"] is None  # filled by run(), not the model
 
 
-def test_run_test_mode_backfills_age_from_raw(
+def test_run_writes_dense_rows_equal_to_raw(
     screen_cfg: Config, monkeypatch
 ) -> None:
-    """adj_child.age_at_xmas is copied from raw_child, existing rows too."""
+    """Screening writes dense rows: raw values, screened true (§7.3)."""
     raw = pl.DataFrame(
         [
             child(zite_record_id="f1c1", family_id=1, angel_id="1A"),
@@ -225,23 +224,111 @@ def test_run_test_mode_backfills_age_from_raw(
         ]
     )
     write_sheets(screen_cfg.excel_file, "acquire", {"raw_child": raw})
-    # simulate a pre-existing row screened before the column existed
-    stale = pl.DataFrame(
-        [{"zite_record_id": "f1c1", "need_1": "coat"}],
-        schema={"zite_record_id": pl.String, "need_1": pl.String},
+    KeyedFakeOpencode.responses = {
+        "f1c1": "null",
+        "f1c2": json.dumps(full_response("f1c2")),
+    }
+    import opencode
+
+    monkeypatch.setattr(opencode, "Opencode", KeyedFakeOpencode)
+    run(screen_cfg)
+    adj = read_sheet(screen_cfg.excel_file, "adj_child")
+    assert adj is not None and adj.height == 2
+    by_id = {row["zite_record_id"]: row for row in adj.to_dicts()}
+    # no-change child: dense row equals the raw row (plus defaults)
+    assert by_id["f1c1"]["need_1"] == "winter coat taht fits"
+    assert by_id["f1c1"]["screened"] is True
+    assert by_id["f1c1"]["status"] == "new"
+    assert by_id["f1c1"]["age_at_xmas"] == 8
+    # corrected child: the correction overlays the raw value
+    assert by_id["f1c2"]["need_1"] == "winter coat that fits"
+    assert by_id["f1c2"]["screened"] is True
+
+
+def test_run_targets_absent_or_unscreened_rows(
+    screen_cfg: Config, monkeypatch
+) -> None:
+    """Target selection uses the screened marker, not row presence (§7.3)."""
+    raw = pl.DataFrame(
+        [
+            child(zite_record_id="f1c1", family_id=1, angel_id="1A"),
+            child(zite_record_id="f1c2", family_id=1, angel_id="1B"),
+        ]
     )
-    write_sheets(screen_cfg.excel_file, "screen", {"adj_child": stale})
+    write_sheets(screen_cfg.excel_file, "acquire", {"raw_child": raw})
+    # f1c1 has a dense row but was never screened (audit seeded it);
+    # f2c1-style screened row below blocks re-screening.
+    from ccat.audit.store import build_adj_frame
+
+    seeded = {
+        "zite_record_id": "f1c1",
+        "first_name": "Kiddo",
+        "screened": False,
+    }
+    screened = {
+        "zite_record_id": "f1c2",
+        "first_name": "Two",
+        "screened": True,
+    }
+    write_sheets(
+        screen_cfg.excel_file,
+        "audit",
+        {"adj_child": build_adj_frame("child", [seeded, screened])},
+    )
     FakeOpencode.responses = ["null"]
     import opencode
 
     monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
-    run(screen_cfg, test=True)
+    run(screen_cfg)
+    assert FakeOpencode.instances[-1].session  # one session used
+    # only the unscreened-but-present row was re-screened
+    assert len(FakeOpencode.responses) == 0
+
+
+def test_run_preserves_human_edits_and_controls(
+    screen_cfg: Config, monkeypatch
+) -> None:
+    """Corrections never clobber human edits or controls (§7.3)."""
+    raw = pl.DataFrame(
+        [child(zite_record_id="f1c1", family_id=1, angel_id="1A")]
+    )
+    write_sheets(screen_cfg.excel_file, "acquire", {"raw_child": raw})
+    from ccat.audit.store import build_adj_frame
+
+    # a human (audit) already fixed need_1 and left a note; the rest of
+    # the row is the dense baseline audit seeded from raw
+    seeded = {
+        **child(zite_record_id="f1c1"),
+        "need_1": "human-fixed coat",
+        "require_clarification": "call the family",
+        "screened": False,
+    }
+    write_sheets(
+        screen_cfg.excel_file,
+        "audit",
+        {"adj_child": build_adj_frame("child", [seeded])},
+    )
+    KeyedFakeOpencode.responses = {
+        # the model proposes a different need_1 AND a desire_1 fix
+        "f1c1": json.dumps(
+            full_response("f1c1")
+            | {"need_1": "model coat", "desire_1": "LEGO set"}
+        )
+    }
+    import opencode
+
+    monkeypatch.setattr(opencode, "Opencode", KeyedFakeOpencode)
+    run(screen_cfg)
     adj = read_sheet(screen_cfg.excel_file, "adj_child")
     assert adj is not None
-    assert "age_at_xmas" in adj.columns
-    by_id = {row["zite_record_id"]: row for row in adj.to_dicts()}
-    assert by_id["f1c1"]["age_at_xmas"] == "8"  # backfilled
-    assert by_id["f1c2"]["age_at_xmas"] == "8"  # freshly screened
+    row = adj.to_dicts()[0]
+    # need_1: the human changed it (differs from raw) -> correction skipped
+    assert row["need_1"] == "human-fixed coat"
+    # desire_1: untouched by the human -> correction applied
+    assert row["desire_1"] == "LEGO set"
+    # controls preserved, marker set
+    assert row["require_clarification"] == "call the family"
+    assert row["screened"] is True
 
 
 def test_screen_child_retries_once_then_recovers(screen_cfg: Config) -> None:
@@ -514,19 +601,26 @@ def test_run_test_mode_orphans_fallback_first_child(
 def test_run_test_mode_skips_already_screened_first_family(
     screen_cfg: Config, monkeypatch
 ) -> None:
-    """--test screens nothing new when the first family is done."""
+    """--test screens nothing new when the first family is screened."""
     raw = pl.DataFrame(
         [
             child(zite_record_id="f1c1", family_id=1, angel_id="1A"),
             child(zite_record_id="f2c1", family_id=2, angel_id="2A"),
         ]
     )
-    adj = pl.DataFrame(
-        [{"zite_record_id": "f1c1"}],
-        schema={"zite_record_id": pl.String},
-    )
+    from ccat.audit.store import build_adj_frame
+
+    screened = {
+        "zite_record_id": "f1c1",
+        "first_name": "Kiddo",
+        "screened": True,
+    }
     write_sheets(screen_cfg.excel_file, "acquire", {"raw_child": raw})
-    write_sheets(screen_cfg.excel_file, "screen", {"adj_child": adj})
+    write_sheets(
+        screen_cfg.excel_file,
+        "audit",
+        {"adj_child": build_adj_frame("child", [screened])},
+    )
     import opencode
 
     monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
@@ -594,34 +688,6 @@ def test_screen_children_reports_each_result(screen_cfg: Config) -> None:
         child_row["zite_record_id"] for child_row in children
     }
     assert len(reported) == len(children)
-
-
-def test_audited_count_string_dtype() -> None:
-    """String audited columns count only "true" values."""
-    frame = pl.DataFrame(
-        {"audited": ["true", "false", None, "true", "TRUE", " true "]},
-        schema={"audited": pl.String},
-    )
-    assert _audited_count(frame) == 4
-
-
-def test_audited_count_boolean_dtype() -> None:
-    """Boolean audited columns count true values, nulls as false."""
-    frame = pl.DataFrame(
-        {"audited": [True, False, None, True]},
-        schema={"audited": pl.Boolean},
-    )
-    assert _audited_count(frame) == 2
-
-
-def test_audited_count_missing_or_empty() -> None:
-    """Missing column and empty frame both count zero."""
-    assert _audited_count(pl.DataFrame({"other": ["x"]})) == 0
-    empty = pl.DataFrame(
-        {"audited": []},
-        schema={"audited": pl.Boolean},
-    )
-    assert _audited_count(empty) == 0
 
 
 def test_upsert_adj_row_replaces_and_appends() -> None:

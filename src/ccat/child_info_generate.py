@@ -44,10 +44,10 @@ default 30) for hand-filling; the placeholder text is kept in the
 converted PDF.  Individual sponsors with missing contact info render
 blank, as do unassigned children.  Children without an
 assigned sponsor render that section blank for hand-filling, as do
-unmapped ``sponsor.*`` placeholders.  Only the
-original ``final_child`` columns plus ``generated_info_sheet`` are
-written back to the workbook; the enrichment columns never reach the
-sheet.
+unmapped ``sponsor.*`` placeholders.  The ``generated_info_sheet``
+flag is written into ``adj_child`` (the final is a projection) and
+the ``final_child`` projection is refreshed in the same atomic write;
+the enrichment columns never reach the sheet.
 """
 
 import logging
@@ -67,6 +67,13 @@ from py3o.template import Template
 from tqdm import tqdm
 
 from ccat import sponsor_packets
+from ccat.audit.store import (
+    FINAL_CHILD_COLUMNS,
+    STATUS_AUDITED,
+    build_adj_frame,
+    project_final,
+    read_adj,
+)
 from ccat.config import Config
 from ccat.io import read_sheet, write_sheets
 from ccat.match import canonical_location
@@ -325,18 +332,20 @@ def _load_enriched_rows(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame, bool]:
 def _pending_rows(
     frame: pl.DataFrame, overwrite: bool = False
 ) -> tuple[pl.DataFrame, int]:
-    """Select rows still awaiting a generated info sheet (§13.4).
+    """Select rows still awaiting a generated info sheet (§13.4, §7.5).
 
-    A row is pending when its family has an **assigned sponsor** and
-    its ``generated_info_sheet`` flag is False (every sponsored row,
-    with ``overwrite``) -- the sheet's purpose is to hand the sponsor
-    their child's wish list, so unsponsored children get no sheet.
+    A row is pending when it is **audited** (``status == "audited"``,
+    the readiness gate replacing the old ``audited`` Boolean), its
+    family has an **assigned sponsor**, and its ``generated_info_sheet``
+    flag is False (every sponsored audited row, with ``overwrite``) --
+    the sheet's purpose is to hand the sponsor their child's wish list,
+    so unsponsored or unaudited children get no sheet.
 
     Args:
         frame: An enriched ``final_child`` frame (needs the
-            ``assigned_sponsor_id`` join column).
+            ``assigned_sponsor_id`` join column and ``status``).
         overwrite: Ignore the ``generated_info_sheet`` column: every
-            sponsored row is pending.
+            sponsored audited row is pending.
 
     Returns:
         A tuple of (the pending rows, how many rows were skipped
@@ -344,12 +353,24 @@ def _pending_rows(
 
     Raises:
         InfoSheetError: If a pending row lacks ``zite_record_id`` or a
-            usable ``angel_id`` filename.
+            usable ``angel_id`` filename, or the projection's ``status``
+            column is missing (run ``ccat audit`` first).
     """
+    if "status" not in frame.columns:
+        raise InfoSheetError(
+            "final_child has no status column; run `ccat audit` first"
+        )
     if overwrite:
         pending = frame
     else:
         pending = frame.filter(~pl.col("generated_info_sheet"))
+    audited = pending.filter(pl.col("status") == STATUS_AUDITED)
+    if audited.height < pending.height:
+        logger.info(
+            "skipping %d child(ren) not yet audited (status gate, §7.5)",
+            pending.height - audited.height,
+        )
+    pending = audited
     sponsored = pending.filter(pl.col("assigned_sponsor_id").is_not_null())
     skipped_unsponsored = pending.height - sponsored.height
     if skipped_unsponsored:
@@ -570,24 +591,36 @@ def _find_binary(name: str) -> str | None:
     return shutil.which(name)
 
 
-def _record_flags(frame: pl.DataFrame, generated: list[Any]) -> pl.DataFrame:
-    """Flip ``generated_info_sheet`` to True for the generated rows.
+def _commit_generated_flags(cfg: Config, generated: list[Any]) -> None:
+    """Flip ``generated_info_sheet`` in adj_child and re-project (§7.5).
+
+    The flag lives in ``adj_child`` (the final is a projection, so the
+    flag must live in the source of truth); the whole dense sheet is
+    upserted -- every other column is preserved -- and the
+    ``final_child`` projection is refreshed in the same atomic write
+    (with ``xmas``), so a crash can never leave the flag and the
+    projection out of step.
 
     Args:
-        frame: The base ``final_child`` frame.
+        cfg: Pipeline configuration.
         generated: ``zite_record_id`` values generated this run.
-
-    Returns:
-        The frame with updated flags (unchanged when ``generated`` is
-        empty).
     """
     if not generated:
-        return frame
-    return frame.with_columns(
-        pl.when(pl.col("zite_record_id").is_in(generated))
-        .then(True)
-        .otherwise(pl.col("generated_info_sheet"))
-        .alias("generated_info_sheet")
+        return
+    adj_rows = read_adj(cfg, "child")
+    done = {str(value) for value in generated}
+    for row in adj_rows:
+        if str(row.get("zite_record_id")) in done:
+            row["generated_info_sheet"] = True
+    frame = build_adj_frame("child", adj_rows)
+    write_sheets(
+        cfg.excel_file,
+        "generate",
+        {
+            "adj_child": frame,
+            "final_child": project_final(frame, FINAL_CHILD_COLUMNS),
+        },
+        xmas=cfg.xmas,
     )
 
 
@@ -621,12 +654,14 @@ def run(
     ``info_sheet.output_dir`` on a thread pool of ``max_workers``
     workers (``info_sheet.max_workers`` by default, clamped to the
     pending row count), tracked by a ``tqdm`` progress bar.
-    Successfully generated rows flip their flag to ``True`` in one
-    atomic sheet write at the end, so an interrupted run never leaves a
-    half-updated workbook and failed rows are simply picked up again on
-    the next run.  Ctrl+C cancels queued rows, terminates in-flight
-    LibreOffice conversions, commits the flags of the children already
-    generated, and re-raises the interrupt.
+    Successfully generated rows flip their ``generated_info_sheet``
+    flag inside ``adj_child`` (the source of truth) and refresh the
+    ``final_child`` projection in the same atomic sheet write, so an
+    interrupted run never leaves a half-updated workbook and failed
+    rows are simply picked up again on the next run.  Ctrl+C cancels
+    queued rows, terminates in-flight LibreOffice conversions, commits
+    the flags of the children already generated, and re-raises the
+    interrupt.
 
     Packet phase: after every sponsored angel's sheet exists, one
     sponsor packet directory per assigned sponsor is built under
@@ -663,7 +698,7 @@ def run(
         )
     out_dir = Path(spec.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    base, enriched, schema_added = _load_enriched_rows(cfg)
+    _base, enriched, _schema_added = _load_enriched_rows(cfg)
     pending, _skipped = _pending_rows(enriched, overwrite=overwrite)
     if sponsor is not None:
         scoped = pending.filter(pl.col("assigned_sponsor_id") == sponsor)
@@ -827,11 +862,7 @@ def run(
                 executor.shutdown(wait=True)
             finally:
                 progress.close()
-    base = _record_flags(base, generated)
-    if schema_added or generated:
-        write_sheets(
-            cfg.excel_file, "generate", {"final_child": base}, xmas=cfg.xmas
-        )
+    _commit_generated_flags(cfg, generated)
     logger.info(
         "generated %d info sheet(s); %d failed", len(generated), len(failed)
     )

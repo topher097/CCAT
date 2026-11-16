@@ -1,9 +1,12 @@
-"""Module 2 — AI screening (§6).
+"""Module 2 — AI screening (§6, audit_architecture.md §7.3).
 
 Adjudicates each child row with an LLM via the opencode python SDK, flags
-anomalies, and appends sparse rows to the ``adj_child`` sheet for
-zite_record_ids not already present.  The child's name is never passed to
-the LLM; ``zite_record_id`` is the sole identifier in the prompt (§6.2).
+anomalies, and writes **dense** ``adj_child`` rows: the child's raw values
+overlaid with the model's corrections (only the model-owned fields), with
+``screened = true`` and default controls.  For a child whose model output
+is "no changes", the dense row simply equals the raw row.  The child's
+name is never passed to the LLM; ``zite_record_id`` is the sole identifier
+in the prompt (§6.2).
 
 Batch screening runs each child's LLM check on a
 ``concurrent.futures.ThreadPoolExecutor`` -- the calls are I/O-bound, so
@@ -15,8 +18,14 @@ the run promptly: queued tasks are cancelled and abandoned in-flight
 calls die with their threads, while every row completed so far is
 already persisted (see below).
 
-``--redo`` re-screens one child; ``--overwrite`` re-screens every child,
-replacing all existing ``adj_child`` rows (§6.3).
+Target selection: children whose adj row is absent **or** has
+``screened != true`` (the explicit marker replaces the old row-presence
+invariant, because audit also seeds rows).  If audit has already seeded
+a row, screening applies a correction to a model-owned field only when
+that field still equals the baseline (untouched by the human); fields
+the human already changed are left alone, and controls are always
+preserved.  ``--redo`` re-screens one child; ``--overwrite`` re-screens
+every child (§6.3).
 """
 
 import json
@@ -29,12 +38,20 @@ from typing import Any
 from collections.abc import Callable
 
 import polars as pl
-from polars._typing import PolarsDataType
 from pydantic import BaseModel, ConfigDict, field_validator
 from tqdm import tqdm
 
+from ccat.audit.store import (
+    ADJ_CHILD_COLUMNS,
+    CHILD_EDITABLE_COLUMNS,
+    CHILD_LINKAGE_COLUMNS,
+    STATUS_NEW,
+    as_bool,
+    build_adj_frame,
+    read_adj,
+)
 from ccat.config import Config
-from ccat.io import read_sheet, read_sheet_or_empty, write_sheets
+from ccat.io import read_sheet, write_sheets
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +110,12 @@ def _require_opencode_v2() -> None:
         )
 
 
-#: adj_child columns (§6.3), in sheet order.
-ADJ_CHILD_COLUMNS = (
+#: Model-owned adj_child fields (§6.2): the columns the model may
+#: correct.  ``age_at_xmas`` is excluded (computed from the adjudicated
+#: dob, D13); controls and linkage are never model-owned.
+RESPONSE_COLUMNS = (
     "zite_record_id",
     "dob",
-    "age_at_xmas",
     "need_1",
     "need_2",
     "desire_1",
@@ -115,13 +133,6 @@ ADJ_CHILD_COLUMNS = (
     "favorite_colors",
     "other_notes",
     "potential_anomoly",
-)
-
-#: Key set the model must return (§6.2).  ``age_at_xmas`` is excluded: it
-#: is computed by acquire (§5.5) and copied into adj_child verbatim; the
-#: model never owns it.
-RESPONSE_COLUMNS = tuple(
-    column for column in ADJ_CHILD_COLUMNS if column != "age_at_xmas"
 )
 
 #: Enum-checked size columns -> vocabulary name (§6.2 output contract).
@@ -298,9 +309,10 @@ def screen_child(
             returning its raw text response.
 
     Returns:
-        The adj_child row for this child (all-null adjudication cells when
-        the model returned the literal null), or None when the child could
-        not be screened (logged as unscreened, picked up next run).
+        The validated corrections for this child (all-null cells when
+        the model returned the literal null, meaning "no changes"), or
+        None when the child could not be screened (logged as
+        unscreened, picked up next run).
     """
     prompt = build_prompt(child, cfg)
     last_error: Exception | None = None
@@ -444,9 +456,79 @@ def screen_children(
     return rows
 
 
-def _adj_schema() -> dict[str, PolarsDataType]:
-    """Sheet schema for adj_child: every column is a string."""
-    return {column: pl.String for column in ADJ_CHILD_COLUMNS}
+def _values_equal(left: Any, right: Any) -> bool:
+    """String-normalized equality for human-edit protection (§7.3)."""
+    if left is None or (isinstance(left, str) and left.strip() == ""):
+        left = None
+    if right is None or (isinstance(right, str) and right.strip() == ""):
+        right = None
+    if left is None or right is None:
+        return left is None and right is None
+    return str(left).strip() == str(right).strip()
+
+
+def dense_adj_row(
+    child: dict[str, Any],
+    corrections: dict[str, Any],
+    cfg: Config,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one dense adj_child row from a screening result (§7.3).
+
+    The row starts from the child's raw values (linkage and adjudicable
+    data), overlays the model's non-null corrections, and recomputes
+    ``age_at_xmas`` from the adjudicated dob (D13).  When audit has
+    already seeded a row (``existing``), human edits survive: a
+    correction lands on a model-owned field only when that field still
+    equals the baseline, other fields keep the existing adj values, and
+    the existing controls and module-owned columns are preserved.
+
+    Args:
+        child: One raw_child row as a dict.
+        corrections: The validated model response (sparse: non-null
+            values are corrections); may be all-null ("no changes").
+        cfg: Pipeline configuration.
+        existing: The child's existing dense adj row, when one exists.
+
+    Returns:
+        The dense adj_child row with ``screened`` set true.
+    """
+    from ccat.audit.store import _computed_age  # local: private helper
+
+    row: dict[str, Any] = {column: None for column in ADJ_CHILD_COLUMNS}
+    for column in (*CHILD_LINKAGE_COLUMNS, *CHILD_EDITABLE_COLUMNS):
+        row[column] = child.get(column)
+    if existing is not None:
+        for column in (
+            *CHILD_EDITABLE_COLUMNS,
+            "age_at_xmas",
+            "generated_info_sheet",
+            "status",
+            "audited",
+            "ignore",
+            "require_clarification",
+            "audited_at",
+        ):
+            row[column] = existing.get(column)
+    for column in CHILD_EDITABLE_COLUMNS:
+        value = corrections.get(column)
+        if value is None:
+            continue
+        if existing is not None and not _values_equal(
+            existing.get(column), child.get(column)
+        ):
+            # The human already changed this field; leave it alone (§7.3).
+            continue
+        row[column] = value
+    row["zite_record_id"] = child["zite_record_id"]
+    row["screened"] = True
+    if existing is None:
+        row["status"] = STATUS_NEW
+        row["audited"] = False
+        row["ignore"] = False
+        row["generated_info_sheet"] = False
+    row["age_at_xmas"] = _computed_age(row.get("dob"), cfg)
+    return row
 
 
 def _upsert_adj_row(
@@ -465,15 +547,12 @@ def _upsert_adj_row(
     adj_rows.append(row)
 
 
-def _write_adj(
-    cfg: Config, adj_rows: list[dict[str, Any]], raw_child: pl.DataFrame
-) -> pl.DataFrame:
-    """Atomically write the adj_child sheet with ages filled in (§5.5).
+def _write_adj(cfg: Config, adj_rows: list[dict[str, Any]]) -> pl.DataFrame:
+    """Atomically write the dense adj_child sheet (§7.3).
 
     Args:
         cfg: Pipeline configuration.
-        adj_rows: All current adj_child rows.
-        raw_child: The raw_child frame joined for computed ages.
+        adj_rows: All current dense adj_child rows.
 
     Returns:
         The written adj_child frame.
@@ -481,9 +560,7 @@ def _write_adj(
     Raises:
         ScreeningError: If the workbook cannot be written.
     """
-    frame = pl.DataFrame(
-        _with_computed_age(adj_rows, raw_child), schema=_adj_schema()
-    )
+    frame = build_adj_frame("child", adj_rows)
     try:
         write_sheets(cfg.excel_file, "screen", {"adj_child": frame})
     except Exception as error:  # noqa: BLE001 - wrap any save failure
@@ -600,67 +677,18 @@ def _screen_targets(
         ) from error
 
 
-def _with_computed_age(
-    adj_rows: list[dict[str, Any]], raw_child: pl.DataFrame
-) -> list[dict[str, Any]]:
-    """Fill ``age_at_xmas`` on every adj row from raw_child (§5.5).
-
-    The computed age is authoritative; the model never owns this column,
-    so it is copied in verbatim (stored as text, matching the all-string
-    sheet schema).  Rows screened before the column existed are
-    backfilled on the next run.
-
-    Args:
-        adj_rows: adj_child rows as dicts.
-        raw_child: The raw_child frame to join on.
-
-    Returns:
-        The same rows with ``age_at_xmas`` set.
-    """
-    ages = {
-        row["zite_record_id"]: row.get("age_at_xmas")
-        for row in raw_child.to_dicts()
-    }
-    for row in adj_rows:
-        age = ages.get(row["zite_record_id"])
-        row["age_at_xmas"] = None if age is None else str(age)
-    return adj_rows
-
-
-def _audited_count(final_child: pl.DataFrame) -> int:
-    """Count audited children in final_child (§6).
-
-    Tolerates the sheet's Boolean columns reading back as strings
-    ("true"/"false") after another module rewrites the workbook.
-
-    Args:
-        final_child: The final_child frame (or any frame).
-
-    Returns:
-        The number of rows with ``audited`` true; 0 when the column is
-        missing or empty.
-    """
-    if "audited" not in final_child.columns:
-        return 0
-    audited_column = final_child["audited"]
-    if audited_column.dtype == pl.String:
-        text = audited_column.str.strip_chars().str.to_lowercase()
-        audited_column = text == "true"
-    return int(audited_column.fill_null(False).sum())
-
-
 def run(
     cfg: Config,
     redo: str | None = None,
     test: bool = False,
     overwrite: bool = False,
 ) -> None:
-    """Run module 2 end to end (§6).
+    """Run module 2 end to end (§6, §7.3 of the audit architecture).
 
-    Successfully screened rows are persisted to ``adj_child`` as they
-    arrive (one atomic workbook write per completed child), so an
-    interrupted run keeps every completed result; the final write
-    reconciles the whole sheet.
+    Successfully screened children are persisted to the dense
+    ``adj_child`` sheet as they arrive (one atomic workbook write per
+    completed child), so an interrupted run keeps every completed
+    result; the final write reconciles the whole sheet.
 
     Args:
         cfg: Pipeline configuration.
@@ -668,8 +696,8 @@ def run(
             (explicit opt-in only, §6.3).
         test: Stop after the first full family: only the children of the
             first family (lowest family_id) are screened.
-        overwrite: Ignore the existing ``adj_child`` sheet: every child
-            is re-screened and its adj row replaced (§6.3).
+        overwrite: Re-screen every child regardless of the ``screened``
+            marker, applying the §7.3 protection rules to each row.
 
     Raises:
         ScreeningError: If opencode v2 is not installed, raw_child is
@@ -688,12 +716,8 @@ def run(
             "raw_child sheet is missing or empty; run `ccat acquire` first"
         )
     children = raw_child.to_dicts()
-    adj = read_sheet_or_empty(cfg.excel_file, "adj_child", _adj_schema())
-    adj_rows = adj.to_dicts()
-    existing_ids = {row.get("zite_record_id") for row in adj_rows}
-    final_child = read_sheet(cfg.excel_file, "final_child")
-    audited = _audited_count(final_child) if final_child is not None else 0
-    logger.info("children already audited in final_child: %d", audited)
+    adj_rows = read_adj(cfg, "child")
+    by_id = {row.get("zite_record_id"): row for row in adj_rows}
 
     if redo is not None:
         targets = [
@@ -705,15 +729,16 @@ def run(
         if overwrite:
             targets = children
             logger.info(
-                "overwrite: re-screening all %d children (existing adj rows"
-                " are replaced)",
+                "overwrite: re-screening all %d children (existing human"
+                " edits and controls are preserved, §7.3)",
                 len(targets),
             )
         else:
             targets = [
                 child
                 for child in children
-                if child["zite_record_id"] not in existing_ids
+                if child["zite_record_id"] not in by_id
+                or not as_bool(by_id[child["zite_record_id"]].get("screened"))
             ]
         if test:
             allowed = {
@@ -748,17 +773,29 @@ def run(
         never race each other; ``io.write_sheets`` is atomic, so an
         interrupted save never leaves a half-written workbook.
         """
-        _upsert_adj_row(adj_rows, row)
-        _write_adj(cfg, adj_rows, raw_child)
-        new_rows.append(row)
+        record_id = row["zite_record_id"]
+        child = next(
+            (
+                child
+                for child in children
+                if child["zite_record_id"] == record_id
+            ),
+            None,
+        )
+        if child is None:  # pragma: no cover - targets come from children
+            return
+        dense = dense_adj_row(child, row, cfg, by_id.get(record_id))
+        _upsert_adj_row(adj_rows, dense)
+        _write_adj(cfg, adj_rows)
+        new_rows.append(dense)
         logger.debug(
             "persisted adj_child row for %s (%d rows in sheet)",
-            row["zite_record_id"],
+            record_id,
             len(adj_rows),
         )
 
     if targets:
         new_rows = _screen_targets(targets, cfg, on_result=persist)
 
-    frame = _write_adj(cfg, adj_rows, raw_child)
+    frame = _write_adj(cfg, adj_rows)
     logger.info("wrote %d adj_child rows (%d new)", frame.height, len(new_rows))

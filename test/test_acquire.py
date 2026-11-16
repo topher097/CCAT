@@ -211,7 +211,7 @@ def test_import_table_missing_column_is_structural_failure(cfg: Config) -> None:
 
 def test_process_table_keeps_valid_rows(cfg: Config) -> None:
     """A valid sponsor row survives cleaning and validation."""
-    kept, rejected, _dedup = process_table(
+    kept, rejected, _dedup, _subs = process_table(
         zite_frame(SPONSOR_BASE, [{}]), "sponsor", cfg
     )
     assert rejected == []
@@ -227,7 +227,7 @@ def test_process_table_keeps_valid_rows(cfg: Config) -> None:
 
 def test_process_table_rejects_invalid_email_row(cfg: Config) -> None:
     """A row with an invalid email is excluded and reported (§5.3)."""
-    kept, rejected, _dedup = process_table(
+    kept, rejected, _dedup, _subs = process_table(
         zite_frame(SPONSOR_BASE, [{"Email": "broken"}, {}]), "sponsor", cfg
     )
     assert len(kept) == 1
@@ -239,7 +239,7 @@ def test_process_table_rejects_invalid_email_row(cfg: Config) -> None:
 
 def test_process_table_rejects_invalid_enum_value(cfg: Config) -> None:
     """Enum values outside the vocabulary reject the row (§5.3)."""
-    kept, rejected, _dedup = process_table(
+    kept, rejected, _dedup, _subs = process_table(
         zite_frame(SPONSOR_BASE, [{"Affiliation": "Sole Proprietor"}]),
         "sponsor",
         cfg,
@@ -250,7 +250,7 @@ def test_process_table_rejects_invalid_enum_value(cfg: Config) -> None:
 
 def test_process_table_keeps_null_without_default(cfg: Config) -> None:
     """Nulls in columns without a default are kept as null (§5.2)."""
-    kept, rejected, _dedup = process_table(
+    kept, rejected, _dedup, _subs = process_table(
         zite_frame(SPONSOR_BASE, [{"First Name": None}]), "sponsor", cfg
     )
     assert rejected == []
@@ -260,7 +260,7 @@ def test_process_table_keeps_null_without_default(cfg: Config) -> None:
 
 def test_process_table_fills_default_on_null(cfg: Config) -> None:
     """Nulls take the configured default when one is specified (§5.2)."""
-    kept, rejected, _dedup = process_table(
+    kept, rejected, _dedup, _subs = process_table(
         zite_frame(
             SPONSOR_BASE, [{"First Name": None, "Age Preference": None}]
         ),
@@ -274,7 +274,7 @@ def test_process_table_fills_default_on_null(cfg: Config) -> None:
 
 def test_process_table_blank_string_takes_default(cfg: Config) -> None:
     """A blank-string cell is a null and takes the default (§5.3)."""
-    kept, rejected, _dedup = process_table(
+    kept, rejected, _dedup, _subs = process_table(
         zite_frame(SPONSOR_BASE, [{"Age Preference": "   "}]),
         "sponsor",
         cfg,
@@ -346,7 +346,7 @@ def test_process_table_coerces_free_text_reported_age(cfg: Config) -> None:
             {"First Name": "kiddo4", "Age at Christmas 2026": "young"},
         ],
     )
-    kept, rejected, _dedup = process_table(children, "child", cfg)
+    kept, rejected, _dedup, _subs = process_table(children, "child", cfg)
     assert rejected == []
     assert [row["age_reported"] for row in kept] == [8, 4, 2, None]
 
@@ -510,7 +510,7 @@ def test_process_table_dedups_duplicate_child(cfg: Config) -> None:
             },
         ],
     )
-    kept, rejected, dedup = process_table(children, "child", cfg)
+    kept, rejected, dedup, _subs = process_table(children, "child", cfg)
     assert rejected == []
     assert len(kept) == 1
     assert kept[0]["zite_record_id"] == "rec_c2"
@@ -918,6 +918,68 @@ def test_run_end_to_end(tmp_path, monkeypatch, caplog) -> None:
     assert any("age mismatch" in m for m in caplog.messages)
     # orphan logged
     assert any("orphaned child" in m for m in caplog.messages)
+
+
+def test_run_writes_submission_sheets(tmp_path, monkeypatch) -> None:
+    """Submission sheets capture every cleaned row pre-dedup (§4.2).
+
+    Both family submissions and the dropped child duplicate appear;
+    a row that later fails pandera validation is included too; the
+    frames carry no post-link derived columns and follow the dedup
+    ordering (created ascending).
+    """
+    cfg = _acquire_cfg(tmp_path)
+    frames = _scenario_frames()
+    monkeypatch.setattr(
+        acquire.zite, "get_table_data", lambda ref: frames[ref.split("::")[1]]
+    )
+    # one extra child row that passes cleaning but fails validation:
+    # it is a real submission, so it must appear in child_submissions
+    # even though it never reaches raw_child.
+    frames["child"] = pl.concat(
+        [
+            frames["child"],
+            zite_frame(
+                CHILD_BASE,
+                [
+                    {
+                        "id": "rec_c5",
+                        "First Name": "badenum",
+                        "Primary Email": "fam@example.com",
+                        "Date of Birth": "2018-05-10",
+                        "Gender": "Not A Gender",  # fails the enum check
+                    }
+                ],
+            ),
+        ]
+    )
+    run(cfg)
+    family_submissions = read_sheet(cfg.excel_file, "family_submissions")
+    child_submissions = read_sheet(cfg.excel_file, "child_submissions")
+    assert family_submissions is not None
+    assert child_submissions is not None
+    # both family submissions survive pre-dedup, in dedup order
+    assert family_submissions["zite_record_id"].to_list() == [
+        "rec_f1",
+        "rec_f2",
+    ]
+    # no family_id: not yet assigned at submission time
+    assert "family_id" not in family_submissions.columns
+    # children: both duplicate-group members plus the orphan plus the
+    # pandera-rejected row
+    child_ids = child_submissions["zite_record_id"].to_list()
+    assert set(child_ids) == {"rec_c1", "rec_c2", "rec_c3", "rec_c4", "rec_c5"}
+    # the same (created, zite_record_id) order dedup uses: the earlier
+    # submission precedes the later duplicate
+    assert child_ids.index("rec_c1") < child_ids.index("rec_c4")
+    assert "angel_id" not in child_submissions.columns
+    assert "age_at_xmas" not in child_submissions.columns
+    # the rejected row never reaches raw_child
+    raw_child = read_sheet(cfg.excel_file, "raw_child")
+    assert raw_child is not None
+    assert "rec_c5" not in raw_child["zite_record_id"].to_list()
+    # and the dropped duplicate never reaches raw_child either
+    assert "rec_c1" not in raw_child["zite_record_id"].to_list()
 
 
 def test_run_writes_dedup_log_with_conflicts(tmp_path, monkeypatch) -> None:

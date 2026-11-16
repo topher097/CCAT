@@ -255,7 +255,12 @@ class TestWriteCsv:
             update={
                 "excel_file": str(workbook),
                 "clarify": cfg.clarify.model_copy(
-                    update={"output_dir": str(out_dir)}
+                    update={
+                        "output_dir": str(out_dir),
+                        "clarifications_csv": str(
+                            tmp_path / "clarifications.csv"
+                        ),
+                    }
                 ),
             }
         )
@@ -286,7 +291,12 @@ class TestWriteCsv:
             update={
                 "excel_file": str(workbook),
                 "clarify": cfg.clarify.model_copy(
-                    update={"output_dir": str(emails_dir)}
+                    update={
+                        "output_dir": str(emails_dir),
+                        "clarifications_csv": str(
+                            tmp_path / "clarifications.csv"
+                        ),
+                    }
                 ),
             }
         )

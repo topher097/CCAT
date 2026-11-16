@@ -320,18 +320,32 @@ Rules:
 
 One workbook (`excel_file` from config). Sheets:
 
+Sheets (audit_architecture.md §4 supersedes the adj/final rows for the
+v2 audit system):
+
 | Sheet           | Contents                                                        | Written by |
 |-----------------|-----------------------------------------------------------------|------------|
 | `raw_sponsor`   | Cleaned, deduplicated, ID-assigned sponsor rows                 | module 1   |
 | `raw_family`    | Cleaned, deduplicated (by primary email), ID-assigned families | module 1   |
 | `raw_child`     | Cleaned, deduplicated (same family + name keeps latest) child rows with `age_at_xmas` and `angel_id` | module 1   |
+| `family_submissions` | Every cleaned family row **pre-dedup**, pre-pandera (audit arch §4.2) | module 1 |
+| `child_submissions` | Every cleaned child row **pre-dedup**, pre-pandera (audit arch §4.2) | module 1 |
 | `dedup_log`     | One row per merged duplicate family or child record (§5.4)      | module 1   |
 | `dob_conflict_log` | One row per same-family pair born <=9 months apart (§5.6)    | module 1   |
-| `adj_child`     | Screening results, one row per screened child (keyed by `zite_record_id`, sparse cells) | module 2   |
-| `final_child`   | Ground-truth audited child rows (plus `generated_info_sheet`, module 5) | modules 3, 5 |
-| `final_family`  | Ground-truth families with match results                       | module 4   |
-| `final_sponsor` | Ground-truth sponsors with `assigned_angel_ids`                 | module 4   |
+| `adj_child`     | **Dense** adjudicated child record + controls (audit arch §4.3); screening pre-fills | modules 2, 3, 5 |
+| `adj_family`    | **Dense** adjudicated family record + controls + assignment columns | modules 3, 4 |
+| `adj_sponsor`   | **Dense** adjudicated sponsor record + controls + assignment columns | modules 3, 4 |
+| `final_child`   | Projection of `adj_child` (audit arch §7.1)                     | modules 3, 5 |
+| `final_family`  | Projection of `adj_family`                                      | module 4   |
+| `final_sponsor` | Projection of `adj_sponsor`                                     | module 4   |
 | `match_report`  | Unmatched families/sponsors and reasons                         | module 4   |
+
+The `adj_*` sheets are dense — each data column holds the adjudicated
+value that flows downstream; a null cell means the value is genuinely
+absent, never "same as raw".  The `final_*` sheets are pure projections
+of the `adj_*` sheets: drop ignored rows, drop the pure control columns
+(`audited`, `ignore`, `screened`), keep everything else (including
+`status`, notes, and `audited_at`).  Nothing builds finals from raw.
 
 I/O implementation lives in `src/ccat/io.py`: thin polars-based
 read/write helpers over the workbook. Writes are atomic (write temp file,
@@ -559,108 +573,64 @@ For each child row not already present in `adj_child`:
 
 ### 6.3 Output — `adj_child` sheet
 
-- Columns: `zite_record_id` (key), the adjudicable child columns (`dob`,
-  `need_1`, `need_2`, `desire_1`, `desire_2`, size columns), and
-  `potential_anomoly`. The model's JSON object maps 1:1 onto this row.
-- **Sparse cells, always-present rows**: a cell is null when the adjudicated
-  value equals the raw value (no change) — but **every screened child gets
-  a row**, even when no field changed. The presence of a `zite_record_id`
-  row in `adj_child` is the pipeline's record that the corresponding
-  `raw_child` row has been screened; an all-null row means "checked, no
-  changes".
-- Rows are only appended for zite_record_ids not already present in
-  `adj_child`. Existing adj rows are never modified by this module (the
-  human audit tool owns edits from here on).
-- Regeneration: `ccat screen --redo ZITE_RECORD_ID` re-screens one child and
-  replaces its adj row (explicit opt-in only). `ccat screen --overwrite`
-  re-screens every child and replaces all their adj rows (ignores the
-  existing sheet).
-- `zite_record_id` is the join key between `raw_child` and `adj_child` —
-  and between both and `final_child` (§7.3). It is stable even when
-  `angel_id` cannot be assigned (orphaned children, §5.5).
+- Dense rows (audit arch §7.3): every child screened gets one complete
+  `adj_child` row — the raw values overlaid with the model's
+  corrections (only the model-owned fields in `RESPONSE_COLUMNS`),
+  with `screened = true` and default controls (`status` "new",
+  `audited`/`ignore` false, no note).  For a child whose model output
+  is "no changes", the dense row simply equals the raw row.
+- **Target selection**: children whose adj row is absent **or** has
+  `screened != true` — the explicit marker replaces the old
+  row-presence invariant, because audit also seeds rows (audit arch
+  §7.3).
+- **Human-edit protection**: if audit has already seeded a row (a human
+  worked ahead of screening), screening applies a correction to a
+  model-owned field only when that field still equals the baseline
+  (untouched by the human); fields the human already changed are left
+  alone.  Controls are always preserved.
+- Regeneration: `ccat screen --redo ZITE_RECORD_ID` re-screens one child
+  and replaces its adj row (explicit opt-in only).  `ccat screen
+  --overwrite` re-screens every child under the same protection rules.
+- `zite_record_id` is the join key between `raw_child`, `adj_child`,
+  and `final_child`.  It is stable even when `angel_id` cannot be
+  assigned (orphaned children, §5.5).
 
-## 7. Module 3 — Human Audit Tool
+## 7. Module 3 — Human Audit Tool (v2 — NiceGUI)
 
-Entry point: `src/ccat/audit/server.py`, CLI `ccat audit [--config PATH]`.
+**Authoritative spec: `audit_architecture.md` (supersedes this section's
+pre-v2 text).**  Entry point `src/ccat/audit/`, CLI `ccat audit
+[--config PATH] [--test] [--restart]` plus the one-time bootstrap
+`ccat audit-migrate --config config/ccat_2026_v2.json --from
+./output/ccat_2026.xlsx`.
 
-Super lightweight local web page: Python stdlib `http.server` serving one
-static HTML page plus a small JSON API. No JS frameworks, no extra
-dependencies, single human user.
+A multi-page NiceGUI app (same pattern as `ccat clarify`): a dashboard
+(`/`) with sponsor/family per-status stats, sponsor and family lists
+with text + status filters, family detail pages showing one raw column
+per duplicate submission plus the adjudicated column, and sponsor,
+family, and child detail pages where every adjudicable field is edited
+against the raw baseline with diff highlighting.  `audited` is a
+revocable checkbox; the derived `status` (new / in_progress /
+needs_clarification / ignored / audited) recomputes live in the UI and
+is persisted on every save, so the workbook is filterable in Excel and
+downstream modules gate on it.  Ignoring a row is destructive: the adj
+row is reduced to its identity skeleton, its projection is excluded
+from the final sheet, and un-ignoring re-seeds from the baseline (edits
+lost, confirmed in the UI).  The data layer (`store.py`) is pure and
+unit-testable; every save preserves the module-owned columns
+(assignments, `generated_info_sheet`, `screened`).
 
-### 7.1 API
+Startup (`ensure_adj_sheets`) seeds a dense adj row for every raw
+entity missing one, then re-projects `final_child`.  Every
+`final_child` write passes `xmas=cfg.xmas` (the live `DATEDIF` age
+formulas, §4); writes that skip `final_child` restore the formula
+caches automatically.  A legacy workbook whose `adj_child` still has
+the pre-v2 sparse schema (no `screened` column) is refused before any
+write — the v2 audit tool must never write the old workbook; create the
+v2 workbook with `audit-migrate` instead.
 
-- `GET /` — single-page UI (`src/ccat/audit/static/index.html`).
-- `GET /api/queue` — children to review: every child in `raw_child` whose
-  `zite_record_id` has no row in `final_child`, or has a `final_child` row
-  with `audited == false`. Each item: `{zite_record_id, angel_id, raw:
-  {...}, adj: {...}}` where `raw` is the full raw row and `adj` is the
-  `adj_child` row (all-null fields when the child was screened with no
-  changes; `null` object when the child has not been screened yet).
-  `angel_id` is null for orphaned children.  `--hide-completed` (§7.2)
-  restricts the queue to children with no `final_child` row.
-- `PUT /api/children/{zite_record_id}` — body: edited adj JSON. Server
-  validates (JSON parses; keys are known child columns), then writes the
-  child's `final_child` row (see 7.3).
-
-### 7.2 UI
-
-- Two columns side by side: raw child JSON (read-only, syntax-highlighted) on
-  the left; adjudicated JSON (editable textarea) on the right, pre-filled
-  with the `adj_child` values merged over the raw values.
-- Above the columns, a **"Child is special needs"** checkbox. It sets the
-  `special_needs` boolean on the `final_child` row (§7.3), which drives the
-  "Special Needs (any age)" sponsor preference in matchmaking (§8.3).
-- **Orphaned children** (null `angel_id`, no family registration, §5.5):
-  always shown in the queue with a prominent warning, and
-  `require_clarification` is pre-filled with "No matching family
-  registration for this child's primary email" (the human may edit or add
-  to it). An orphaned child cannot be marked `audited = true` — the
-  **Mark audited** button is disabled until the child has an `angel_id`
-  (i.e. a matching family appears in a later `ccat acquire` run); the
-  human may still save the row with `audited = false`. Once a family
-  registration appears, `ccat acquire` assigns the `angel_id` and the
-  human can complete the audit.
-- Buttons:
-  - **Save (needs clarification)** — writes the row with `audited = false` and
-    any `require_clarification` note.
-  - **Mark audited** — writes the row with `audited = true` (clears
-    `require_clarification` if empty).
-- Navigation: next/previous unaudited child; queue length display; the current
-  child is never lost on save (page stays on the same angel).
-- The tool never displays children whose `final_child` row exists with
-  `audited == true` (`ccat audit --overwrite` re-queues audited children
-  and allows re-saving frozen rows; the `audited`/`audited_at` columns
-  stop gating anything for that session).  With `ccat audit
-  --hide-completed`, the queue shows only children with no
-  `final_child` row at all (children saved earlier — audited or
-  needing clarification — are hidden, even with `--overwrite`).
-
-### 7.3 `final_child` row
-
-Built at save time by **joining `raw_child` and `adj_child` on
-`zite_record_id`** (the ID is the join key between the sheets) and
-overlaying: start from the full `raw_child` row, replace any field whose
-adj value is non-null, always set:
-
-- `zite_record_id` (key), `angel_id` (copied from raw; null for orphans),
-  all raw child columns (with overrides applied),
-- `special_needs` (bool, from the audit UI checkbox, default false),
-- `audited` (bool),
-- `require_clarification` (optional free text, null when none),
-- `audited_at` (ISO timestamp of the save).
-
-Re-save rules: while `audited == false`, the tool may overwrite the child's
-`final_child` row (human iterating). Once `audited == true`, the row is frozen:
-`PUT` for that zite_record_id returns 409 and the child disappears from the
-queue. Corrections after audit require rerunning matchmaking or manual
-spreadsheet edit (out of pipeline scope, documented in README later).
-
-`age_at_xmas` on the saved row is re-derived from the row's `dob` and stored
-as a `DATEDIF` formula with the age as its cached value (§4), so an
-adjudicated `dob` correction immediately carries the matching age, and a
-later manual `dob` edit in the spreadsheet recalculates the age.
-
-`final_family` / `final_sponsor` are never touched.
+The old http.server + `static/index.html` implementation is deleted;
+the process-discovery helpers (`find_audit_processes`,
+`stop_audit_processes`, `--restart`) live in the new `server.py`.
 
 ## 8. Module 4 — Matchmaking
 
@@ -668,9 +638,15 @@ Entry point: `src/ccat/match.py`, CLI `ccat match [--config PATH]`.
 
 ### 8.1 Input
 
-- `final_child` (only rows with `audited == true` **and** a non-null
-  `angel_id` participate — orphaned children, §5.5, are excluded),
-- `raw_family`, `raw_sponsor`.
+Dense adj sheets only — never `raw_*` (audit arch §7.5):
+
+- `adj_child`: only rows with `status == "audited"` **and** a non-null
+  `angel_id` **and** `ignore != true` participate — orphaned children
+  (§5.5) are excluded;
+- `adj_family` / `adj_sponsor` (non-ignored rows): all sponsor/family
+  data — `num_children`, `age_preference`, `prior_assigned_angel_ids`,
+  locations, `pref_age_min/max` — comes straight from the dense adj
+  rows.
 
 ### 8.2 Constraints
 
@@ -769,70 +745,76 @@ Some sponsors already have manually assigned angels recorded in the
 
 ### 8.6 Output
 
-- `final_family`: one row per family — all `raw_family` columns, `family_id`,
-  `assigned_sponsor_id` (null if unmatched), `assigned_angel_ids`
-  (comma-separated), and `num_angels_in_family` (count of `final_child`
-  rows sharing the family's `family_id`; 0 when none).
-- `final_sponsor`: one row per sponsor — all `raw_sponsor` columns,
-  `sponsor_id`, `assigned_angel_ids` (comma-separated list of every `angel_id`
-  sponsored across all assigned families and pre-assignments, sorted),
-  and `num_angels_assigned` (count of angel ids in `assigned_angel_ids`;
-  0 when none).
-  Pre-assigned sponsors appear with their reconciled manual lists.
+- `adj_family` / `adj_sponsor`: assignments are written into the
+  **assignment columns only** (`assigned_sponsor_id`,
+  `assigned_angel_ids`, `num_angels_in_family`;
+  `assigned_angel_ids`, `num_angels_assigned`) — every other dense
+  column (data + audit controls) is preserved on every run.
+  `num_angels_in_family` counts the family's non-ignored `adj_child`
+  rows.
+- `final_family` / `final_sponsor`: projections of the adj sheets
+  (audit arch §7.1); the previous contents are archived to timestamped
+  sheets (`final_family_YYYYMMDD_HHMMSS`, etc.) before replacement, so
+  prior matchings are never silently lost.  `ccat match --overwrite`
+  skips the archiving and replaces the sheets in place.  A child's
+  special needs is the non-empty `special_needs` **string** (audit arch
+  D4).
 - `match_report`: unmatched families and sponsors with reasons, plus
   pre-assignment problems (unknown ids, duplicates, split families).
   Also exported as CSV to `config.match_report_csv` for the program
   coordinator.
-- This module is the sole owner of these three sheets and fully regenerates
-  them on each run; the previous contents are archived to timestamped sheets
-  (`final_family_YYYYMMDD_HHMMSS`, etc.) before replacement, so prior
-  matchings are never silently lost. `ccat match --overwrite` skips the
-  archiving and replaces the sheets in place.
-- `final_child` is read-only here (never rewritten).
+- `final_child` is read-only here (never rewritten); its formula caches
+  survive every match write (io's automatic restore, §4).
 
 ### 8.7 `--skip-match` reconciliation
 
 `ccat match --skip-match` never runs the matching algorithm or touches
-`match_report`.  Instead it reconciles the output sheets against the current
-raw rows (§8.6 ownership still applies):
+`match_report`.  Instead it reconciles the assignment columns inside the
+adj sheets (§8.6 ownership still applies; audit arch §7.2):
 
-- `final_family`: one row per current `raw_family` family; previously
-  assigned sponsors and angel lists carry over unchanged; new families get
-  no sponsor; stale families are dropped with a warning;
-  `num_angels_in_family` refreshes from `final_child`.
-- `final_sponsor`: one row per current `raw_sponsor` sponsor; a non-empty
-  `prior_assigned_angel_ids` is propagated to `assigned_angel_ids`
-  (parsed per §8.5, uppercased, sorted); otherwise the previously assigned
-  angel list carries over unchanged; new sponsors get none; stale sponsors
-  are dropped with a warning; `num_angels_assigned` refreshes from the
-  resulting list.  If the same angel_id ends up assigned to more than one
-  sponsor, a `MatchError` is raised before anything is written.
-- `final_family` follow-through: each propagated prior angel's family gets
-  `assigned_sponsor_id` set to that sponsor and `assigned_angel_ids` set to
-  that sponsor's prior angels of the family (replacing any carried-over
-  list).  Prior angels not in `final_child`, or whose family is not in
-  `raw_family`, warn and are skipped.  A family already assigned to a
-  different current `raw_sponsor` sponsor keeps that assignment and warns
-  (split family; earlier `sponsor_id` wins deterministically).  A family
-  assigned to a sponsor no longer in `raw_sponsor` is stale: the prior
-  reassigns it.
-- Previous `final_family`/`final_sponsor` sheets are archived
-  (timestamped) unless `--overwrite`.
+- `adj_sponsor`: a non-empty `prior_assigned_angel_ids` is propagated to
+  `assigned_angel_ids` (parsed per §8.5, uppercased, sorted); otherwise
+  the existing assignment carries over unchanged; `num_angels_assigned`
+  refreshes from the resulting list.  If the same angel_id ends up
+  assigned to more than one sponsor, a `MatchError` is raised before
+  anything is written.
+- `adj_family`: `num_angels_in_family` refreshes from the non-ignored
+  `adj_child` rows; existing assignments carry over untouched.
+- Follow-through: each propagated prior angel's family gets
+  `assigned_sponsor_id` set to that sponsor and `assigned_angel_ids`
+  set to that sponsor's prior angels of the family.  Prior angels not
+  in `adj_child`, or whose family is not in `adj_family`, warn and are
+  skipped.  A family already assigned to a different current sponsor
+  keeps that assignment and warns (split family; earlier `sponsor_id`
+  wins deterministically).  A family assigned to a sponsor no longer
+  in `adj_sponsor` is stale: the prior reassigns it.
+- `final_family`/`final_sponsor` are re-projected from the adj sheets;
+  previous finals are archived (timestamped) unless `--overwrite`.
 
 ## 9. Idempotency and Ground-Truth Protection
 
 Ownership matrix — a module may only write cells in its own column:
 
-| Sheet           | acquire | screen | audit | match | generate |
-|-----------------|---------|--------|-------|-------|----------|
-| `raw_*`         | write   | read   | read  | read  | -        |
-| `dedup_log`     | write   | read   | read  | read  | -        |
-| `dob_conflict_log` | write | read   | read  | read  | -        |
-| `adj_child`     | -       | append-new / `--redo` | read | - | - |
-| `final_child`   | -       | -      | write (while unaudited) | read | write (`generated_info_sheet` only) |
-| `final_family`  | -       | -      | -     | write | read     |
-| `final_sponsor` | -       | -      | -     | write | read     |
-| `match_report`  | -       | -      | -     | write | -        |
+Ownership matrix (audit_architecture.md §4.4 amends this; sheet-level —
+column scoping is enforced by the modules through the shared store
+helpers and by tests).  The one-time `migrate` writer exists only for
+the `audit-migrate` bootstrap of a fresh workbook and never writes the
+`--from` workbook:
+
+| Sheet             | acquire | screen | write (data+controls) | match | generate | migrate |
+|-------------------|---------|--------|-------|-------|----------|---------|
+| `raw_*`, submissions, logs | write | - | read | - | - | write (bootstrap copy) |
+| `adj_child`       | -       | write (data cells + `screened`) | write (data + controls) | read | write (`generated_info_sheet` only) | write (bootstrap) |
+| `adj_sponsor`     | -       | -      | write (data + controls) | write (assignment columns only) + read | read | write (bootstrap) |
+| `adj_family`      | -       | -      | write (data + controls) | write (assignment columns only) + read | read | write (bootstrap) |
+| `final_child`     | -       | -      | write (projection) | read | write (projection refresh) | write (bootstrap) |
+| `final_family`    | -       | -      | -     | write (projection) | read | write (bootstrap) |
+| `final_sponsor`   | -       | -      | -     | write (projection) | read | write (bootstrap) |
+| `match_report`    | -       | -      | -     | write | -         | -        |
+
+The v2 audit tool refuses a workbook whose `adj_child` still has the
+pre-v2 sparse schema (no `screened` column) — the old system-of-record
+workbook is never written by the v2 system (audit arch §10.1).
 
 Additional guarantees:
 
@@ -859,16 +841,19 @@ src/ccat/
   sponsor_packets.py   # module 5b: sponsor email draft + combined packet PDF
   stats.py             # module 6
   audit/
-    __init__.py
-    server.py          # module 3: http.server + JSON API
-    static/
-      index.html       # single-page UI, vanilla JS
+    __init__.py        # AuditError
+    store.py           # pure data layer: dense adj schemas, status machine, groups, saves, projections
+    migrate.py         # one-time v2 workbook bootstrap (`ccat audit-migrate`)
+    pages.py           # NiceGUI pages + shared components (§8 of the audit arch)
+    server.py          # run(): seed sheets, load state, ui.run (+ --restart helpers)
 test/
   test_config.py
-  test_acquire.py      # validation, cleaning, dedup, IDs, angel_id rules, orphans, dedup_log, dob_conflict_log
-  test_screening.py     # prompt build (name excluded), always-row output, retry/skip logic
-  test_audit.py         # queue filter, merge rules, orphan flagging, frozen-row 409
-  test_match.py         # indivisibility, exact counts, phase order, scoring
+  test_acquire.py      # validation, cleaning, dedup, IDs, angel_id rules, orphans, dedup_log, dob_conflict_log, submission sheets
+  test_screening.py     # prompt build (name excluded), dense writes, screened marker, human-edit protection
+  test_audit_store.py   # status machine, seeding, groups, dense saves, ignore, projections, formula integration
+  test_audit_migrate.py # v2 workbook bootstrap
+  test_audit_server.py  # process discovery, restart, run() wiring
+  test_match.py         # adj pools, status gate, indivisibility, exact counts, phase order, scoring
   test_child_info_generate.py  # flag handling, enrichment, render/convert wiring
   test_sponsor_packets.py  # per-sponsor email draft + combined packet PDF
   test_stats.py         # report figures, tables, raw mode
@@ -973,21 +958,22 @@ so it survives the ODT -> PDF conversion unchanged.
 
 ### 13.3 `generated_info_sheet` flag
 
-- New `final_child` rows carry `generated_info_sheet = FALSE`
-  (defaulted in module 3's row builder and sheet frame).
-- The flag is Boolean; only module 5 writes it (`WRITABLE_SHEETS`,
-  §9).  Module 3 preserves the existing value on re-saves of the same
-  child.
-- First run adds the column (all `FALSE`) when absent; nulls normalize
-  to `FALSE`.
+- The flag lives in `adj_child.generated_info_sheet` (Boolean) — the
+  final is a projection, so the flag must live in the source of truth
+  (audit arch D2).  The `final_child` projection carries it along.
+- Only module 5 writes it (ownership matrix, §9).  Module 3 preserves
+  the existing value on re-saves of the same child; ignoring a child
+  nulls it with the rest of the skeleton (audit arch §5.5).
 
 ### 13.4 Run semantics
 
-- Only rows whose family has an **assigned sponsor** (`assigned_sponsor_id`
-  non-null) and whose `generated_info_sheet == FALSE` are processed (every
-  sponsored row with `ccat generate --overwrite`, ignoring the flag column);
-  unsponsored children are skipped (the sheet's purpose is the sponsor
-  packet).  The output is
+- Only rows that are **audited** (`final_child.status == "audited"`,
+  the readiness gate replacing the old `audited == true` check), whose
+  family has an **assigned sponsor** (`assigned_sponsor_id`
+  non-null), and whose `generated_info_sheet == FALSE` are processed
+  (every sponsored audited row with `ccat generate --overwrite`,
+  ignoring the flag column); unsponsored or unaudited children are
+  skipped (the sheet's purpose is the sponsor packet).  The output is
   `output/child_info_sheets/<location>/AT<season>_<angel_id>.pdf`, where
   `<location>` is the angel's family pickup location reduced to its
   canonical bucket via `config.location_groups` (`hancock`/`calumet`;
@@ -1007,9 +993,10 @@ so it survives the ODT -> PDF conversion unchanged.
   re-raised (exit code 130).  Interrupted children stay pending — the
   next run picks them up.
 - Per-row failures are logged and skipped; after the loop the flags of
-  successful rows flip to `TRUE` in one atomic sheet write, then a typed
-  `InfoSheetError` reports any failed angel ids.  Reruns pick up exactly
-  the failed rows.
+  successful rows flip to `TRUE` inside `adj_child` and the
+  `final_child` projection is refreshed in the same atomic sheet write
+  (with `xmas`), then a typed `InfoSheetError` reports any failed angel
+  ids.  Reruns pick up exactly the failed rows.
 - `--test` stops after the first successfully generated sheet.
 - `--sponsor <id>` scopes the run to one sponsor: the sheet phase only
   renders that sponsor's pending children (respecting the flag, unless
@@ -1022,8 +1009,8 @@ so it survives the ODT -> PDF conversion unchanged.
   errors.
 - The enrichment columns (`gift_pickup_location`, `assigned_sponsor_id`,
   `family_size`, and the `sponsor_*` join/computed columns) are never
-  written back to the workbook; `final_child` gains only
-  `generated_info_sheet`.
+  written back to the workbook; only `adj_child.generated_info_sheet`
+  and the refreshed `final_child` projection change.
 
 ## 13b. Module 5b — Sponsor Packets
 

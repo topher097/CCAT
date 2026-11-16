@@ -13,6 +13,7 @@ from pypdf import PdfReader, PdfWriter
 import ccat.child_info_generate as gen
 from ccat.child_info_generate import InfoSheetError
 from ccat.config import Config, InfoSheetSpec
+from ccat.audit.store import ADJ_CHILD_COLUMNS
 from ccat.io import read_sheet, write_sheets
 from ccat.sponsor_packets import SponsorPacketError
 
@@ -48,12 +49,16 @@ CHILD_COLUMNS = [
 ]
 
 
-def child_row(record_id: str, angel_id: str, family_id: int) -> dict[str, Any]:
+def child_row(
+    record_id: str, angel_id: str, family_id: int, status: str = "audited"
+) -> dict[str, Any]:
     """One final_child row for generate tests."""
     return {
         "zite_record_id": record_id,
         "family_id": family_id,
         "angel_id": angel_id,
+        "status": status,
+        "dob": "2018-05-10",
         "age_at_xmas": 8,
         "gender": "female",
         "favorite_colors": "blue",
@@ -89,6 +94,8 @@ def _seed(
         "zite_record_id": pl.String,
         "family_id": pl.Int64,
         "angel_id": pl.String,
+        "status": pl.String,
+        "dob": pl.String,
         "age_at_xmas": pl.Int64,
         "gender": pl.String,
         "favorite_colors": pl.String,
@@ -113,10 +120,19 @@ def _seed(
     if flags is not None:
         for row, flag in zip(children, flags, strict=True):
             row["generated_info_sheet"] = flag
+    from ccat.audit.store import build_adj_frame
+
+    adj_rows = [
+        {column: None for column in ADJ_CHILD_COLUMNS} | child
+        for child in children
+    ]
     write_sheets(
         cfg.excel_file,
         "audit",
-        {"final_child": pl.DataFrame(children, schema=schema)},
+        {
+            "adj_child": build_adj_frame("child", adj_rows),
+            "final_child": pl.DataFrame(children, schema=schema),
+        },
         xmas=cfg.xmas,
     )
     write_sheets(
@@ -673,6 +689,7 @@ class TestPendingRows:
                 "angel_id": angel,
                 "generated_info_sheet": flag,
                 "assigned_sponsor_id": sponsor,
+                "status": "audited",
             }
             for i, (flag, angel, sponsor) in enumerate(
                 zip(flags, angel_ids, sponsor_ids, strict=True)
@@ -685,6 +702,7 @@ class TestPendingRows:
                 "angel_id": pl.String,
                 "generated_info_sheet": pl.Boolean,
                 "assigned_sponsor_id": pl.Int64,
+                "status": pl.String,
             },
         )
 
@@ -792,6 +810,15 @@ class TestRun:
         frame = read_sheet(gen_cfg.excel_file, "final_child")
         assert frame is not None
         assert frame["generated_info_sheet"].to_list() == [True, True]
+        # the flag lives in adj_child (source of truth) and the final is
+        # its refreshed projection (§7.5)
+        from ccat.audit.store import read_adj
+
+        adj = read_adj(gen_cfg, "child")
+        assert [row["generated_info_sheet"] for row in adj] == [True, True]
+        assert frame["zite_record_id"].to_list() == [
+            row["zite_record_id"] for row in adj
+        ]
         # enrichment columns never reach the sheet (§13.4)
         assert "gift_pickup_location" not in frame.columns
         assert "family_size" not in frame.columns
@@ -837,12 +864,46 @@ class TestRun:
         render_calls: list[tuple[str, dict[str, Any]]],
     ) -> None:
         """Children without an assigned sponsor get no sheet (§13.4)."""
-        _seed(gen_cfg, two_children, _unassigned_family())
+        _seed(
+            gen_cfg,
+            two_children,
+            _unassigned_family(),
+            with_flag=True,
+            flags=[False, False],
+        )
         gen.run(gen_cfg)
         assert render_calls == []
         frame = read_sheet(gen_cfg.excel_file, "final_child")
         assert frame is not None
         assert frame["generated_info_sheet"].to_list() == [False, False]
+
+    def test_unaudited_children_skipped_end_to_end(
+        self,
+        gen_cfg: Config,
+        two_children: list[dict[str, Any]],
+        render_calls: list[tuple[str, dict[str, Any]]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Children whose status is not audited get no sheet (§7.5)."""
+        unaudited = [
+            {**two_children[0], "status": "new"},
+            two_children[1],
+        ]
+        _seed(gen_cfg, unaudited, _family())
+        # Focus is the status gate; stub out the packet phase (its
+        # combined PDFs would fail validation for the skipped child).
+        monkeypatch.setattr(
+            gen.sponsor_packets,
+            "validate_all_sheets_exist",
+            lambda cfg: None,
+        )
+        monkeypatch.setattr(
+            gen.sponsor_packets, "build_packets", lambda cfg, overwrite: None
+        )
+        gen.run(gen_cfg)
+        assert [name for name, _data in render_calls] == [
+            f"AT{gen_cfg.season}_1B.odt"
+        ]
 
     def test_organization_sponsor_uses_organization_name(
         self,

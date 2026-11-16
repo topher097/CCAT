@@ -49,6 +49,16 @@ include = ["src", "scripts", "test"]
 include = ["scripts/zerobounce_bulk_check.py"]
 rules = { unresolved-import = "ignore" }
 
+# Test files import sibling modules flat (pytest inserts test/ on sys.path);
+# ty resolves first-party only from src/, so these cannot be resolved.
+[[tool.ty.overrides]]
+include = [
+    "scripts/audit_ui_smoke.py",
+    "test/test_audit_migrate.py",
+    "test/test_audit_server.py",
+]
+rules = { unresolved-import = "ignore" }
+
 [dependency-groups]
 dev = [
     "pytest>=9.2.0",
