@@ -169,7 +169,12 @@ def test_queue_excludes_audited_children(cfg: Config) -> None:
             "special_needs": pl.Boolean,
         },
     )
-    write_sheets(cfg.excel_file, "audit", {"final_child": final})
+    write_sheets(
+        cfg.excel_file,
+        "audit",
+        {"final_child": final},
+        xmas=cfg.xmas,
+    )
     queue = AuditState(cfg).queue()
     assert [item["zite_record_id"] for item in queue] == ["c2", "orphan1"]
 
@@ -323,7 +328,12 @@ def test_save_survives_string_boolean_round_trip(cfg: Config) -> None:
             "generated_info_sheet": pl.String,
         },
     )
-    write_sheets(cfg.excel_file, "audit", {"final_child": final})
+    write_sheets(
+        cfg.excel_file,
+        "audit",
+        {"final_child": final},
+        xmas=cfg.xmas,
+    )
     state = AuditState(cfg)
     row = state.save("c1", {"audited": True, "special_needs": False})
     assert row["audited"] is True
@@ -562,7 +572,12 @@ def test_save_preserves_generated_info_sheet(cfg: Config) -> None:
         .otherwise(pl.col("generated_info_sheet"))
         .alias("generated_info_sheet")
     )
-    write_sheets(cfg.excel_file, "generate", {"final_child": final})
+    write_sheets(
+        cfg.excel_file,
+        "generate",
+        {"final_child": final},
+        xmas=cfg.xmas,
+    )
     # a later audit save of the same child must not lose the flag
     state.save(
         "c1",

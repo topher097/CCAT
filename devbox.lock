@@ -551,6 +551,44 @@
         }
       }
     },
+    "ugrep@latest": {
+      "last_modified": "2026-10-02T22:55:44Z",
+      "resolved": "github:NixOS/nixpkgs/55ba7f49ef2962b42cbd126522b7df5f95037679#ugrep",
+      "source": "devbox-search",
+      "version": "7.8.5",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/pk1sarzvbz6d6ynrhsj0rslrna43ysc0-ugrep-7.8.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/pk1sarzvbz6d6ynrhsj0rslrna43ysc0-ugrep-7.8.5"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/ykxlsf71njlzbr74rvjjfa9a5x5bfsxa-ugrep-7.8.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/ykxlsf71njlzbr74rvjjfa9a5x5bfsxa-ugrep-7.8.5"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/1kdkdsll5iwjkyyjx3lyyx2hxfw25926-ugrep-7.8.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/1kdkdsll5iwjkyyjx3lyyx2hxfw25926-ugrep-7.8.5"
+        }
+      }
+    },
     "uv@latest": {
       "last_modified": "2026-10-04T16:11:07Z",
       "resolved": "github:NixOS/nixpkgs/9013764fcc0ea99fa16cf7aa7decf8a5c3889dd2#uv",

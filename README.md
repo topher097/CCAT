@@ -35,6 +35,9 @@ Module 5 renders one `<angel_id>.pdf` per pending child from
 `data/child_information_sheet_2026.ott` into `output/child_info_sheets/`,
 requires headless LibreOffice (`soffice`), and tracks progress in the
 `generated_info_sheet` column of `final_child` (only `FALSE` rows are
-processed).  The template's sponsor section is filled from the child's
-assigned sponsor in `final_sponsor` when one exists, and left blank for
-hand-filling otherwise.
+processed).  Sheets render and convert on a thread pool
+(`--max-workers N`, default `info_sheet.max_workers` = 4) with a `tqdm`
+progress bar; Ctrl+C cancels cleanly — finished sheets are recorded, the
+rest stay pending for the next run.  The template's sponsor section is
+filled from the child's assigned sponsor in `final_sponsor` when one
+exists, and left blank for hand-filling otherwise.

@@ -1,6 +1,8 @@
 """Tests for module 5 — child info sheet generation (§13)."""
 
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +117,7 @@ def _seed(
         cfg.excel_file,
         "audit",
         {"final_child": pl.DataFrame(children, schema=schema)},
+        xmas=cfg.xmas,
     )
     write_sheets(
         cfg.excel_file,
@@ -547,6 +550,7 @@ class TestLoadEnriched:
             gen_cfg.excel_file,
             "audit",
             {"final_child": pl.DataFrame(two_children)},
+            xmas=gen_cfg.xmas,
         )
         with pytest.raises(InfoSheetError, match="final_family sheet"):
             gen._load_enriched_rows(gen_cfg)
@@ -751,6 +755,7 @@ class TestRun:
             out_dir: Path,
             soffice_binary: str,
             profile: Path,
+            stop: threading.Event | None = None,
         ) -> Path:
             # Real PDF bytes: the packet phase merges these files.
             writer = PdfWriter()
@@ -800,7 +805,11 @@ class TestRun:
         """The rendered data dict carries the enriched row values (§13.2)."""
         _seed(gen_cfg, two_children, _family())
         gen.run(gen_cfg)
-        _name, data = render_calls[0]
+        _name, data = next(
+            call
+            for call in render_calls
+            if call[0] == f"AT{gen_cfg.season}_1A.odt"
+        )
         assert data["info"] == {
             "angel_id": "1A",
             "age": 8,
@@ -1077,6 +1086,7 @@ class TestRun:
             out_dir: Path,
             soffice_binary: str,
             profile: Path,
+            stop: threading.Event | None = None,
         ) -> Path:
             writer = PdfWriter()
             writer.add_blank_page(width=612, height=792)
@@ -1136,6 +1146,178 @@ class TestRun:
         broken = gen_cfg.model_copy(update={"info_sheet": spec})
         with pytest.raises(InfoSheetError, match="template file not found"):
             gen.run(broken)
+
+
+class TestParallelGeneration:
+    """The thread-pool sheet phase (§13.4): parallelism and Ctrl+C."""
+
+    @pytest.fixture
+    def pdf_convert(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> list[tuple[str, Path]]:
+        """Stub rendering and conversion, recording conversions."""
+        converts: list[tuple[str, Path]] = []
+
+        def fake_render(
+            template_file: Path, data: dict[str, Any], odt_path: Path
+        ) -> None:
+            pass
+
+        def fake_convert(
+            odt_path: Path,
+            out_dir: Path,
+            soffice_binary: str,
+            profile: Path,
+            stop: threading.Event | None = None,
+        ) -> Path:
+            converts.append((odt_path.stem, profile))
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
+            pdf_path = out_dir / f"{odt_path.stem}.pdf"
+            with pdf_path.open("wb") as output:
+                writer.write(output)
+            return pdf_path
+
+        monkeypatch.setattr(gen, "_render_one", fake_render)
+        monkeypatch.setattr(gen, "_convert_to_pdf", fake_convert)
+        return converts
+
+    def test_parallel_run_flags_every_child(
+        self,
+        gen_cfg: Config,
+        pdf_convert: list[tuple[str, Path]],
+    ) -> None:
+        """Concurrent workers still flag every child exactly once."""
+        children = [
+            child_row("c1", "1A", 1),
+            child_row("c2", "1B", 1),
+            child_row("c3", "1C", 1),
+            child_row("c4", "1D", 1),
+        ]
+        _seed(gen_cfg, children, _family())
+        gen.run(gen_cfg, max_workers=3)
+        frame = read_sheet(gen_cfg.excel_file, "final_child")
+        assert frame is not None
+        assert frame["generated_info_sheet"].to_list() == [True] * 4
+        assert sorted(stem for stem, _profile in pdf_convert) == [
+            f"AT{gen_cfg.season}_1A",
+            f"AT{gen_cfg.season}_1B",
+            f"AT{gen_cfg.season}_1C",
+            f"AT{gen_cfg.season}_1D",
+        ]
+        # One LibreOffice profile per worker thread, none shared.
+        assert len({profile for _stem, profile in pdf_convert}) <= 3
+
+    def test_keyboard_interrupt_records_finished_sheets(
+        self,
+        gen_cfg: Config,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ctrl+C flags completed sheets and leaves the rest pending."""
+        children = [
+            child_row("c1", "1A", 1),
+            child_row("c2", "1B", 1),
+            child_row("c3", "1C", 1),
+        ]
+        converts: list[str] = []
+
+        def fake_render(
+            template_file: Path, data: dict[str, Any], odt_path: Path
+        ) -> None:
+            if odt_path.stem.endswith("1C"):
+                # Give the main thread time to react to 1B's interrupt
+                # and set the stop event before 1C converts.
+                time.sleep(0.3)
+
+        def fake_convert(
+            odt_path: Path,
+            out_dir: Path,
+            soffice_binary: str,
+            profile: Path,
+            stop: threading.Event | None = None,
+        ) -> Path:
+            if odt_path.stem.endswith("1B"):
+                # Simulates the interrupt arriving while 1B converts.
+                raise KeyboardInterrupt
+            converts.append(odt_path.stem)
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
+            pdf_path = out_dir / f"{odt_path.stem}.pdf"
+            with pdf_path.open("wb") as output:
+                writer.write(output)
+            return pdf_path
+
+        monkeypatch.setattr(gen, "_render_one", fake_render)
+        monkeypatch.setattr(gen, "_convert_to_pdf", fake_convert)
+        _seed(gen_cfg, children, _family())
+        with pytest.raises(KeyboardInterrupt):
+            gen.run(gen_cfg, max_workers=1)
+        # 1A finished and is flagged; 1B was interrupted mid-flight and
+        # 1C never converted (cancelled through the stop event).
+        assert converts == [f"AT{gen_cfg.season}_1A"]
+        frame = read_sheet(gen_cfg.excel_file, "final_child")
+        assert frame is not None
+        assert frame["generated_info_sheet"].to_list() == [
+            True,
+            False,
+            False,
+        ]
+
+    def test_progress_bar_tracks_every_sheet(
+        self,
+        gen_cfg: Config,
+        two_children: list[dict[str, Any]],
+        pdf_convert: list[tuple[str, Path]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One tqdm bar covers exactly the pending rows and closes."""
+
+        class FakeBar:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self.updates = 0
+                self.kwargs = kwargs
+                self.closed = False
+                bars.append(self)
+
+            def update(self, n: int = 1) -> None:
+                self.updates += n
+
+            def set_postfix_str(self, text: str, refresh: bool = True) -> None:
+                pass
+
+            def close(self) -> None:
+                self.closed = True
+
+        bars: list[FakeBar] = []
+        monkeypatch.setattr(gen, "tqdm", FakeBar)
+        _seed(gen_cfg, two_children, _family())
+        gen.run(gen_cfg)
+        assert len(bars) == 1
+        assert bars[0].kwargs["total"] == 2
+        assert bars[0].updates == 2
+        assert bars[0].closed
+
+    def test_convert_stop_terminates_subprocess(self, tmp_path: Path) -> None:
+        """A set stop event kills the LibreOffice subprocess promptly."""
+        slow = tmp_path / "slow_soffice"
+        slow.write_text("#!/bin/sh\nexec sleep 30\n")
+        slow.chmod(0o755)
+        odt_path = tmp_path / "x.odt"
+        odt_path.write_bytes(b"odt")
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        stop = threading.Event()
+        threading.Timer(0.3, stop.set).start()
+        started = time.monotonic()
+        with pytest.raises(gen.InfoSheetCancelledError):
+            gen._convert_to_pdf(
+                odt_path, out_dir, str(slow), profile, stop=stop
+            )
+        # Cancelled within a poll interval (not the 300s timeout, not
+        # the 30s sleep).
+        assert time.monotonic() - started < 10
 
 
 @pytest.mark.skipif(

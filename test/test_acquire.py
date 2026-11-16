@@ -1065,7 +1065,12 @@ def test_run_never_touches_final_sheets(tmp_path, monkeypatch) -> None:
     """final_child is byte-identical before and after a run (§5.6)."""
     cfg = _acquire_cfg(tmp_path)
     sentinel = pl.DataFrame({"zite_record_id": ["x"], "audited": [True]})
-    write_sheets(cfg.excel_file, "audit", {"final_child": sentinel})
+    write_sheets(
+        cfg.excel_file,
+        "audit",
+        {"final_child": sentinel},
+        xmas=cfg.xmas,
+    )
     before = read_sheet(cfg.excel_file, "final_child")
     frames = _scenario_frames()
     monkeypatch.setattr(

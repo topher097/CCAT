@@ -236,11 +236,13 @@ Structure:
 
   // Child info sheet generation (module 5). `mappings` maps each py3o
   // template variable in the .ott onto a column key of the enriched
-  // final_child row (§13); template_file is the LibreOffice template.
+  // final_child row (§13); template_file is the LibreOffice template;
+  // max_workers is the thread-pool size for render+convert (§13.4).
   "info_sheet": {
     "template_file": "./data/child_information_sheet_2026.ott",
     "output_dir": "./output/child_info_sheets",
     "soffice_binary": "soffice",
+    "max_workers": 4,
     "mappings": {
       "info.angel_id": "angel_id",
       "info.age": "age_at_xmas",
@@ -334,6 +336,18 @@ One workbook (`excel_file` from config). Sheets:
 I/O implementation lives in `src/ccat/io.py`: thin polars-based
 read/write helpers over the workbook. Writes are atomic (write temp file,
 replace) to avoid corruption if a run is interrupted.
+
+`final_child.age_at_xmas` is stored as a live spreadsheet formula:
+`=DATEDIF(<dob cell>, DATE(Y,M,D), "y")` with the age (recomputed from the
+row's `dob` and `xmas_date`) embedded as the cached value. openpyxl cannot
+write a formula and its cached result in one cell, so `write_sheets` saves
+the ages as numbers and then patches the sheet XML to add the `<f>`
+element; fastexcel reads (the pipeline's reader) see the cached number,
+while LibreOffice/Excel show a formula that recalculates when a `dob` cell
+is edited. Every `write_sheets` call that includes `final_child` must pass
+the configured Christmas date (`xmas=cfg.xmas`) and re-derives the ages;
+calls that write other sheets restore the existing cached values, so the
+formulas and their caches survive every pipeline run.
 
 ## 5. Module 1 — Data Acquisition and Validation
 
@@ -640,6 +654,11 @@ Re-save rules: while `audited == false`, the tool may overwrite the child's
 `PUT` for that zite_record_id returns 409 and the child disappears from the
 queue. Corrections after audit require rerunning matchmaking or manual
 spreadsheet edit (out of pipeline scope, documented in README later).
+
+`age_at_xmas` on the saved row is re-derived from the row's `dob` and stored
+as a `DATEDIF` formula with the age as its cached value (§4), so an
+adjudicated `dob` correction immediately carries the matching age, and a
+later manual `dob` edit in the spreadsheet recalculates the age.
 
 `final_family` / `final_sponsor` are never touched.
 
@@ -974,6 +993,19 @@ so it survives the ODT -> PDF conversion unchanged.
   canonical bucket via `config.location_groups` (`hancock`/`calumet`;
   unmapped labels go to `unknown`) — existing files are overwritten, so
   generation is idempotent.
+- Sheets are generated on a thread pool of `info_sheet.max_workers` workers
+  (default 4; `--max-workers` overrides; clamped to the pending row count):
+  each worker renders with py3o and converts with headless LibreOffice,
+  using its own scratch directory and LibreOffice user profile so
+  concurrent conversions never share a profile lock.  A `tqdm` progress
+  bar tracks completions (one tick per finished sheet, silenced when
+  stderr is not a terminal).
+- Ctrl+C cancels cleanly: queued children are dropped, in-flight
+  LibreOffice conversions are killed as a process group within half a
+  second, the flags of every child whose PDF was already written are
+  committed in the same atomic sheet write, and the interrupt is
+  re-raised (exit code 130).  Interrupted children stay pending — the
+  next run picks them up.
 - Per-row failures are logged and skipped; after the loop the flags of
   successful rows flip to `TRUE` in one atomic sheet write, then a typed
   `InfoSheetError` reports any failed angel ids.  Reruns pick up exactly

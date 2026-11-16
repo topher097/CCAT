@@ -85,6 +85,7 @@ def _seed(
         cfg.excel_file,
         "audit",
         {"final_child": pl.DataFrame(children, schema=CHILD_SCHEMA)},
+        xmas=cfg.xmas,
     )
     write_sheets(
         cfg.excel_file,
@@ -451,6 +452,7 @@ class TestRun:
                     },
                 )
             },
+            xmas=cfg.xmas,
         )
         write_sheets(
             cfg.excel_file,

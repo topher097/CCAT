@@ -1,5 +1,5 @@
 {
-  "$schema":  "https://raw.githubusercontent.com/jetify-com/devbox/0.17.2/.schema/devbox.schema.json",
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.2/.schema/devbox.schema.json",
   "packages": [
     "uv@latest",
     "awscli2@latest",
@@ -12,7 +12,8 @@
     "bump-my-version@latest",
     "tabiew@latest",
     "frogmouth@latest",
-    "pandoc@latest"
+    "pandoc@latest",
+    "ugrep@latest"
   ],
   "shell": {
     "init_hook": [

@@ -248,6 +248,7 @@ def _generate_cmd(
     test: bool = False,
     overwrite: bool = False,
     sponsor: int | None = None,
+    max_workers: int | None = None,
 ) -> None:
     """Run module 5 + 5b: info sheets, then sponsor packets (§13, §13b).
 
@@ -260,6 +261,9 @@ def _generate_cmd(
         sponsor: Restrict the run to one sponsor id: the sheet phase
             renders only that sponsor's pending children and only that
             sponsor's packet is built.
+        max_workers: Override ``info_sheet.max_workers``: how many
+            children render and convert concurrently (Ctrl+C cancels
+            cleanly; finished sheets are recorded).
     """
     _dispatch(
         "generate",
@@ -268,6 +272,7 @@ def _generate_cmd(
         test=test,
         overwrite=overwrite,
         sponsor=sponsor,
+        max_workers=max_workers,
     )
 
 

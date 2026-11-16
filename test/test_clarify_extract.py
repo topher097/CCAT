@@ -1,5 +1,6 @@
 """Tests for module 7 — clarification-table extraction."""
 
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -86,12 +87,14 @@ def write_workbook(
     children: list[dict[str, Any]],
     families: list[dict[str, Any]],
     raw_children: list[dict[str, Any]],
+    xmas: date = date(2026, 12, 25),
 ) -> None:
     """Write a minimal three-sheet workbook for extraction tests."""
     write_sheets(
         path,
         "audit",
         {"final_child": pl.DataFrame(children)},
+        xmas=xmas,
     )
     write_sheets(
         path,
@@ -187,6 +190,7 @@ class TestBuildTable:
                     [child_row("rec-a", "1A", 1, "Aspen", "note")]
                 )
             },
+            xmas=date(2026, 12, 25),
         )
         with pytest.raises(ClarifyError, match="final_family"):
             build_table(path)
@@ -202,6 +206,7 @@ class TestBuildTable:
                     [{"zite_record_id": "rec-a", "angel_id": "1A"}]
                 )
             },
+            xmas=date(2026, 12, 25),
         )
         with pytest.raises(ClarifyError, match="lacks column"):
             build_table(path)

@@ -222,6 +222,10 @@ class InfoSheetSpec(BaseModel):
         contact_placeholder_affiliations: Sponsor affiliations whose
             missing contact info renders the placeholder (§13.2);
             other affiliations render blank.
+        max_workers: Concurrent sheet generations (py3o render +
+            LibreOffice conversion); each worker thread gets its own
+            temporary LibreOffice profile.  Values above the number of
+            pending children are clamped.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -232,6 +236,15 @@ class InfoSheetSpec(BaseModel):
     contact_placeholder_length: int = 30
     contact_placeholder_affiliations: tuple[str, ...] = ()
     mappings: dict[str, str]
+    max_workers: int = 4
+
+    @field_validator("max_workers")
+    @classmethod
+    def _check_max_workers(cls, value: int) -> int:
+        """Require a positive worker count."""
+        if value <= 0:
+            raise ValueError("info_sheet.max_workers must be positive")
+        return value
 
     @model_validator(mode="after")
     def _check_mappings(self) -> "InfoSheetSpec":

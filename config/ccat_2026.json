@@ -546,6 +546,7 @@
     "template_file": "./data/child_information_sheet_2026.ott",
     "output_dir": "./output/child_info_sheets",
     "soffice_binary": "soffice",
+    "max_workers": 4,
     "contact_placeholder_length": 30,
     "contact_placeholder_affiliations": ["Organization", "Walmart"],
     "mappings": {

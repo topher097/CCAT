@@ -431,7 +431,12 @@ class AuditState:
         else:
             final_rows[final_rows.index(existing)] = final_row
         frame = _final_child_frame(final_rows, raw_child)
-        write_sheets(self.cfg.excel_file, "audit", {"final_child": frame})
+        write_sheets(
+            self.cfg.excel_file,
+            "audit",
+            {"final_child": frame},
+            xmas=self.cfg.xmas,
+        )
         logger.info(
             "saved final_child row for %s (audited=%s)", zite_record_id, audited
         )

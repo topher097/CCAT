@@ -330,6 +330,7 @@ def _seed_match_workbook(
         cfg.excel_file,
         "audit",
         {"final_child": pl.DataFrame(children, schema=child_schema)},
+        xmas=cfg.xmas,
     )
 
 

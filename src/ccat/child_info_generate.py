@@ -11,6 +11,17 @@ rows flip their flag to ``True`` so reruns only process pending children
 (§13).  Failed rows keep ``False`` and are reported as one typed error
 after the flags are written, so a rerun picks them up again.
 
+Sheets are generated on a thread pool (``info_sheet.max_workers``,
+clamped to the number of pending children): the py3o render and the
+headless LibreOffice conversion of different children are independent,
+and each worker thread uses its own temporary LibreOffice profile so
+concurrent conversions cannot block each other.  A ``tqdm`` progress
+bar tracks completions (silenced when stderr is not a terminal).
+Ctrl+C stops cleanly: queued children are cancelled, in-flight
+LibreOffice conversions are terminated within half a second, the flags
+of every child whose PDF was already written are committed in the same
+atomic sheet write, and the interrupt is re-raised.
+
 Template variables are mapped onto columns by ``info_sheet.mappings``
 (config-driven).  Mapped sources are resolved against an *enriched* row:
 the ``final_child`` columns plus ``gift_pickup_location`` and
@@ -40,14 +51,20 @@ sheet.
 """
 
 import logging
+import os
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 from py3o.template import Template
+from tqdm import tqdm
 
 from ccat import sponsor_packets
 from ccat.config import Config
@@ -112,6 +129,38 @@ CONVERT_TIMEOUT_SECONDS = 300
 
 class InfoSheetError(Exception):
     """Raised when child info sheet generation cannot complete."""
+
+
+class InfoSheetCancelledError(Exception):
+    """Raised inside workers when generation is stopping (Ctrl+C).
+
+    Never a failure: the row simply stays pending and is picked up by
+    the next run.
+    """
+
+
+def _terminate(process: subprocess.Popen[str]) -> None:
+    """Terminate a conversion subprocess tree, escalating to SIGKILL.
+
+    ``soffice`` spawns helper processes (oosplash, ``soffice.bin``), and
+    :func:`_convert_to_pdf` starts every conversion in its own session,
+    so signalling the process group stops the whole tree at once.
+
+    Args:
+        process: The LibreOffice conversion process to stop.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+        process.wait()
 
 
 def _normalize_flag(frame: pl.DataFrame) -> tuple[pl.DataFrame, bool]:
@@ -423,9 +472,17 @@ def _render_one(
 
 
 def _convert_to_pdf(
-    odt_path: Path, out_dir: Path, soffice_binary: str, profile: Path
+    odt_path: Path,
+    out_dir: Path,
+    soffice_binary: str,
+    profile: Path,
+    stop: threading.Event | None = None,
 ) -> Path:
     """Convert one ODT to PDF with headless LibreOffice (§13).
+
+    The subprocess is polled instead of blocking, so a set ``stop``
+    event (Ctrl+C) terminates the conversion within half a second;
+    the overall deadline stays :data:`CONVERT_TIMEOUT_SECONDS`.
 
     Args:
         odt_path: The rendered ODT file; the PDF lands in ``out_dir``
@@ -434,41 +491,67 @@ def _convert_to_pdf(
         soffice_binary: LibreOffice binary path.
         profile: Directory for the isolated LibreOffice user profile, so
             a running LibreOffice GUI cannot block the conversion.
+        stop: When set, the conversion subprocess is terminated and
+            :class:`InfoSheetCancelledError` is raised.
 
     Returns:
         The created PDF path.
 
     Raises:
-        InfoSheetError: If the conversion fails or produces no non-empty
-            PDF.
+        InfoSheetCancelledError: When ``stop`` is set mid-conversion.
+        InfoSheetError: If the conversion fails, times out, or produces
+            no non-empty PDF.
     """
-    result = subprocess.run(
-        [
-            soffice_binary,
-            "--headless",
-            "--convert-to",
-            "pdf",
-            "--outdir",
-            str(out_dir),
-            f"-env:UserInstallation={profile.as_uri()}",
-            str(odt_path),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=CONVERT_TIMEOUT_SECONDS,
-        check=False,
-    )
+    try:
+        process = subprocess.Popen(
+            [
+                soffice_binary,
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(out_dir),
+                f"-env:UserInstallation={profile.as_uri()}",
+                str(odt_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise InfoSheetError(
+            f"could not start {soffice_binary} for {odt_path.name}: {error}"
+        ) from error
+    deadline = time.monotonic() + CONVERT_TIMEOUT_SECONDS
+    while True:
+        try:
+            returncode = process.wait(timeout=0.5)
+            break
+        except subprocess.TimeoutExpired:
+            if stop is not None and stop.is_set():
+                _terminate(process)
+                raise InfoSheetCancelledError(
+                    f"cancelled while converting {odt_path.name}"
+                ) from None
+            if time.monotonic() >= deadline:
+                _terminate(process)
+                raise InfoSheetError(
+                    f"soffice conversion timed out after"
+                    f" {CONVERT_TIMEOUT_SECONDS}s for {odt_path.name}"
+                ) from None
+    stdout, stderr = process.communicate()
     pdf_path = out_dir / f"{odt_path.stem}.pdf"
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
+    if returncode != 0:
+        detail = (stderr or stdout or "").strip()
         raise InfoSheetError(
             f"soffice conversion failed for {odt_path.name} (exit"
-            f" {result.returncode}): {detail[-400:]}"
+            f" {returncode}): {detail[-400:]}"
         )
     if not pdf_path.is_file() or pdf_path.stat().st_size == 0:
         raise InfoSheetError(
             f"soffice produced no PDF for {odt_path.name}:"
-            f" {(result.stderr or result.stdout or '').strip()[-400:]}"
+            f" {(stderr or stdout or '').strip()[-400:]}"
         )
     return pdf_path
 
@@ -526,18 +609,24 @@ def run(
     test: bool = False,
     overwrite: bool = False,
     sponsor: int | None = None,
+    max_workers: int | None = None,
 ) -> None:
     """Generate child info sheet PDFs, then sponsor packets (§13, §13b).
 
     Sheet phase: pending rows are children whose family has an
     **assigned sponsor** and whose ``generated_info_sheet`` flag is
     False (all sponsored rows when ``overwrite`` is set) --
-    unsponsored children get no sheet.  Each pending row is
-    rendered with py3o and converted to ``AT<season>_<angel_id>.pdf``
-    in ``info_sheet.output_dir``; successfully generated rows flip
-    their flag to ``True`` in one atomic sheet write at the end, so an
-    interrupted run never leaves a half-updated workbook and failed
-    rows are simply picked up again on the next run.
+    unsponsored children get no sheet.  Pending rows are rendered with
+    py3o and converted to ``AT<season>_<angel_id>.pdf`` in
+    ``info_sheet.output_dir`` on a thread pool of ``max_workers``
+    workers (``info_sheet.max_workers`` by default, clamped to the
+    pending row count), tracked by a ``tqdm`` progress bar.
+    Successfully generated rows flip their flag to ``True`` in one
+    atomic sheet write at the end, so an interrupted run never leaves a
+    half-updated workbook and failed rows are simply picked up again on
+    the next run.  Ctrl+C cancels queued rows, terminates in-flight
+    LibreOffice conversions, commits the flags of the children already
+    generated, and re-raises the interrupt.
 
     Packet phase: after every sponsored angel's sheet exists, one
     sponsor packet directory per assigned sponsor is built under
@@ -555,6 +644,14 @@ def run(
         sponsor: Restrict the run to one sponsor: the sheet phase only
             renders children assigned to that ``sponsor_id`` and only
             that sponsor's packet is built (its sheets must all exist).
+        max_workers: Override ``info_sheet.max_workers``: how many
+            children render and convert concurrently.
+
+    Raises:
+        KeyboardInterrupt: On Ctrl+C, after cancelling the pool and
+            committing the flags of the children already generated.
+        InfoSheetError: After any per-row failure (all successes are
+            already flagged).
     """
     spec = cfg.info_sheet
     template_file = Path(spec.template_file)
@@ -579,6 +676,7 @@ def run(
         pending = scoped
     generated: list[Any] = []
     failed: list[str] = []
+    interrupted = False
     if pending.is_empty():
         logger.info("no children pending an info sheet")
     else:
@@ -588,13 +686,43 @@ def run(
             logger.warning(
                 "mapping source not found in enriched row: %s", column
             )
-        with tempfile.TemporaryDirectory(prefix="ccat_info_sheets_") as tmp:
+        rows = pending.to_dicts()
+        if test:
+            rows = rows[:1]
+            logger.info("test mode: generating one info sheet only")
+        workers = min(
+            spec.max_workers if max_workers is None else max_workers,
+            len(rows),
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="ccat_info_sheets_", ignore_cleanup_errors=True
+        ) as tmp:
             tmp_dir = Path(tmp)
-            profile = tmp_dir / "lo_profile"
-            profile.mkdir()
-            for row in pending.to_dicts():
+            stop = threading.Event()
+            workspaces: dict[int, Path] = {}
+            workspace_lock = threading.Lock()
+
+            def _workspace() -> Path:
+                """One ODT scratch dir + LO profile per worker thread."""
+                ident = threading.get_ident()
+                with workspace_lock:
+                    path = workspaces.get(ident)
+                    if path is None:
+                        path = tmp_dir / f"worker{len(workspaces)}"
+                        (path / "lo_profile").mkdir(parents=True)
+                        workspaces[ident] = path
+                    return path
+
+            def _work(row: dict[str, Any]) -> str:
+                """Render and convert one child's sheet (§13.4).
+
+                Raises:
+                    InfoSheetCancelledError: When the run is stopping before
+                        this row started or mid-conversion.
+                """
+                if stop.is_set():
+                    raise InfoSheetCancelledError()
                 stem = _sheet_stem(cfg, str(row["angel_id"]))
-                odt_path = tmp_dir / f"{stem}.odt"
                 # Sheets nest under the angel's canonical pickup
                 # location bucket (e.g. output/child_info_sheets/
                 # hancock/AT2026_1A.pdf); unmapped labels go to
@@ -608,20 +736,39 @@ def run(
                 )
                 location_dir = out_dir / location
                 location_dir.mkdir(parents=True, exist_ok=True)
+                workspace = _workspace()
+                odt_path = workspace / f"{stem}.odt"
+                _render_one(
+                    template_file,
+                    _nested_data(
+                        row,
+                        spec.mappings,
+                        "_" * spec.contact_placeholder_length,
+                        frozenset(spec.contact_placeholder_affiliations),
+                    ),
+                    odt_path,
+                )
+                if stop.is_set():
+                    raise InfoSheetCancelledError()
+                _convert_to_pdf(
+                    odt_path,
+                    location_dir,
+                    spec.soffice_binary,
+                    workspace / "lo_profile",
+                    stop=stop,
+                )
+                return stem
+
+            def _consume(
+                future: Future[str],
+                stem: str,
+                zite_record_id: Any,
+            ) -> None:
+                """Record one finished row's outcome (main thread)."""
                 try:
-                    _render_one(
-                        template_file,
-                        _nested_data(
-                            row,
-                            spec.mappings,
-                            "_" * spec.contact_placeholder_length,
-                            frozenset(spec.contact_placeholder_affiliations),
-                        ),
-                        odt_path,
-                    )
-                    _convert_to_pdf(
-                        odt_path, location_dir, spec.soffice_binary, profile
-                    )
+                    future.result()
+                except InfoSheetCancelledError:
+                    pass
                 except Exception as error:  # noqa: BLE001 - per-row failures
                     failed.append(stem)
                     logger.error(
@@ -629,20 +776,67 @@ def run(
                         stem,
                         error,
                     )
-                    continue
-                generated.append(row["zite_record_id"])
-                logger.info(
-                    "generated info sheet %s/%s.pdf", location_dir, stem
+                else:
+                    generated.append(zite_record_id)
+                    logger.debug("generated info sheet %s", stem)
+
+            futures: dict[Future[str], tuple[str, Any]] = {}
+            handled: set[Future[str]] = set()
+            progress = tqdm(
+                total=len(rows),
+                desc="Info sheets",
+                unit="sheet",
+                disable=None,  # silent when stderr is not a terminal
+            )
+            executor = ThreadPoolExecutor(max_workers=workers)
+            try:
+                for row in rows:
+                    future = executor.submit(_work, row)
+                    futures[future] = (
+                        _sheet_stem(cfg, str(row["angel_id"])),
+                        row["zite_record_id"],
+                    )
+                for future in as_completed(futures):
+                    stem, zite_record_id = futures[future]
+                    _consume(future, stem, zite_record_id)
+                    handled.add(future)
+                    progress.update(1)
+            except KeyboardInterrupt:
+                stop.set()
+                # Cancel the queue; running workers see the event within
+                # half a second and kill their LibreOffice subprocess.
+                executor.shutdown(wait=True, cancel_futures=True)
+                for future in set(futures) - handled:
+                    if future.cancelled() or not future.done():
+                        continue
+                    stem, zite_record_id = futures[future]
+                    try:
+                        _consume(future, stem, zite_record_id)
+                    except KeyboardInterrupt:
+                        # The very future that delivered the interrupt;
+                        # do not let it abort the flag write below.
+                        pass
+                logger.warning(
+                    "interrupted: %d of %d sheet(s) were generated;"
+                    " their flags are recorded, the rest stay pending",
+                    len(generated),
+                    len(rows),
                 )
-                if test:
-                    logger.info("test mode: stopping after first info sheet")
-                    break
+                interrupted = True
+            else:
+                executor.shutdown(wait=True)
+            finally:
+                progress.close()
     base = _record_flags(base, generated)
     if schema_added or generated:
-        write_sheets(cfg.excel_file, "generate", {"final_child": base})
+        write_sheets(
+            cfg.excel_file, "generate", {"final_child": base}, xmas=cfg.xmas
+        )
     logger.info(
         "generated %d info sheet(s); %d failed", len(generated), len(failed)
     )
+    if interrupted:
+        raise KeyboardInterrupt from None
     if failed:
         raise InfoSheetError(f"info sheet generation failed for: {failed}")
     if test:
