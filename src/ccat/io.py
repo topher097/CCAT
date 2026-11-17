@@ -53,17 +53,11 @@ _FASTEXCEL.addFilter(_DtypeFallbackFilter())
 # silenced regardless of how the record is routed.
 _FASTEXCEL.setLevel(logging.ERROR)
 
-#: Sheet names in the workbook contract (§4).
+#: Active sheet names in the persistent-final workbook contract (§4).
 SHEETS = (
     "raw_sponsor",
     "raw_family",
     "raw_child",
-    "sponsor_submissions",
-    "family_submissions",
-    "child_submissions",
-    "adj_sponsor",
-    "adj_family",
-    "adj_child",
     "final_child",
     "final_family",
     "final_sponsor",
@@ -74,113 +68,76 @@ SHEETS = (
     "address_validation_log",
 )
 
-#: Ownership matrix (§9 as amended by the audit architecture §4.4): module
-#: -> sheets it may write.  The matrix is sheet-level; column scoping
-#: (match writes assignment columns only, audit never touches them,
-#: generate writes ``generated_info_sheet`` only) is enforced by the
-#: modules through the shared store helpers and by tests.
-#:
-#: Module 1 (acquire) only fetches: it writes the verbatim ``raw_*``
-#: sheets and nothing else.  Module 2 (screen) prepares every downstream
-#: layer: the cleaned ``*_submissions`` rows, all three dense ``adj_*``
-#: sheets, the duplicate detection log, and the email/address validation
-#: logs.
+#: Module -> sheets it may replace. Column ownership is enforced by the
+#: callers and their tests: match patches assignments only, generate patches
+#: generation markers only, and audit preserves all module-owned values.
+#: ``migrate`` is never used by ordinary pipeline stages; it is reserved for
+#: the explicit audit bootstrap and consolidation conversion commands.
 WRITABLE_SHEETS: dict[str, frozenset[str]] = {
-    "acquire": frozenset(
-        {
-            "raw_sponsor",
-            "raw_family",
-            "raw_child",
-        }
-    ),
+    "acquire": frozenset({"raw_sponsor", "raw_family", "raw_child"}),
     "screen": frozenset(
         {
-            "sponsor_submissions",
-            "family_submissions",
-            "child_submissions",
-            "adj_child",
-            "adj_family",
-            "adj_sponsor",
+            "final_child",
+            "final_family",
+            "final_sponsor",
             "duplicate_log",
             "dob_conflict_log",
             "email_validation_log",
             "address_validation_log",
         }
     ),
-    "audit": frozenset(
-        {"adj_child", "adj_family", "adj_sponsor", "final_child"}
-    ),
-    "match": frozenset(
-        {
-            "adj_family",
-            "adj_sponsor",
-            "final_family",
-            "final_sponsor",
-            "match_report",
-        }
-    ),
-    "generate": frozenset({"adj_child", "final_child"}),
-    "stats": frozenset({"final_child", "final_family", "final_sponsor"}),
-    "migrate": frozenset(
-        {
-            "raw_sponsor",
-            "raw_family",
-            "raw_child",
-            "sponsor_submissions",
-            "family_submissions",
-            "child_submissions",
-            "duplicate_log",
-            "dob_conflict_log",
-            "adj_child",
-            "adj_family",
-            "adj_sponsor",
-            "final_child",
-            "final_family",
-            "final_sponsor",
-        }
-    ),
+    "audit": frozenset({"final_child", "final_family", "final_sponsor"}),
+    "match": frozenset({"final_family", "final_sponsor", "match_report"}),
+    "generate": frozenset({"final_child"}),
+    "migrate": frozenset(SHEETS),
 }
 
-#: Read access matrix (§9); listed for documentation, all modules may read.
+#: Read access matrix (§9), documenting module intent. ``read_sheet`` remains
+#: a low-level primitive so conversion can inspect legacy sheets explicitly.
 READABLE_SHEETS: dict[str, frozenset[str]] = {
-    "acquire": frozenset(),
+    "acquire": frozenset(
+        {"final_child", "final_family", "final_sponsor", "match_report"}
+    ),
     "screen": frozenset(
         {
             "raw_sponsor",
             "raw_family",
             "raw_child",
-            "adj_child",
-            "adj_family",
-            "adj_sponsor",
+            "final_child",
+            "final_family",
+            "final_sponsor",
+            "duplicate_log",
+            "dob_conflict_log",
             "email_validation_log",
             "address_validation_log",
         }
     ),
-    "audit": frozenset(
+    "audit": frozenset(SHEETS),
+    "match": frozenset(
+        {"final_child", "final_family", "final_sponsor", "match_report"}
+    ),
+    "generate": frozenset({"final_child", "final_family", "final_sponsor"}),
+    "stats": frozenset(
         {
             "raw_sponsor",
             "raw_family",
             "raw_child",
-            "sponsor_submissions",
-            "family_submissions",
-            "child_submissions",
-            "adj_child",
-            "adj_family",
-            "adj_sponsor",
             "final_child",
-            "dob_conflict_log",
-            "duplicate_log",
-            "email_validation_log",
-            "address_validation_log",
+            "final_family",
+            "final_sponsor",
         }
     ),
-    "match": frozenset(
-        {"adj_child", "adj_family", "adj_sponsor", "final_child"}
+    "sponsor_packets": frozenset(
+        {"final_child", "final_family", "final_sponsor"}
     ),
-    "generate": frozenset(
-        {"adj_child", "final_child", "final_family", "final_sponsor"}
-    ),
+    "clarify": frozenset({"raw_child", "final_child", "final_family"}),
     "migrate": frozenset(SHEETS),
+}
+
+_FINAL_KEY_COLUMNS = {
+    "final_child": "zite_record_id",
+    "final_family": "family_id",
+    "final_sponsor": "sponsor_id",
 }
 
 
@@ -202,6 +159,89 @@ class SheetOwnershipError(Exception):
 
 class SheetFormulaError(Exception):
     """Raised when the final_child age formulas cannot be written."""
+
+
+class SheetSchemaError(Exception):
+    """Raised when a persistent final sheet violates storage invariants."""
+
+
+def _key_token(value: object) -> str | None:
+    """Normalize one entity key for structural comparisons.
+
+    Args:
+        value: Workbook or DataFrame key value.
+
+    Returns:
+        A stable string token, or None for a missing key.
+    """
+    if value is None:
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    return text or None
+
+
+def _final_keys(frame: pl.DataFrame, sheet: str) -> set[str]:
+    """Validate and return the entity keys in one final-sheet frame.
+
+    Args:
+        frame: Candidate or existing final-sheet data.
+        sheet: Final sheet name.
+
+    Returns:
+        The set of normalized, non-null, unique keys.
+
+    Raises:
+        SheetSchemaError: If the key column is absent, null, or duplicated.
+    """
+    key = _FINAL_KEY_COLUMNS[sheet]
+    if key not in frame.columns:
+        raise SheetSchemaError(f"{sheet} lacks required key column {key!r}")
+    tokens = [_key_token(value) for value in frame.get_column(key).to_list()]
+    if any(token is None for token in tokens):
+        raise SheetSchemaError(f"{sheet} contains a null or blank {key} key")
+    present = [token for token in tokens if token is not None]
+    if len(present) != len(set(present)):
+        raise SheetSchemaError(f"{sheet} contains duplicate {key} keys")
+    return set(present)
+
+
+def _validate_final_writes(path: Path, sheets: dict[str, pl.DataFrame]) -> None:
+    """Fail before writing malformed finals or removing persisted entities.
+
+    Args:
+        path: Target workbook path.
+        sheets: Candidate replacement frames.
+
+    Raises:
+        SheetSchemaError: If a final schema/key is invalid or an existing
+            entity key would disappear.
+    """
+    # Imported lazily: audit.store imports this module for workbook I/O.
+    from ccat.audit.store import validate_final_frame
+
+    for name, frame in sheets.items():
+        if name not in _FINAL_KEY_COLUMNS:
+            continue
+        validate_final_frame(name, frame)
+        _final_keys(frame, name)
+        if not path.is_file():
+            continue
+        existing = read_sheet(path, name)
+        if existing is None:
+            continue
+        # Existing state is also fail-closed: same-key projected finals must
+        # not be silently replaced as though they were full stores.
+        validate_final_frame(name, existing)
+        previous = _final_keys(existing, name)
+        removed = previous - _final_keys(frame, name)
+        if removed:
+            raise SheetSchemaError(
+                f"{name} write would remove persisted entity key(s):"
+                f" {sorted(removed)}; final stores are append-and-merge,"
+                " not projections"
+            )
 
 
 def setup_logging(log_file: str | Path) -> logging.Logger:
@@ -386,9 +426,11 @@ def write_sheets(
             ``final_child`` is written (pass ``cfg.xmas``).
 
     Raises:
-        SheetOwnershipError: If the module may not write one of the sheets.
+        SheetOwnershipError: If the module may not write or rename a sheet.
         SheetFormulaError: If ``final_child`` is written without ``xmas``
             or its age formulas cannot be embedded in the saved file.
+        SheetSchemaError: If a final frame has an invalid full schema,
+            missing/duplicate entity keys, or removes existing final rows.
     """
     if module not in WRITABLE_SHEETS:
         raise SheetOwnershipError(f"unknown module {module!r}")
@@ -399,7 +441,22 @@ def write_sheets(
                 f"module {module!r} may not write sheet {name!r} (§9 ownership"
                 f" matrix); owned sheets: {sorted(owned)}"
             )
+    for old_name, new_name in (renames or {}).items():
+        if old_name not in owned:
+            raise SheetOwnershipError(
+                f"module {module!r} may not rename sheet {old_name!r}"
+            )
+        if module != "match" or not new_name.startswith(f"{old_name}_"):
+            raise SheetOwnershipError(
+                f"module {module!r} may not rename {old_name!r} to"
+                f" {new_name!r}; only match archives are permitted"
+            )
+    if FINAL_CHILD_SHEET in sheets and xmas is None:
+        raise SheetFormulaError(
+            f"{FINAL_CHILD_SHEET} may not be written without xmas"
+        )
     path = Path(path)
+    _validate_final_writes(path, sheets)
     preserved_caches: dict[str, str] = {}
     if path.is_file():
         # A rewrite that leaves final_child untouched still re-saves the
@@ -624,36 +681,50 @@ def _inject_age_formulas(archive_path: Path, formulas: dict[str, str]) -> None:
 
 
 def _final_child_formula_caches(path: Path) -> dict[str, str]:
-    """Collect the cached values of final_child formula cells.
-
-    Read from the workbook on disk before it is re-saved, so the caches
-    can be restored afterwards (openpyxl keeps formulas through a
-    load/save cycle but drops their cached results).  Shared-formula
-    cells written by LibreOffice carry self-closed ``<f/>`` elements and
-    are matched too.
+    """Collect cached values of every final_child formula cell.
 
     Args:
         path: Workbook path on disk.
 
     Returns:
-        Mapping of cell reference to cached value text; empty when the
-        file, the sheet, or its cached values are missing.
+        Mapping of cell reference to cached value text; empty when no
+        formulas exist.
+
+    Raises:
+        SheetFormulaError: If final_child is unreadable, malformed, or has a
+            formula without a usable cached value.
     """
-    if not path.is_file():
+    if not path.is_file() or FINAL_CHILD_SHEET not in list_sheets(path):
         return {}
     try:
         with zipfile.ZipFile(path) as archive:
-            member = _worksheet_xml_path(archive, FINAL_CHILD_SHEET)
-            text = archive.read(member).decode("utf-8")
-    except (SheetFormulaError, OSError, zipfile.BadZipFile, KeyError):
-        return {}
-    return dict(
-        re.findall(
-            r'<c r="([A-Z]+\d+)"[^>]*>(?:<f[^>]*>[^<]*</f>|<f[^>]*/>)'
-            r"<v>([^<]+)</v>",
-            text,
-        )
-    )
+            sheet_xml = _worksheet_xml_path(archive, FINAL_CHILD_SHEET)
+            text = archive.read(sheet_xml).decode("utf-8")
+    except (OSError, zipfile.BadZipFile, KeyError) as error:
+        raise SheetFormulaError(
+            f"could not read final_child formula caches from {path}: {error}"
+        ) from error
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError as error:
+        raise SheetFormulaError(
+            f"could not parse final_child formula XML in {path}: {error}"
+        ) from error
+    caches: dict[str, str] = {}
+    for cell in root.iter(f"{{{_NS_MAIN}}}c"):
+        formula = cell.find(f"{{{_NS_MAIN}}}f")
+        if formula is None:
+            continue
+        value = cell.find(f"{{{_NS_MAIN}}}v")
+        reference = cell.get("r")
+        cached = None if value is None else value.text
+        if reference is None or cached is None or cached == "":
+            raise SheetFormulaError(
+                f"final_child formula cell {reference or '?'} has no usable"
+                " cached age; refusing to lose pipeline-visible ages"
+            )
+        caches[reference] = cached
+    return caches
 
 
 def _restore_age_caches(archive_path: Path, cached: dict[str, str]) -> None:
@@ -676,7 +747,8 @@ def _restore_age_caches(archive_path: Path, cached: dict[str, str]) -> None:
     restored: list[str] = []
     orphans: list[str] = []
     for ref in re.findall(
-        r'<c r="([A-Z]+\d+)"[^>]*><f[^>]*>[^<]*</f>(?:<v></v>|<v/>)?</c>',
+        r'<c r="([A-Z]+\d+)"[^>]*>\s*(?:<f[^>]*>[^<]*</f>|<f[^>]*/>)\s*'
+        r"(?:<v></v>|<v/>)?\s*</c>",
         sheet_text,
     ):
         value = cached.get(ref)
@@ -684,7 +756,8 @@ def _restore_age_caches(archive_path: Path, cached: dict[str, str]) -> None:
             orphans.append(ref)
             continue
         match = re.search(
-            rf'<c r="{ref}"[^>]*><f[^>]*>[^<]*</f>(?:<v></v>|<v/>)?</c>',
+            rf'<c r="{ref}"[^>]*>\s*(?:<f[^>]*>[^<]*</f>|<f[^>]*/>)\s*'
+            rf"(?:<v></v>|<v/>)?\s*</c>",
             sheet_text,
         )
         if match is None:  # pragma: no cover - ref came from this text
@@ -697,12 +770,16 @@ def _restore_age_caches(archive_path: Path, cached: dict[str, str]) -> None:
     if restored:
         _write_patched_archive(archive_path, entries, sheet_xml, sheet_text)
     if orphans:
-        logger.warning(
-            "%d final_child formula cell(s) have no cached value to"
-            " restore (e.g. %s); spreadsheet apps recalculate them on"
-            " open, but pipeline reads see nulls until then",
-            len(orphans),
-            ", ".join(orphans[:5]),
+        raise SheetFormulaError(
+            f"{len(orphans)} final_child formula cell(s) have no cached"
+            f" value to restore (e.g. {', '.join(orphans[:5])}); refusing"
+            " to save ages invisible to pipeline readers"
+        )
+    missing = sorted(set(cached) - set(restored))
+    if missing:
+        raise SheetFormulaError(
+            f"{len(missing)} captured final_child cache(s) were not"
+            f" restored (e.g. {', '.join(missing[:5])})"
         )
 
 

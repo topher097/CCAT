@@ -43,7 +43,7 @@ ANGEL_COLUMNS = (
     "angel_id",
     "first_name",
     "raw_dob",
-    "require_clarification",
+    "clarification_notes",
     "need_1",
     "need_2",
     "desire_1",
@@ -66,7 +66,7 @@ PROMPT_ANGEL_FIELDS = (
     "angel_id",
     "first_name",
     "raw_dob",
-    "require_clarification",
+    "clarification_notes",
     "need_1",
     "need_2",
     "desire_1",
@@ -87,7 +87,7 @@ class AngelEntry(BaseModel):
         angel_id: The Angel's id code (e.g. ``5A``).
         first_name: The Angel's first name.
         raw_dob: Date of birth as typed in the ``raw_child`` form.
-        require_clarification: The audit note driving the email.
+        clarification_notes: The audit note driving the email.
         need_1: The Angel's first need.
         need_2: The Angel's second need.
         desire_1: The Angel's first wish.
@@ -100,7 +100,7 @@ class AngelEntry(BaseModel):
     angel_id: str
     first_name: str
     raw_dob: str | None = None
-    require_clarification: str
+    clarification_notes: str
     need_1: str | None = None
     need_2: str | None = None
     desire_1: str | None = None
@@ -225,9 +225,7 @@ def group_families(frame: pl.DataFrame) -> list[FamilyEntry]:
                 angel_id=str(row.get("angel_id") or ""),
                 first_name=str(row.get("first_name") or ""),
                 raw_dob=_text(row.get("raw_dob")),
-                require_clarification=str(
-                    row.get("require_clarification") or ""
-                ),
+                clarification_notes=str(row.get("clarification_notes") or ""),
                 need_1=_text(row.get("need_1")),
                 need_2=_text(row.get("need_2")),
                 desire_1=_text(row.get("desire_1")),

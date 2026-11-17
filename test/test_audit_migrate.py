@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Any
 
+from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter
 import polars as pl
 import pytest
 
@@ -12,10 +14,10 @@ from ccat.audit.store import (
     FINAL_CHILD_COLUMNS,
     STATUS_AUDITED,
     STATUS_NEEDS_CLARIFICATION,
-    read_adj,
+    read_final,
 )
 from ccat.config import Config
-from ccat.io import read_sheet, write_sheets
+from ccat.io import list_sheets, read_sheet
 from conftest import load_test_cfg
 
 
@@ -38,9 +40,34 @@ def _old_raw_child(record_id: str, angel_id: str | None) -> dict[str, Any]:
     }
 
 
+def _write_legacy_sheets(
+    path: Path,
+    _module: str,
+    sheets: dict[str, pl.DataFrame],
+    xmas: object = None,
+) -> None:
+    """Write arbitrary v1 sheets without current persistent-store guards."""
+    del xmas
+    workbook = load_workbook(path) if path.is_file() else Workbook()
+    try:
+        default = workbook.active
+        if default is not None and default.title == "Sheet":
+            workbook.remove(default)
+        for name, frame in sheets.items():
+            if name in workbook.sheetnames:
+                del workbook[name]
+            worksheet = workbook.create_sheet(name)
+            worksheet.append(list(frame.columns))
+            for row in frame.iter_rows():
+                worksheet.append(list(row))
+        workbook.save(path)
+    finally:
+        workbook.close()
+
+
 def _build_old_workbook(path: Path, cfg: Config) -> None:
     """Write an old-system workbook: raw + sparse adj + finals."""
-    write_sheets(
+    _write_legacy_sheets(
         path,
         "acquire",
         {
@@ -125,7 +152,7 @@ def _build_old_workbook(path: Path, cfg: Config) -> None:
         },
     )
     # Sparse adj_child from the old screening: null = "same as raw".
-    write_sheets(
+    _write_legacy_sheets(
         path,
         "screen",
         {
@@ -148,7 +175,7 @@ def _build_old_workbook(path: Path, cfg: Config) -> None:
         },
     )
     # Old final_child: raw ⊕ adj ⊕ human audit edits, Boolean controls.
-    write_sheets(
+    _write_legacy_sheets(
         path,
         "audit",
         {
@@ -213,7 +240,7 @@ def _build_old_workbook(path: Path, cfg: Config) -> None:
         },
         xmas=cfg.xmas,
     )
-    write_sheets(
+    _write_legacy_sheets(
         path,
         "match",
         {
@@ -285,19 +312,19 @@ def old_workbook(cfg: Config, tmp_path: Path) -> Path:
     return path
 
 
-def test_migrate_builds_dense_adj_and_projects(
+def test_migrate_builds_direct_full_persistent_finals(
     cfg: Config, old_workbook: Path
 ) -> None:
-    """Dense adj correctness, control backfill, projections (§11.3–§11.5)."""
+    """Migrate data and controls directly without legacy output layers."""
     run(cfg, from_path=str(old_workbook))
-    children = {row["zite_record_id"]: row for row in read_adj(cfg, "child")}
+    children = {row["zite_record_id"]: row for row in read_final(cfg, "child")}
     # c1: old final data columns are the dense truth (raw ⊕ adj ⊕ edits)
     c1 = children["c1"]
     assert c1["need_1"] == "winter coat that fits"
     assert c1["potential_anomoly"] == "age_reported 7 differs from 8"
     assert c1["special_needs"] == "other: unspecified"  # D4 mapping
-    assert c1["audited"] is True
     assert c1["status"] == STATUS_AUDITED
+    assert "audited" not in c1
     assert c1["screened"] is True  # had an old adj row
     assert c1["generated_info_sheet"] is False
     assert c1["age_at_xmas"] == 8
@@ -306,23 +333,22 @@ def test_migrate_builds_dense_adj_and_projects(
     c2 = children["c2"]
     assert c2["first_name"] == "Kiddo Two"
     assert c2["special_needs"] is None
-    assert c2["require_clarification"] == "call about shoe size"
+    assert c2["clarification_notes"] == "call about shoe size"
     assert c2["generated_info_sheet"] is True
     assert c2["screened"] is False
     assert c2["status"] == STATUS_NEEDS_CLARIFICATION
     assert c2["age_at_xmas"] == 8
 
     # Families/sponsors: seeded from raw, assignments carried over.
-    family = read_adj(cfg, "family")[0]
+    family = read_final(cfg, "family")[0]
     assert family["primary_email"] == "fam@example.com"
     assert family["status"] == "new"
-    sponsor = read_adj(cfg, "sponsor")[0]
+    sponsor = read_final(cfg, "sponsor")[0]
     assert sponsor["pref_age_min"] == 0
     assert sponsor["assigned_angel_ids"] == "1A,1B"
     assert sponsor["num_angels_assigned"] == 2
     assert family["num_angels_in_family"] == 2
 
-    # Finals projected; submission sheets empty until the next acquire.
     final_child = read_sheet(cfg.excel_file, "final_child")
     assert final_child is not None
     assert final_child.height == 2
@@ -331,10 +357,37 @@ def test_migrate_builds_dense_adj_and_projects(
         STATUS_AUDITED,
         STATUS_NEEDS_CLARIFICATION,
     ]
-    submissions = read_sheet(cfg.excel_file, "family_submissions")
-    # The old raw rows (already cleaned + ID-assigned) feed the prepared
-    # submissions layer directly (§11.2).
-    assert submissions is not None and submissions.height == 1
+    names = set(list_sheets(cfg.excel_file))
+    assert names == {
+        "raw_sponsor",
+        "raw_family",
+        "raw_child",
+        "dob_conflict_log",
+        "final_child",
+        "final_family",
+        "final_sponsor",
+    }
+    assert not any(
+        name.startswith("adj_") or name.endswith("_submissions")
+        for name in names
+    )
+
+    formula_book = load_workbook(
+        cfg.excel_file, read_only=True, data_only=False
+    )
+    value_book = load_workbook(cfg.excel_file, read_only=True, data_only=True)
+    try:
+        worksheet = formula_book["final_child"]
+        headers = [cell.value for cell in next(worksheet.iter_rows())]
+        age_column = headers.index("age_at_xmas") + 1
+        dob_column = headers.index("dob") + 1
+        assert worksheet.cell(2, age_column).value == (
+            f'=DATEDIF({get_column_letter(dob_column)}2, DATE(2026,12,25), "y")'
+        )
+        assert value_book["final_child"].cell(2, age_column).value == 8
+    finally:
+        formula_book.close()
+        value_book.close()
 
     # The raw layer was copied verbatim.
     old_raw = read_sheet(old_workbook, "raw_child")
@@ -375,7 +428,7 @@ def test_migrate_requires_source_and_raw(cfg: Config, tmp_path: Path) -> None:
     with pytest.raises(AuditError, match="source workbook not found"):
         run(cfg, from_path=str(tmp_path / "missing.xlsx"))
     empty = tmp_path / "empty.xlsx"
-    write_sheets(
+    _write_legacy_sheets(
         empty, "match", {"match_report": pl.DataFrame(schema={"k": pl.String})}
     )
     with pytest.raises(AuditError, match="raw_sponsor"):
@@ -387,7 +440,7 @@ def test_migrate_sparse_adj_only_child_gets_in_progress(
 ) -> None:
     """Status is computed from the migrated record vs the raw baseline (§11.3)."""
     run(cfg, from_path=str(old_workbook))
-    children = {row["zite_record_id"]: row for row in read_adj(cfg, "child")}
+    children = {row["zite_record_id"]: row for row in read_final(cfg, "child")}
     # c1: audited checkbox wins
     assert children["c1"]["status"] == STATUS_AUDITED
     # c2: unaudited with a note
@@ -398,33 +451,28 @@ def test_migrate_marks_sponsored_children_audited(
     cfg: Config, old_workbook: Path
 ) -> None:
     """Cutover rule: every child with an assigned sponsor is audited."""
-    from ccat.audit.store import STATUS_IN_PROGRESS
-    from ccat.io import write_sheets
-
     # The module cfg fixture redirects the clarify store: the real
     # status store is never read or written by tests.
     run(cfg, from_path=str(old_workbook))
-    children = {row["zite_record_id"]: row for row in read_adj(cfg, "child")}
+    children = {row["zite_record_id"]: row for row in read_final(cfg, "child")}
     # c2 is sponsored (family 1 assigned) and carries a note, but its
     # family never replied: the outstanding note beats the audited mark.
     assert children["c2"]["status"] == STATUS_NEEDS_CLARIFICATION
-    assert children["c2"]["audited"] is False
+    assert children["c2"]["status"] != STATUS_AUDITED
 
     # A child whose family replied: the sponsored mark holds.
     from ccat.clarify.status import FamilyStatus, store_statuses
 
     store_statuses(cfg, {1: FamilyStatus(contacted=True, replied=True)})
     run(cfg, from_path=str(old_workbook), force=True)
-    children = {row["zite_record_id"]: row for row in read_adj(cfg, "child")}
-    assert children["c2"]["audited"] is True
+    children = {row["zite_record_id"]: row for row in read_final(cfg, "child")}
+    assert children["c2"]["status"] == STATUS_AUDITED
     assert children["c2"]["status"] == STATUS_AUDITED
     # never-stamped audited rows get the migration timestamp
     assert children["c2"]["audited_at"] is not None
 
     # an unsponsored child with screening corrections: in_progress
-    import polars as pl
-
-    write_sheets(
+    _write_legacy_sheets(
         old_workbook,
         "acquire",
         {
@@ -453,7 +501,7 @@ def test_migrate_marks_sponsored_children_audited(
             )
         },
     )
-    write_sheets(
+    _write_legacy_sheets(
         old_workbook,
         "screen",
         {
@@ -474,7 +522,190 @@ def test_migrate_marks_sponsored_children_audited(
         },
     )
     run(cfg, from_path=str(old_workbook), force=True)
-    children = {row["zite_record_id"]: row for row in read_adj(cfg, "child")}
-    # c3: orphan (no family -> no sponsor), screened corrections only
-    assert children["c3"]["audited"] is False
-    assert children["c3"]["status"] == STATUS_IN_PROGRESS
+    children = {row["zite_record_id"]: row for row in read_final(cfg, "child")}
+    # c3: orphan with screening corrections; orphan clarification wins.
+    assert children["c3"]["status"] != STATUS_AUDITED
+    assert children["c3"]["status"] == STATUS_NEEDS_CLARIFICATION
+    assert "No matching family registration" in (
+        children["c3"]["clarification_notes"] or ""
+    )
+
+
+def test_migrate_groups_multi_submission_family(
+    cfg: Config, old_workbook: Path
+) -> None:
+    """Duplicate raw family submissions become one stable family entity."""
+    _write_legacy_sheets(
+        old_workbook,
+        "acquire",
+        {
+            "raw_family": pl.DataFrame(
+                [
+                    {
+                        "family_id": 1,
+                        "zite_record_id": "rec_f1",
+                        "primary_email": "fam@example.com",
+                        "first_name": "Jane",
+                        "last_name": "Doe",
+                        "gift_pickup_location": "TSA (Hancock)",
+                        "created": "2026-01-05T10:00:00Z",
+                    },
+                    {
+                        "family_id": 1,
+                        "zite_record_id": "rec_f2",
+                        "primary_email": "fam@example.com",
+                        "first_name": "Jane",
+                        "last_name": "Doe",
+                        "gift_pickup_location": "TSA (Hancock)",
+                        "created": "2026-01-04T10:00:00Z",
+                    },
+                ]
+            )
+        },
+    )
+    run(cfg, from_path=str(old_workbook), force=True)
+    families = read_final(cfg, "family")
+    assert len(families) == 1
+    assert families[0]["family_id"] == 1
+    assert families[0]["zite_record_id"] == "rec_f2"
+
+
+def test_migrate_preserves_edits_raw_missing_and_logs(
+    cfg: Config, old_workbook: Path
+) -> None:
+    """Legacy edits, raw-missing entities, logs, and report all survive."""
+    _write_legacy_sheets(
+        old_workbook,
+        "audit",
+        {
+            "final_family": pl.DataFrame(
+                [
+                    {
+                        "family_id": 1,
+                        "zite_record_id": "rec_f1",
+                        "primary_email": "corrected@example.com",
+                        "phone": "(906) 555-0000",
+                        "assigned_sponsor_id": 1,
+                        "assigned_angel_ids": "1A,1B",
+                    },
+                    {
+                        "family_id": 9,
+                        "zite_record_id": "family-missing",
+                        "primary_email": "missing@example.com",
+                        "first_name": "Historical",
+                        "assigned_sponsor_id": 1,
+                        "num_angels_in_family": 3,
+                        "audited": True,
+                    },
+                ]
+            ),
+            "final_sponsor": pl.DataFrame(
+                [
+                    {
+                        "sponsor_id": 1,
+                        "zite_record_id": "rec_s1",
+                        "email": "corrected-sponsor@example.com",
+                        "age_preference": "Middle School (11-13 yrs)",
+                        "pref_age_min": 11,
+                        "pref_age_max": 13,
+                        "assigned_angel_ids": "1A,1B",
+                        "num_angels_assigned": 2,
+                    },
+                    {
+                        "sponsor_id": 9,
+                        "zite_record_id": "sponsor-missing",
+                        "email": "missing-sponsor@example.com",
+                        "assigned_angel_ids": "9Z",
+                        "num_angels_assigned": 1,
+                        "audited": True,
+                    },
+                ]
+            ),
+            "final_child": pl.DataFrame(
+                [
+                    {
+                        "zite_record_id": "c-raw-missing",
+                        "family_id": 9,
+                        "angel_id": "9Z",
+                        "first_name": "Historical",
+                        "dob": "2012-01-01",
+                        "age_at_xmas": 14,
+                        "generated_info_sheet": True,
+                        "audited": True,
+                        "audited_at": "2026-11-03T00:00:00+00:00",
+                    }
+                ]
+            ),
+        },
+    )
+    _write_legacy_sheets(
+        old_workbook,
+        "match",
+        {
+            "duplicate_log": pl.DataFrame([{"zite_record_id": "rec_f2"}]),
+            "email_validation_log": pl.DataFrame(
+                [{"email": "corrected@example.com", "status": "valid"}]
+            ),
+            "address_validation_log": pl.DataFrame(
+                [{"query": "1 Main St", "status": "found"}]
+            ),
+            "match_report": pl.DataFrame([{"family_id": 1, "reason": "none"}]),
+        },
+    )
+    run(cfg, from_path=str(old_workbook), force=True)
+    families = {row["family_id"]: row for row in read_final(cfg, "family")}
+    sponsors = {row["sponsor_id"]: row for row in read_final(cfg, "sponsor")}
+    children = {row["zite_record_id"]: row for row in read_final(cfg, "child")}
+    assert families[1]["phone"] == "(906) 555-0000"
+    assert families[1]["primary_email"] == "corrected@example.com"
+    assert families[9]["assigned_sponsor_id"] == 1
+    assert sponsors[1]["pref_age_min"] == 11
+    assert sponsors[9]["assigned_angel_ids"] == "9Z"
+    assert children["c-raw-missing"]["generated_info_sheet"] is True
+    assert children["c-raw-missing"]["status"] == "audited"
+    for sheet in (
+        "duplicate_log",
+        "email_validation_log",
+        "address_validation_log",
+        "match_report",
+    ):
+        frame = read_sheet(cfg.excel_file, sheet)
+        assert frame is not None and frame.height == 1
+
+
+def test_migrate_rejects_generated_angel_conflict(
+    cfg: Config, old_workbook: Path
+) -> None:
+    """Raw/final angel mismatch with generated state is explicit, not silent."""
+    _write_legacy_sheets(
+        old_workbook,
+        "acquire",
+        {
+            "raw_child": pl.DataFrame(
+                [
+                    _old_raw_child("c1", "1A"),
+                    {**_old_raw_child("c2", "9Z")},
+                ]
+            )
+        },
+    )
+    with pytest.raises(AuditError, match="conflicting raw angel_id"):
+        run(cfg, from_path=str(old_workbook), force=True)
+
+
+def test_migrate_rejects_mixed_legacy_target(cfg: Config) -> None:
+    """A target containing adj/submissions never receives new finals."""
+    target = Path(cfg.excel_file)
+    _write_legacy_sheets(
+        target,
+        "migrate",
+        {
+            "adj_child": pl.DataFrame({"zite_record_id": ["stale"]}),
+            "family_submissions": pl.DataFrame({"family_id": [1]}),
+        },
+    )
+    with pytest.raises(AuditError, match="retired legacy layer"):
+        run(
+            cfg,
+            from_path=str(target.parent / "missing-source.xlsx"),
+        )

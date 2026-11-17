@@ -1,7 +1,7 @@
 """Module 3 — the NiceGUI audit server (§9.1, §9.3).
 
 ``run()`` loads the configuration, seeds the adj sheets
-(:func:`ccat.audit.store.ensure_adj_sheets`), installs the app state,
+(:func:`ccat.audit.store.ensure_final_sheets`), installs the app state,
 and serves the pages from :mod:`ccat.audit.pages` until interrupted.
 The process-discovery helpers keep ``--restart`` working: a stale
 audit tool still holding the port is stopped before the new one binds.
@@ -18,7 +18,7 @@ from typing import Any
 from nicegui import ui
 
 from ccat.audit import AuditError, pages
-from ccat.audit.store import ensure_adj_sheets
+from ccat.audit.store import ensure_final_sheets
 from ccat.config import Config
 
 logger = logging.getLogger(__name__)
@@ -167,7 +167,7 @@ def run(
             stop_audit_processes(stale)
         else:
             logger.info("restart: no running audit tool process found")
-    ensure_adj_sheets(cfg)
+    ensure_final_sheets(cfg)
     pages.set_state(pages.AuditState(cfg, test_mode=test))
     logger.info(
         "audit tool listening on http://%s:%d (Ctrl-C to stop%s)",

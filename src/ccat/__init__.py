@@ -1,100 +1,50 @@
-"""CCAT gift-giving matching system.
+"""CCAT gift-giving pipeline and workbook-migration CLI.
 
-Main dispatch for the ``ccat`` CLI (pipeline_architecture.md §2): five
-modules runnable independently, each taking an optional ``--config`` path
-(default ``config/ccat_2026.json``).
+The persistent workbook has one editable truth per entity: ``final_sponsor``,
+``final_family``, and ``final_child``. ``raw_*`` sheets are replaceable Zite
+source snapshots; operational logs are separate process history. No active
+submissions, adjudication, or final-projection layers exist.
 
-    ccat acquire  [--config PATH]
-    ccat screen   [--config PATH] [--redo ZITE_RECORD_ID] [--test]
-                  [--overwrite] [--skip-email-check] [--skip-address-check]
-    ccat audit    [--config PATH] [--test] [--restart]
-    ccat match    [--config PATH] [--test] [--overwrite] [--skip-match]
-    ccat generate [--config PATH] [--test] [--overwrite] [--sponsor ID]
-                  [--max-workers N]
-    ccat stats    [--config PATH] [--raw]
-    ccat clarify  [--config PATH] [--generate] [--overwrite]
-    ccat clarify-export [--config PATH] [--output PATH]
-    ccat audit-migrate [--config PATH] --from PATH [--force]
+Commands (all accept ``--config`` where applicable)::
 
-``ccat acquire`` only fetches: it pulls the sponsor/family/child tables
-from Zite and writes them verbatim to the ``raw_*`` sheets -- no
-cleaning, no validation, no deduplication.  ``ccat screen`` prepares
-everything downstream needs from those verbatim records: it cleans the
-trivial formatting locally (capitalization, phone/email/date formats --
-never the AI), flags format/enum problems instead of dropping rows,
-assigns the stable IDs, writes the cleaned ``*_submissions`` rows,
-**flags potential duplicates** (families by primary email, children by
-email + first name, sponsors by email -- never merged; the user resolves
-them in the audit tool), logs sibling DOB conflicts, validates every new
-sponsor/family email with ZeroBounce and every family address with
-Nominatim (both full API responses logged), and then AI-screens the
-children only (the prompt carries no personal data).
+    ccat acquire
+    ccat screen [--redo ID] [--test] [--overwrite]
+                [--skip-email-check] [--skip-address-check]
+    ccat audit [--test] [--restart]
+    ccat match [--test] [--overwrite] [--skip-match]
+    ccat generate [--test] [--overwrite] [--sponsor ID] [--max-workers N]
+    ccat stats [--raw]
+    ccat clarify [--generate] [--overwrite]
+    ccat clarify-export [--output PATH]
+    ccat audit-migrate --from PATH [--force]
+    ccat consolidate-migrate --from PATH --output PATH
+                             [--force --backup PATH] [--report PATH]
 
-The ``--test`` flag (screen/audit/match/generate) stops the run after the
-first full family (screening: only the first family's children are
-screened; audit: the lists are limited to the first family, its
-children, and the first sponsor; match: only the first sponsor in phase
-order is matched; generate: only the first info sheet PDF is generated).
+``acquire`` replaces only raw sheets. ``screen`` cleans all raw records in
+memory, appends new persistent entities, refreshes global diagnostics and
+validation logs, and AI-screens only uncompleted children. ``--redo`` and
+``--overwrite`` are deliberate re-evaluation controls, not blanket data
+replacement: human edits and module-owned values retain their protections.
 
-The audit tool (module 3) is a multi-page NiceGUI app: a dashboard with
-sponsor/family stats, sponsor and family lists with status filters, and
-detail pages where every adjudicable field is edited against the raw
-submissions side by side.  ``audited`` is a revocable checkbox and the
-status (new / in_progress / needs_clarification / ignored / audited) is
-recomputed on every save; ignored rows are reduced to their identity
-skeleton and disappear from the final sheets.  ``--restart`` stops a
-stale audit tool process before starting.
+``audit`` is the sole interactive entity editor. Full final rows retain
+ignored, orphaned, duplicate, and raw-missing entities; output eligibility is
+a separate in-memory filter. Match owns assignment fields, while generate
+owns ``generated_info_sheet`` after actual PDF completion. Timestamped match
+archives preserve previous assignments. Sponsor packets are built by the
+generate command after required angel PDFs exist.
 
-``ccat audit-migrate`` bootstraps the v2 workbook
-(``output/ccat_2026_v2.xlsx`` via ``config/ccat_2026_v2.json``) from the
-old one given by ``--from``: the raw layer is copied verbatim (the old
-workbook is never written), the dense adj sheets are built from the old
-sparse adj_child plus the old final rows, and all three finals are
-projected so downstream modules work immediately.  It refuses to run
-when the target already contains adj/final sheets unless ``--force``
-is given.
+``stats --raw`` retains its CLI spelling for compatibility but means ephemeral
+locally cleaned/ID-assigned preparation, not persisted submissions and not a
+second review of raw source text. Clarification HTML/JSON drafts, contact
+state, and CSV exports remain external to workbook consolidation.
 
-``ccat match --skip-match`` skips the automatic assignment algorithm
-and only reconciles ``final_family`` with the current ``raw_family``
-(previously assigned sponsors carry over; new families get rows with
-no sponsor) so downstream modules see every current family.
-
-``ccat generate`` renders the child information sheet PDFs, then —
-once every sponsored angel's sheet exists — builds one sponsor packet
-directory per assigned sponsor under ``sponsor_packets.output_dir``
-(default ``output/sponsor_packets``): an HTML email draft
-(personalized greeting plus a table of angel IDs, genders, ages, and
-drop-off locations) and the combined child information PDF, plus a
-copy of the sponsor instruction file.  Open the HTML in a browser and
-copy it into your email client for manual sending.
-
-``ccat stats`` renders a dated statistics report (daily admissions per
-pickup site, per-location table, gender/age distributions) as HTML and
-PDF into ``report.output_dir`` (default ``output/reports``).  With
-``--raw`` it reads ``raw_child``/``raw_family`` instead of the final
-sheets, so the report works before audit/match has run; sponsor counts
-are zero in that mode (``raw_family`` has no ``assigned_sponsor_id``).
-
-``ccat clarify`` serves a local NiceGUI web app with one card per
-family whose Angels carry a ``require_clarification`` note
-(module 7).  A per-family button generates a polite clarification
-email to the family's primary email — prose written by the configured
-LLM via the opencode SDK, wrapped in a paste-safe HTML template —
-shown in an editable copy dialog and saved under ``clarify.output_dir``
-(``family_<id>.html`` plus its editable ``family_<id>.json``
-companion).  Each card also tracks contact status ("Mark contacted"
-stamps the time, a "Reply received" switch records the answer),
-persisted in a JSON sidecar and merged into the CSV's ``contacted``,
-``contacted_at``, and ``replied`` columns.  The CSV copy
-(``clarify.clarifications_csv``) is refreshed on start and after
-every save/status change; its ``clarification_email_file`` column
-references each family's saved draft.  ``ccat clarify --generate``
-skips the server entirely and headlessly generates every missing
-family's draft; adding ``--overwrite`` regenerates existing drafts
-too.  ``--overwrite`` without ``--generate`` does nothing (the
-server starts normally).  ``ccat clarify-export`` only refreshes the
-CSV (no server, no generation), the successor of the old
-``scripts/find_clarification.py``.
+``audit-migrate`` bootstraps the old v1 format directly into persistent finals.
+``consolidate-migrate`` instead converts full v2 adj stores into a separate
+new workbook without changing its input. It validates schemas, row identities,
+all fields/controls, logs, reports, and age formulas/caches, then writes a JSON
+migration report. Existing output is refused unless ``--force`` is paired with
+an explicit readable ``--backup``. Production config cutover is always manual;
+rollback restores the original config and immutable input workbook.
 """
 
 import importlib
@@ -105,7 +55,7 @@ from pathlib import Path
 import fire
 
 from ccat.config import ConfigError, load_config
-from ccat.io import SheetOwnershipError, setup_logging
+from ccat.io import SheetOwnershipError, SheetSchemaError, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +73,9 @@ def _typed_errors() -> tuple[type[BaseException], ...]:
     from ccat.audit import AuditError
     from ccat.child_info_generate import InfoSheetError
     from ccat.clarify import ClarifyError
+    from ccat.consolidate import ConsolidationError
     from ccat.match import MatchError
+    from ccat.preparation import PreparationError
     from ccat.screening import ScreeningError
     from ccat.sponsor_packets import SponsorPacketError
     from ccat.stats import StatsError
@@ -135,6 +87,9 @@ def _typed_errors() -> tuple[type[BaseException], ...]:
         AuditError,
         ClarifyError,
         MatchError,
+        ConsolidationError,
+        PreparationError,
+        SheetSchemaError,
         InfoSheetError,
         SponsorPacketError,
         StatsError,
@@ -190,11 +145,11 @@ def _screen_cmd(
 
     Args:
         config: Path to the JSON configuration file.
-        redo: Optional zite_record_id to re-screen, replacing its adj row.
+        redo: Optional current final-child zite_record_id to re-screen.
         test: Stop after the first full family (first family's children
             only are AI-screened).
-        overwrite: Re-screen every child, replacing all existing
-            adj_child rows.
+        overwrite: Re-screen every current child under the same human-edit
+            and module-owned-field protection as redo.
         skip_email_check: Skip the ZeroBounce email deliverability
             validation.
         skip_address_check: Skip the Nominatim family-address validation.
@@ -243,7 +198,7 @@ def _audit_migrate_cmd(config: str = DEFAULT_CONFIG, **kwargs: object) -> None:
             ``config/ccat_2026_v2.json``).
         kwargs: ``from`` (passed as ``--from``; the old workbook,
             opened read-only) and the optional ``force`` flag that
-            re-creates adj/final sheets in a non-empty target.
+            re-creates persistent final sheets in a non-empty target.
 
     Raises:
         SystemExit: On unknown flags.
@@ -267,6 +222,42 @@ def _audit_migrate_cmd(config: str = DEFAULT_CONFIG, **kwargs: object) -> None:
     )
 
 
+def _consolidate_migrate_cmd(
+    config: str = DEFAULT_CONFIG, **kwargs: object
+) -> None:
+    """Convert full legacy adj stores to a separate persistent-final workbook.
+
+    Args:
+        config: Season configuration, including Christmas formula context.
+        kwargs: Required ``from`` and ``output`` paths; optional ``force``,
+            required-existing ``backup`` when forcing, and ``report`` path.
+
+    Raises:
+        SystemExit: If required paths are absent or flags are unknown.
+    """
+    from_path = kwargs.pop("from", kwargs.pop("from_path", None))
+    output_path = kwargs.pop("output", kwargs.pop("output_path", None))
+    force = bool(kwargs.pop("force", False))
+    backup_path = kwargs.pop("backup", kwargs.pop("backup_path", None))
+    report_path = kwargs.pop("report", kwargs.pop("report_path", None))
+    if kwargs:
+        raise SystemExit(f"unknown flags: {sorted(kwargs)}")
+    if not from_path or not output_path:
+        raise SystemExit(
+            "consolidate-migrate requires --from PATH and --output PATH"
+        )
+    _dispatch(
+        "consolidate-migrate",
+        "consolidate:run",
+        config,
+        from_path=str(from_path),
+        output_path=str(output_path),
+        force=force,
+        backup_path=str(backup_path) if backup_path else None,
+        report_path=str(report_path) if report_path else None,
+    )
+
+
 def _match_cmd(
     config: str = DEFAULT_CONFIG,
     test: bool = False,
@@ -278,16 +269,15 @@ def _match_cmd(
     Args:
         config: Path to the JSON configuration file.
         test: Stop after the first full sponsor is matched.
-        overwrite: Ignore the audited column and replace previous
-            final_family/final_sponsor/match_report in place instead of
-            archiving them.
-        skip_match: Reconcile final_family and final_sponsor with the
-            current raw rows without running the matching algorithm: every
-            family and sponsor gets a row, existing assignments carry
-            over, new ones get none.  prior_assigned_angel_ids propagates
-            to assigned_angel_ids and points the angel's family at that
-            sponsor in final_family; duplicate angel ids across sponsors
-            raise an error.  match_report is untouched.
+        overwrite: Replace previous final_family/final_sponsor/match_report
+            in place instead of archiving them. The audited-child
+            participation gate still applies.
+        skip_match: Reconcile assignment-owned columns in the persistent
+            family/sponsor stores without running matching. Existing
+            assignments carry over; prior_assigned_angel_ids propagates to
+            assigned_angel_ids and points the angel's family at that sponsor.
+            Duplicate angel ids across sponsors raise before writes.
+            match_report is untouched.
             Without skip_match the §8.5 reconciliation stays
             authoritative; prior angels only fill in families the
             matching left unassigned.
@@ -340,8 +330,9 @@ def _stats_cmd(config: str = DEFAULT_CONFIG, raw: bool = False) -> None:
 
     Args:
         config: Path to the JSON configuration file.
-        raw: Build the report from the raw sheets instead of the final
-            sheets.
+        raw: Build from ephemeral locally cleaned/ID-assigned preparation
+            instead of the eligible persistent-final population. No prepared
+            submission sheets are persisted.
     """
     _dispatch("stats", "stats:run", config, raw=raw)
 
@@ -396,6 +387,7 @@ def main() -> None:
             "screen": _screen_cmd,
             "audit": _audit_cmd,
             "audit-migrate": _audit_migrate_cmd,
+            "consolidate-migrate": _consolidate_migrate_cmd,
             "match": _match_cmd,
             "generate": _generate_cmd,
             "stats": _stats_cmd,

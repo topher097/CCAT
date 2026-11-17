@@ -655,6 +655,7 @@ def load_children_2026(path: Path) -> list[Child2026]:
         "family_id",
         "angel_id",
         "primary_email",
+        "ignore",
     )
     family_columns = (
         "family_id",
@@ -662,6 +663,7 @@ def load_children_2026(path: Path) -> list[Child2026]:
         "last_name",
         "phone",
         "gift_pickup_location",
+        "ignore",
     )
     try:
         child_frame = pl.read_excel(path, sheet_name=SHEET_2026_CHILD)
@@ -685,8 +687,12 @@ def load_children_2026(path: Path) -> list[Child2026]:
     if child_frame.is_empty():
         raise ValueError(f"{SHEET_2026_CHILD} sheet in {path} is empty")
 
-    joined = child_frame.select(list(child_columns)).join(
-        family_frame.select(list(family_columns)),
+    eligible_children = child_frame.filter(
+        ~pl.col("ignore").fill_null(False) & pl.col("family_id").is_not_null()
+    )
+    eligible_families = family_frame.filter(~pl.col("ignore").fill_null(False))
+    joined = eligible_children.select(list(child_columns)).join(
+        eligible_families.select(list(family_columns)),
         on="family_id",
         how="left",
         suffix="_family",

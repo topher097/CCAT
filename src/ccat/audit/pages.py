@@ -28,7 +28,9 @@ from ccat.audit.store import (
     SPONSOR_EDITABLE_COLUMNS,
     STATUS_AUDITED,
     STATUS_COLORS,
+    STATUS_NEW,
     AuditData,
+    _as_text,
     as_bool,
     load_audit_data,
     merge_anomoly,
@@ -362,10 +364,10 @@ def audit_table(
 def notes_editor(
     controls: dict[str, Any], on_change: Callable[[], None]
 ) -> None:
-    """Render the require_clarification textarea (§8.8)."""
+    """Render the clarification_notes textarea (§8.8)."""
     box = (
         ui.textarea(
-            "Clarification note (require_clarification)",
+            "Clarification note (clarification_notes)",
             value=_norm(controls.get("note")) or "",
         )
         .props("autogrow")
@@ -491,7 +493,7 @@ class _Detail:
     def __init__(
         self, entity: str, entry: Any, conflict_note: str | None
     ) -> None:
-        """Seed the editor state from the entry's adj row.
+        """Seed the editor state from the entry's full final row.
 
         Args:
             entity: "child", "family", or "sponsor".
@@ -507,13 +509,14 @@ class _Detail:
                 self.values.get("potential_anomoly"), conflict_note
             )
         self.controls: dict[str, Any] = {
-            "audited": as_bool(entry.adj.get("audited")),
+            "audited": _as_text(entry.adj.get("status")) == STATUS_AUDITED,
+            "status": _as_text(entry.adj.get("status")) or STATUS_NEW,
             "ignore": as_bool(entry.adj.get("ignore")),
-            "note": entry.adj.get("require_clarification"),
+            "note": entry.adj.get("clarification_notes"),
         }
         if (
             entity == "child"
-            and entry.angel_id is None
+            and entry.family_id is None
             and not _norm(self.controls.get("note"))
         ):
             # Auto-filled orphan note (§8.7).
@@ -523,8 +526,8 @@ class _Detail:
         """Compute the live status of the current editor state (§5.3)."""
         pseudo = {
             **self.values,
-            "require_clarification": self.controls.get("note"),
-            "audited": self.controls["audited"],
+            "clarification_notes": self.controls.get("note"),
+            "status": self.controls["status"],
             "ignore": self.controls["ignore"],
         }
         return status_of(pseudo, self.entry.baseline, self.entity)
@@ -535,9 +538,9 @@ class _Detail:
             field: _norm(self.values.get(field))
             for field in _EDITABLE_COLUMNS[self.entity]
         }
-        payload["audited"] = self.controls["audited"]
+        payload["status"] = self.controls["status"]
         payload["ignore"] = self.controls["ignore"]
-        payload["require_clarification"] = _norm(self.controls.get("note"))
+        payload["clarification_notes"] = _norm(self.controls.get("note"))
         return payload
 
 
@@ -618,11 +621,15 @@ def render_detail(
             )
 
             def set_audited(event: Any) -> None:
-                detail.controls["audited"] = bool(event.value)
+                checked = bool(event.value)
+                detail.controls["audited"] = checked
+                detail.controls["status"] = (
+                    STATUS_AUDITED if checked else STATUS_NEW
+                )
                 on_change()
 
             audited_box.on_value_change(set_audited)
-            if entity == "child" and entry.angel_id is None:
+            if entity == "child" and entry.family_id is None:
                 audited_box.disable()
                 audited_box.tooltip(
                     "Orphaned child: cannot be marked audited before a"
@@ -1137,7 +1144,7 @@ async def child_detail(family_id: int, zite_record_id: str) -> None:
     if entry is None:
         ui.label(f"No child {zite_record_id}.").classes("text-lg")
         return
-    if entry.angel_id is None:
+    if entry.family_id is None:
         with ui.card().classes("w-full"):
             with ui.row().classes("items-center gap-2"):
                 ui.icon("warning", color="warning")

@@ -3,10 +3,10 @@
 from pathlib import Path
 from typing import Any
 
-import polars as pl
 import pytest
 from pypdf import PdfReader, PdfWriter
 
+from ccat.audit.store import build_final_frame
 from ccat.config import Config
 from ccat.io import write_sheets
 from ccat.sponsor_packets import (
@@ -18,40 +18,22 @@ from ccat.sponsor_packets import (
 )
 from pypdf.generic import Destination
 
-SPONSOR_SCHEMA: dict[str, Any] = {
-    "sponsor_id": pl.Int64,
-    "first_name": pl.String,
-    "email": pl.String,
-    "assigned_angel_ids": pl.String,
-}
-
-CHILD_SCHEMA: dict[str, Any] = {
-    "zite_record_id": pl.String,
-    "angel_id": pl.String,
-    "family_id": pl.Int64,
-    "gender": pl.String,
-    "age_at_xmas": pl.Int64,
-}
-
-FAMILY_SCHEMA: dict[str, Any] = {
-    "family_id": pl.Int64,
-    "gift_pickup_location": pl.String,
-    "assigned_sponsor_id": pl.Int64,
-}
-
 
 def sponsor_row(
     sponsor_id: int,
     first_name: str,
     email: str,
     assigned: str | None,
+    *,
+    ignore: bool = False,
 ) -> dict[str, Any]:
-    """One final_sponsor row for sponsor-packet tests."""
+    """One full-store sponsor row for sponsor-packet tests."""
     return {
         "sponsor_id": sponsor_id,
         "first_name": first_name,
         "email": email,
         "assigned_angel_ids": assigned,
+        "ignore": ignore,
     }
 
 
@@ -59,15 +41,18 @@ def child_row(
     angel_id: str,
     gender: str | None,
     age: int,
-    family_id: int = 1,
+    family_id: int | None = 1,
+    *,
+    ignore: bool = False,
 ) -> dict[str, Any]:
-    """One final_child row for sponsor-packet tests."""
+    """One full-store child row for sponsor-packet tests."""
     return {
         "zite_record_id": f"rec_{angel_id.lower()}",
         "angel_id": angel_id,
         "family_id": family_id,
         "gender": gender,
         "age_at_xmas": age,
+        "ignore": ignore,
     }
 
 
@@ -94,12 +79,12 @@ def _seed(
     children: list[dict[str, Any]],
     families: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Write final_sponsor, final_child, and final_family sheets."""
+    """Write complete persistent-final stores."""
     if families is None:
         # Default: every seeded child's family at one site, assigned
-        # to the first sponsor.
-        families = [
-            {
+        # to the first sponsor.  Full stores require unique family IDs.
+        families_by_id = {
+            child["family_id"]: {
                 "family_id": child["family_id"],
                 "gift_pickup_location": "Hancock",
                 "assigned_sponsor_id": (
@@ -107,22 +92,24 @@ def _seed(
                 ),
             }
             for child in children
-        ]
+            if child["family_id"] is not None
+        }
+        families = list(families_by_id.values())
     write_sheets(
         cfg.excel_file,
         "match",
-        {"final_sponsor": pl.DataFrame(sponsors, schema=SPONSOR_SCHEMA)},
+        {"final_sponsor": build_final_frame("sponsor", sponsors)},
     )
     write_sheets(
         cfg.excel_file,
         "audit",
-        {"final_child": pl.DataFrame(children, schema=CHILD_SCHEMA)},
+        {"final_child": build_final_frame("child", children)},
         xmas=cfg.xmas,
     )
     write_sheets(
         cfg.excel_file,
         "match",
-        {"final_family": pl.DataFrame(families, schema=FAMILY_SCHEMA)},
+        {"final_family": build_final_frame("family", families)},
     )
 
 
@@ -244,6 +231,56 @@ class TestSponsorsWithAngels:
         with pytest.raises(SponsorPacketError, match="sponsor 9"):
             _sponsors_with_angels(cfg, sponsor_id=9)
 
+    def test_ignored_and_orphan_filtering_is_independent(
+        self, cfg: Config, tmp_path: Path
+    ) -> None:
+        """Packet and PDF validation populations match old projections."""
+        _seed(
+            cfg,
+            [
+                sponsor_row(7, "Sam", "sam@x.com", "1A,2A,3A,4A,5A"),
+                sponsor_row(8, "Ignored", "ignored@x.com", "6A", ignore=True),
+            ],
+            [
+                child_row("1A", "Male", 8, family_id=1),
+                child_row("2A", "Female", 7, family_id=1, ignore=True),
+                child_row("3A", "Male", 6, family_id=None),
+                child_row("4A", "Female", 5, family_id=2),
+                child_row("5A", "Male", 4, family_id=1),
+                child_row("6A", "Female", 3, family_id=1, ignore=True),
+            ],
+            families=[
+                {
+                    "family_id": 1,
+                    "gift_pickup_location": "Hancock",
+                    "assigned_sponsor_id": 7,
+                },
+                {
+                    "family_id": 2,
+                    "gift_pickup_location": "Calumet",
+                    "assigned_sponsor_id": 7,
+                    "ignore": True,
+                },
+            ],
+        )
+        packets = _sponsors_with_angels(cfg)
+        assert [packet["sponsor_id"] for packet in packets] == [7]
+        angels = packets[0]["angels"]
+        assert [angel["angel_id"] for angel in angels] == ["1A", "5A", "4A"]
+        assert angels[2]["dropoff"] is None
+        with pytest.raises(SponsorPacketError, match="sponsor 8"):
+            _sponsors_with_angels(cfg, sponsor_id=8)
+
+        email_cfg = _email_cfg(cfg, tmp_path)
+        sheets_dir = Path(email_cfg.info_sheet.output_dir)
+        for angel_id in ("1A", "5A"):
+            _blank_pdf(
+                sheets_dir / "hancock" / f"AT{cfg.season}_{angel_id}.pdf"
+            )
+        # Ignored/orphaned children and children of ignored families impose
+        # no PDF requirement; the independent filters do not cascade.
+        validate_all_sheets_exist(email_cfg)
+
 
 class TestRun:
     """The end-to-end packet build."""
@@ -269,7 +306,9 @@ class TestRun:
             ],
         )
         email_cfg = _email_cfg(cfg, tmp_path)
+        workbook_before = Path(cfg.excel_file).read_bytes()
         build_packets(email_cfg)
+        assert Path(cfg.excel_file).read_bytes() == workbook_before
         packets = Path(email_cfg.sponsor_packets.output_dir)
         prefix = email_cfg.sponsor_packets.filename_prefix
         packet_dir = packets / "7"

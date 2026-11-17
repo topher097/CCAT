@@ -1,9 +1,10 @@
 """Module 7 — clarification-table extraction (moved from ``scripts/``).
 
-Reads ``final_child`` and ``final_family`` from the CCAT Excel
-workbook, selects the rows whose ``require_clarification`` note is
-set, joins the family contact info (name, phone number, email) and the
-date of birth as provided in the ``raw_child`` form, and exposes the
+Reads output-eligible children and families independently from the complete
+persistent ``final_child`` and ``final_family`` stores, selects children whose
+``clarification_notes`` note is set, joins the family contact info (name,
+phone number, email) and the date of birth as provided in the source
+``raw_child`` form, and exposes the
 result both as a DataFrame (consumed by the web app directly) and as
 a CSV file (``clarify.clarifications_csv``, default
 ``output/clarifications.csv``) whose ``clarification_email_file``
@@ -14,9 +15,12 @@ the per-family contact status maintained by the web app.
 
 import logging
 from pathlib import Path
+from typing import cast
 
 import polars as pl
 
+from ccat.audit import AuditError
+from ccat.audit.store import build_final_frame, eligible_output_rows, read_final
 from ccat.config import Config
 from ccat.io import read_sheet
 
@@ -33,7 +37,7 @@ CHILD_COLUMNS = (
     "family_id",
     "angel_id",
     "first_name",
-    "require_clarification",
+    "clarification_notes",
     "need_1",
     "need_2",
     "desire_1",
@@ -80,7 +84,7 @@ OUTPUT_COLUMNS = (
     "interests",
     "other_notes",
     "family_id",
-    "require_clarification",
+    "clarification_notes",
     "family_first_name",
     "family_last_name",
     "family_phone",
@@ -172,7 +176,7 @@ def _contact_status_columns(
 def _read_required(
     excel_file: Path, sheet: str, required: tuple[str, ...]
 ) -> pl.DataFrame:
-    """Read one required sheet and check its columns.
+    """Read one required source and apply final-output filtering when needed.
 
     Args:
         excel_file: Path to the CCAT Excel workbook.
@@ -180,16 +184,33 @@ def _read_required(
         required: Columns that must be present.
 
     Returns:
-        The sheet contents.
+        Raw sheet contents, or the independently eligible population of a
+        complete persistent final store with its full typed schema.
 
     Raises:
-        ClarifyError: If the workbook or sheet is missing or empty, or
-            lacks a required column.
+        ClarifyError: If the workbook or source is missing or empty, a final
+            store is malformed, or a required column is absent.
     """
     if not excel_file.exists():
         raise ClarifyError(f"Excel file not found: {excel_file}")
-    frame = read_sheet(excel_file, sheet)
+    if sheet in {"final_child", "final_family"}:
+        entity = sheet.removeprefix("final_")
+        try:
+            # An explicit workbook makes the config argument unused by the
+            # store reader; build_table intentionally remains path-based.
+            rows = read_final(cast("Config", None), entity, workbook=excel_file)
+            frame = build_final_frame(
+                entity, eligible_output_rows(rows, entity)
+            )
+        except AuditError as error:
+            raise ClarifyError(str(error)) from error
+    else:
+        frame = read_sheet(excel_file, sheet)
     if frame is None or frame.is_empty():
+        if sheet.startswith("final_"):
+            raise ClarifyError(
+                f"{sheet} has no output-eligible rows or is missing"
+            )
         raise ClarifyError(f"{sheet} sheet is missing or empty")
     missing = [column for column in required if column not in frame.columns]
     if missing:
@@ -198,15 +219,21 @@ def _read_required(
 
 
 def build_table(excel_file: Path) -> pl.DataFrame:
-    """Build the clarification table from the workbook.
+    """Build the clarification table from full finals and source DOBs.
+
+    Eligible children are selected before notes, family contact joins, and raw
+    DOB joins.  Families are independently filtered, so a non-ignored child of
+    an ignored family remains present with blank contact fields, exactly as in
+    the legacy output population.  Source ``raw_child.dob`` is never replaced
+    by an adjudicated final DOB.
 
     Args:
         excel_file: Path to the CCAT Excel workbook.
 
     Returns:
-        A DataFrame with one row per angel needing clarification, in
+        A DataFrame with one row per eligible angel needing clarification, in
         :data:`OUTPUT_COLUMNS` order: the angel's id and first name,
-        the family id, the ``require_clarification`` note, the child's
+        the family id, the ``clarification_notes`` note, the child's
         needs/desires, clothing and shoe sizes, interests and other
         notes, the date of birth as provided in the ``raw_child``
         form, and the family contact info (first/last name, phone
@@ -215,16 +242,17 @@ def build_table(excel_file: Path) -> pl.DataFrame:
         angel needs clarification.
 
     Raises:
-        ClarifyError: If the workbook is missing, a required sheet is
-            missing or empty, or a required column is absent.
+        ClarifyError: If the workbook is missing, a required source is
+            missing or empty, a final store is malformed, or a required
+            column is absent.
     """
     children = _read_required(excel_file, "final_child", CHILD_COLUMNS)
-    note = pl.col("require_clarification").cast(pl.String).str.strip_chars()
+    note = pl.col("clarification_notes").cast(pl.String).str.strip_chars()
     flagged = children.filter(
         note.is_not_null() & (note.str.strip_chars() != "")
     ).select(CHILD_COLUMNS)
     if flagged.is_empty():
-        logger.info("no final_child row carries a clarification note")
+        logger.info("no eligible final_child row carries a clarification note")
         return pl.DataFrame(
             schema={column: pl.String for column in OUTPUT_COLUMNS}
         )
@@ -277,8 +305,9 @@ def write_csv(
         The CSV path written.
 
     Raises:
-        ClarifyError: If the workbook is missing, a required sheet is
-            missing or empty, or a required column is absent.
+        ClarifyError: If the workbook is missing, a required source is
+            missing or empty, a final store is malformed, or a required
+            column is absent.
     """
     csv_path = (
         Path(output)

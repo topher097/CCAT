@@ -13,8 +13,8 @@ from pypdf import PdfReader, PdfWriter
 import ccat.child_info_generate as gen
 from ccat.child_info_generate import InfoSheetError
 from ccat.config import Config, InfoSheetSpec
-from ccat.audit.store import ADJ_CHILD_COLUMNS
-from ccat.io import read_sheet, write_sheets
+from ccat.audit.store import build_final_frame, read_final
+from ccat.io import _final_child_formula_caches, read_sheet, write_sheets
 from ccat.sponsor_packets import SponsorPacketError
 
 #: The real season template, for the end-to-end PDF placeholder test.
@@ -24,33 +24,12 @@ REAL_TEMPLATE = (
     / "child_information_sheet_2026.ott"
 )
 
-CHILD_COLUMNS = [
-    "zite_record_id",
-    "family_id",
-    "angel_id",
-    "age_at_xmas",
-    "gender",
-    "favorite_colors",
-    "interests",
-    "other_notes",
-    "need_1",
-    "need_2",
-    "desire_1",
-    "desire_2",
-    "shoe_size",
-    "shoe_size_type",
-    "pant_waist_size",
-    "pant_inseam",
-    "pant_size_letter",
-    "pant_size_type",
-    "jean_size",
-    "shirt_size_letter",
-    "shirt_size_type",
-]
-
 
 def child_row(
-    record_id: str, angel_id: str, family_id: int, status: str = "audited"
+    record_id: str,
+    angel_id: str,
+    family_id: int | None,
+    status: str = "audited",
 ) -> dict[str, Any]:
     """One final_child row for generate tests."""
     return {
@@ -58,6 +37,9 @@ def child_row(
         "family_id": family_id,
         "angel_id": angel_id,
         "status": status,
+        "audited": status == "audited",
+        "ignore": False,
+        "generated_info_sheet": False,
         "dob": "2018-05-10",
         "age_at_xmas": 8,
         "gender": "female",
@@ -85,74 +67,45 @@ def _seed(
     children: list[dict[str, Any]],
     families: list[dict[str, Any]],
     *,
-    with_flag: bool = False,
     flags: list[bool] | None = None,
     sponsors: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Write final_child, final_family, and final_sponsor sheets."""
-    schema: dict[str, Any] = {
-        "zite_record_id": pl.String,
-        "family_id": pl.Int64,
-        "angel_id": pl.String,
-        "status": pl.String,
-        "dob": pl.String,
-        "age_at_xmas": pl.Int64,
-        "gender": pl.String,
-        "favorite_colors": pl.String,
-        "interests": pl.String,
-        "other_notes": pl.String,
-        "need_1": pl.String,
-        "need_2": pl.String,
-        "desire_1": pl.String,
-        "desire_2": pl.String,
-        "shoe_size": pl.String,
-        "shoe_size_type": pl.String,
-        "pant_waist_size": pl.String,
-        "pant_inseam": pl.String,
-        "pant_size_letter": pl.String,
-        "pant_size_type": pl.String,
-        "jean_size": pl.String,
-        "shirt_size_letter": pl.String,
-        "shirt_size_type": pl.String,
-    }
-    if with_flag:
-        schema["generated_info_sheet"] = pl.Boolean
+    """Write full persistent child, family, and sponsor final stores."""
     if flags is not None:
         for row, flag in zip(children, flags, strict=True):
             row["generated_info_sheet"] = flag
-    from ccat.audit.store import build_adj_frame
-
-    adj_rows = [
-        {column: None for column in ADJ_CHILD_COLUMNS} | child
-        for child in children
-    ]
     write_sheets(
         cfg.excel_file,
         "audit",
-        {
-            "adj_child": build_adj_frame("child", adj_rows),
-            "final_child": pl.DataFrame(children, schema=schema),
-        },
+        {"final_child": build_final_frame("child", children)},
         xmas=cfg.xmas,
     )
     write_sheets(
         cfg.excel_file,
         "match",
         {
-            "final_family": pl.DataFrame(
-                families,
-                schema={
-                    "family_id": pl.Int64,
-                    "gift_pickup_location": pl.String,
-                    "assigned_sponsor_id": pl.Int64,
-                },
-            ),
-            "final_sponsor": pl.DataFrame(
-                _sponsor() if sponsors is None else sponsors,
-                schema=SPONSOR_SCHEMA,
+            "final_family": build_final_frame("family", families),
+            "final_sponsor": build_final_frame(
+                "sponsor", [_sponsor()] if sponsors is None else sponsors
             ),
         },
     )
+
+
+def _assert_only_generated_flags_changed(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+    expected_flags: dict[str, bool],
+) -> None:
+    """Check row survival, unchanged fields, and exact generation markers."""
+    assert [row["zite_record_id"] for row in after] == [
+        row["zite_record_id"] for row in before
+    ]
+    for old, new in zip(before, after, strict=True):
+        record_id = old["zite_record_id"]
+        assert new["generated_info_sheet"] is expected_flags[record_id]
+        for column in old.keys() - {"generated_info_sheet"}:
+            assert new[column] == old[column], (record_id, column)
 
 
 def _family() -> list[dict[str, Any]]:
@@ -193,18 +146,6 @@ def _sponsor(
     }
     row.update(overrides)
     return row
-
-
-SPONSOR_SCHEMA: dict[str, Any] = {
-    "sponsor_id": pl.Int64,
-    "sponsor_type": pl.String,
-    "first_name": pl.String,
-    "last_name": pl.String,
-    "organization_name": pl.String,
-    "email": pl.String,
-    "phone": pl.String,
-    "assigned_angel_ids": pl.String,
-}
 
 
 @pytest.fixture
@@ -248,17 +189,6 @@ def two_children() -> list[dict[str, Any]]:
     ]
 
 
-def _family() -> list[dict[str, Any]]:
-    """One final_family row joining the seeded children."""
-    return [
-        {
-            "family_id": 1,
-            "gift_pickup_location": "Hancock",
-            "assigned_sponsor_id": 7,
-        }
-    ]
-
-
 class TestGenCfg:
     """The cfg fixture loads the real info_sheet section (§3)."""
 
@@ -298,49 +228,6 @@ class TestConfigMappings:
         """An empty mapping target fails validation."""
         with pytest.raises(ValueError, match="empty"):
             self._spec(mappings={"entry.colors": ""})
-
-
-class TestNormalizeFlag:
-    """generated_info_sheet normalization (§13.3)."""
-
-    def test_missing_column_added_all_false(self) -> None:
-        """First run adds the column with every row False."""
-        frame = pl.DataFrame(
-            [{"zite_record_id": "c1"}], schema={"zite_record_id": pl.String}
-        )
-        normalized, added = gen._normalize_flag(frame)
-        assert added is True
-        assert normalized.schema["generated_info_sheet"] == pl.Boolean
-        assert normalized["generated_info_sheet"].to_list() == [False]
-
-    def test_nulls_filled_false(self) -> None:
-        """Null flag values normalize to False."""
-        frame = pl.DataFrame(
-            [{"generated_info_sheet": None}, {"generated_info_sheet": True}],
-            schema={"generated_info_sheet": pl.Boolean},
-        )
-        normalized, added = gen._normalize_flag(frame)
-        assert added is False
-        assert normalized["generated_info_sheet"].to_list() == [False, True]
-
-    def test_string_booleans_coerced(self) -> None:
-        """String booleans coming back from the sheet are coerced."""
-        frame = pl.DataFrame(
-            [
-                {"generated_info_sheet": "true"},
-                {"generated_info_sheet": "false"},
-                {"generated_info_sheet": None},
-                {"generated_info_sheet": "1"},
-            ],
-            schema={"generated_info_sheet": pl.String},
-        )
-        normalized, _added = gen._normalize_flag(frame)
-        assert normalized["generated_info_sheet"].to_list() == [
-            True,
-            False,
-            False,
-            False,
-        ]
 
 
 class TestNestedData:
@@ -533,7 +420,7 @@ class TestLoadEnriched:
     ) -> None:
         """family_size counts rows per family_id; join columns land."""
         _seed(gen_cfg, two_children, _family())
-        _base, enriched, _added = gen._load_enriched_rows(gen_cfg)
+        _base, enriched = gen._load_enriched_rows(gen_cfg)
         assert enriched["family_size"].to_list() == [2, 2]
         assert enriched["gift_pickup_location"].to_list() == [
             "Hancock",
@@ -565,7 +452,7 @@ class TestLoadEnriched:
         write_sheets(
             gen_cfg.excel_file,
             "audit",
-            {"final_child": pl.DataFrame(two_children)},
+            {"final_child": build_final_frame("child", two_children)},
             xmas=gen_cfg.xmas,
         )
         with pytest.raises(InfoSheetError, match="final_family sheet"):
@@ -590,10 +477,20 @@ class TestLoadEnriched:
             gen._load_enriched_rows(gen_cfg)
 
     def test_duplicate_family_id(
-        self, gen_cfg: Config, two_children: list[dict[str, Any]]
+        self,
+        gen_cfg: Config,
+        two_children: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Duplicate final_family family_id rows raise a typed error."""
-        _seed(gen_cfg, two_children, _family() + _family())
+        _seed(gen_cfg, two_children, _family())
+        read_eligible = gen.read_eligible_final_frame
+
+        def duplicate_family(cfg: Config, entity: str) -> pl.DataFrame:
+            frame = read_eligible(cfg, entity)
+            return pl.concat([frame, frame]) if entity == "family" else frame
+
+        monkeypatch.setattr(gen, "read_eligible_final_frame", duplicate_family)
         with pytest.raises(InfoSheetError, match="not unique"):
             gen._load_enriched_rows(gen_cfg)
 
@@ -603,37 +500,67 @@ class TestLoadEnriched:
         """A child without family_id is ignored (orphaned), not an error."""
         two_children[0]["family_id"] = None
         _seed(gen_cfg, two_children, _family())
-        base, enriched, _added = gen._load_enriched_rows(gen_cfg)
+        base, enriched = gen._load_enriched_rows(gen_cfg)
         assert base.height == 1  # the orphaned row is dropped
         assert enriched["family_id"].to_list() == [1]
         assert base["zite_record_id"].to_list() == [
             two_children[1]["zite_record_id"]
         ]
+        assert len(read_final(gen_cfg, "child")) == 2
+
+    def test_ignored_and_orphan_children_filtered_before_enrichment(
+        self, gen_cfg: Config
+    ) -> None:
+        """Output filters omit ineligible children without deleting them."""
+        children = [
+            child_row("c1", "1A", 1),
+            child_row("c2", "1B", 1, status="ignored"),
+            child_row("c3", "1C", None),
+        ]
+        children[1]["ignore"] = True
+        _seed(gen_cfg, children, _family())
+        base, enriched = gen._load_enriched_rows(gen_cfg)
+        assert base["zite_record_id"].to_list() == ["c1"]
+        assert enriched["family_size"].to_list() == [1]
+        assert [
+            row["zite_record_id"] for row in read_final(gen_cfg, "child")
+        ] == [
+            "c1",
+            "c2",
+            "c3",
+        ]
 
     def test_all_null_family_id(
         self, gen_cfg: Config, two_children: list[dict[str, Any]]
     ) -> None:
-        """Every child orphaned -> typed error with nothing to generate."""
+        """Every child orphaned -> no eligible output population."""
         two_children[0]["family_id"] = None
         two_children[1]["family_id"] = None
         _seed(gen_cfg, two_children, _family())
-        with pytest.raises(InfoSheetError, match="lacks a family_id"):
+        with pytest.raises(InfoSheetError, match="no eligible rows"):
             gen._load_enriched_rows(gen_cfg)
+        assert len(read_final(gen_cfg, "child")) == 2
 
     def test_final_family_missing_join_column(
-        self, gen_cfg: Config, two_children: list[dict[str, Any]]
+        self,
+        gen_cfg: Config,
+        two_children: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """final_family without the join columns raises a typed error."""
         _seed(gen_cfg, two_children, _family())
-        write_sheets(
-            gen_cfg.excel_file,
-            "match",
-            {
-                "final_family": pl.DataFrame(
-                    [{"family_id": 1}],
-                    schema={"family_id": pl.Int64},
-                )
-            },
+        read_eligible = gen.read_eligible_final_frame
+
+        def missing_family_column(cfg: Config, entity: str) -> pl.DataFrame:
+            frame = read_eligible(cfg, entity)
+            return (
+                frame.drop("gift_pickup_location")
+                if entity == "family"
+                else frame
+            )
+
+        monkeypatch.setattr(
+            gen, "read_eligible_final_frame", missing_family_column
         )
         with pytest.raises(InfoSheetError, match="lacks column"):
             gen._load_enriched_rows(gen_cfg)
@@ -647,30 +574,40 @@ class TestLoadEnriched:
             gen._load_enriched_rows(gen_cfg)
 
     def test_final_sponsor_missing_join_column(
-        self, gen_cfg: Config, two_children: list[dict[str, Any]]
+        self,
+        gen_cfg: Config,
+        two_children: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """final_sponsor without the join columns raises a typed error."""
         _seed(gen_cfg, two_children, _family())
-        write_sheets(
-            gen_cfg.excel_file,
-            "match",
-            {
-                "final_sponsor": pl.DataFrame(
-                    [{"sponsor_id": 7}],
-                    schema={"sponsor_id": pl.Int64},
-                )
-            },
+        read_eligible = gen.read_eligible_final_frame
+
+        def missing_sponsor_column(cfg: Config, entity: str) -> pl.DataFrame:
+            frame = read_eligible(cfg, entity)
+            return frame.drop("email") if entity == "sponsor" else frame
+
+        monkeypatch.setattr(
+            gen, "read_eligible_final_frame", missing_sponsor_column
         )
         with pytest.raises(InfoSheetError, match="lacks column"):
             gen._load_enriched_rows(gen_cfg)
 
     def test_duplicate_sponsor_id(
-        self, gen_cfg: Config, two_children: list[dict[str, Any]]
+        self,
+        gen_cfg: Config,
+        two_children: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Duplicate final_sponsor sponsor_id rows raise a typed error."""
-        _seed(
-            gen_cfg, two_children, _family(), sponsors=[_sponsor(), _sponsor()]
-        )
+        _seed(gen_cfg, two_children, _family())
+        read_eligible = gen.read_eligible_final_frame
+
+        def duplicate_sponsor(cfg: Config, entity: str) -> pl.DataFrame:
+            frame = read_eligible(cfg, entity)
+            return pl.concat([frame, frame]) if entity == "sponsor" else frame
+
+        monkeypatch.setattr(gen, "read_eligible_final_frame", duplicate_sponsor)
         with pytest.raises(InfoSheetError, match="not unique"):
             gen._load_enriched_rows(gen_cfg)
 
@@ -679,7 +616,7 @@ class TestLoadEnriched:
     ) -> None:
         """A family without an assigned sponsor leaves sponsor sources null."""
         _seed(gen_cfg, two_children, _unassigned_family())
-        _base, enriched, _added = gen._load_enriched_rows(gen_cfg)
+        _base, enriched = gen._load_enriched_rows(gen_cfg)
         assert enriched["sponsor_email"].to_list() == [None, None]
         assert enriched["sponsor_name"].to_list() == ["", ""]
         # family_size is still computed (number of angels in family).
@@ -809,6 +746,8 @@ class TestRun:
     ) -> None:
         """Pending rows are rendered, flagged True, and written back."""
         _seed(gen_cfg, two_children, _family())
+        before = read_final(gen_cfg, "child")
+        formula_caches = _final_child_formula_caches(Path(gen_cfg.excel_file))
         gen.run(gen_cfg)
         stem = f"AT{gen_cfg.season}_"
         names = sorted(name for name, _data in render_calls)
@@ -824,18 +763,20 @@ class TestRun:
         frame = read_sheet(gen_cfg.excel_file, "final_child")
         assert frame is not None
         assert frame["generated_info_sheet"].to_list() == [True, True]
-        # the flag lives in adj_child (source of truth) and the final is
-        # its refreshed projection (§7.5)
-        from ccat.audit.store import read_adj
-
-        adj = read_adj(gen_cfg, "child")
-        assert [row["generated_info_sheet"] for row in adj] == [True, True]
-        assert frame["zite_record_id"].to_list() == [
-            row["zite_record_id"] for row in adj
-        ]
-        # enrichment columns never reach the sheet (§13.4)
+        after = read_final(gen_cfg, "child")
+        _assert_only_generated_flags_changed(
+            before,
+            after,
+            {"c1": True, "c2": True},
+        )
+        # Enrichment is transient; writes keep the complete final schema.
         assert "gift_pickup_location" not in frame.columns
         assert "family_size" not in frame.columns
+        # Generation writes supply xmas and retain live formulas/cached ages.
+        new_caches = _final_child_formula_caches(Path(gen_cfg.excel_file))
+        assert formula_caches
+        assert new_caches.keys() == formula_caches.keys()
+        assert new_caches == formula_caches
 
     def test_render_data_contents(
         self,
@@ -882,7 +823,6 @@ class TestRun:
             gen_cfg,
             two_children,
             _unassigned_family(),
-            with_flag=True,
             flags=[False, False],
         )
         gen.run(gen_cfg)
@@ -1032,7 +972,6 @@ class TestRun:
             gen_cfg,
             two_children,
             _family(),
-            with_flag=True,
             flags=[True, False],
         )
         # Focus is the flag filter; stub out the packet phase (its
@@ -1077,7 +1016,6 @@ class TestRun:
             gen_cfg,
             two_children,
             _family(),
-            with_flag=True,
             flags=[True, True],
         )
         gen.run(gen_cfg, overwrite=True)
@@ -1101,7 +1039,6 @@ class TestRun:
             gen_cfg,
             two_children,
             _family(),
-            with_flag=True,
             flags=[True, True],
         )
         gen.run(gen_cfg, test=True, overwrite=True)
@@ -1173,11 +1110,57 @@ class TestRun:
         monkeypatch.setattr(gen, "_render_one", failing_render)
         monkeypatch.setattr(gen, "_convert_to_pdf", fake_convert)
         _seed(gen_cfg, two_children, _family())
+        before = read_final(gen_cfg, "child")
         with pytest.raises(InfoSheetError, match="1A"):
             gen.run(gen_cfg)
-        frame = read_sheet(gen_cfg.excel_file, "final_child")
-        assert frame is not None
-        assert frame["generated_info_sheet"].to_list() == [False, True]
+        after = read_final(gen_cfg, "child")
+        _assert_only_generated_flags_changed(
+            before,
+            after,
+            {"c1": False, "c2": True},
+        )
+
+    def test_commit_preserves_full_store_and_formula_caches(
+        self,
+        gen_cfg: Config,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Marker commits retain ignored, orphan, and raw-missing rows."""
+        children = [
+            child_row("c1", "1A", 1),
+            child_row("c2", "1B", 1, status="ignored"),
+            child_row("c3", "1C", None),
+            child_row("c4", "1D", 1),
+        ]
+        children[1].update(ignore=True, other_notes="ignored manual edit")
+        children[3].update(other_notes="raw-missing manual edit", source=None)
+        _seed(gen_cfg, children, _family())
+        before = read_final(gen_cfg, "child")
+        caches = _final_child_formula_caches(Path(gen_cfg.excel_file))
+        writes: list[tuple[str, str, int]] = []
+        original = gen.write_final_rows
+
+        def recording_write(
+            cfg: Config,
+            module: str,
+            entity: str,
+            rows: list[dict[str, Any]],
+        ) -> None:
+            writes.append((module, entity, len(rows)))
+            original(cfg, module=module, entity=entity, rows=rows)
+
+        monkeypatch.setattr(gen, "write_final_rows", recording_write)
+        gen._commit_generated_flags(gen_cfg, ["c1"])
+        after = read_final(gen_cfg, "child")
+        assert writes == [("generate", "child", 4)]
+        _assert_only_generated_flags_changed(
+            before,
+            after,
+            {"c1": True, "c2": False, "c3": False, "c4": False},
+        )
+        assert after[1]["other_notes"] == "ignored manual edit"
+        assert after[3]["other_notes"] == "raw-missing manual edit"
+        assert _final_child_formula_caches(Path(gen_cfg.excel_file)) == caches
 
     def test_no_pending_no_write(
         self,
@@ -1187,18 +1170,22 @@ class TestRun:
     ) -> None:
         """All done -> nothing rendered and the workbook is untouched."""
         calls: list[Path] = []
-        original = gen.write_sheets
+        original = gen.write_final_rows
 
-        def counting_write(path: Any, module: str, sheets: Any) -> None:
-            calls.append(Path(path))
-            original(path, module, sheets)
+        def counting_write(
+            cfg: Config,
+            module: str,
+            entity: str,
+            rows: list[dict[str, Any]],
+        ) -> None:
+            calls.append(Path(cfg.excel_file))
+            original(cfg, module=module, entity=entity, rows=rows)
 
-        monkeypatch.setattr(gen, "write_sheets", counting_write)
+        monkeypatch.setattr(gen, "write_final_rows", counting_write)
         _seed(
             gen_cfg,
             two_children,
             _family(),
-            with_flag=True,
             flags=[True, True],
         )
         # Focus is the workbook untouched; stub out the packet phase.
@@ -1221,6 +1208,52 @@ class TestRun:
         broken = gen_cfg.model_copy(update={"info_sheet": spec})
         with pytest.raises(InfoSheetError, match="template file not found"):
             gen.run(broken)
+
+    def test_sponsor_option_limits_sheets_and_packet(
+        self,
+        gen_cfg: Config,
+        render_calls: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """--sponsor renders only that sponsor's children and packet."""
+        children = [child_row("c1", "1A", 1), child_row("c2", "2A", 2)]
+        families = [
+            {
+                "family_id": 1,
+                "gift_pickup_location": "Hancock",
+                "assigned_sponsor_id": 7,
+            },
+            {
+                "family_id": 2,
+                "gift_pickup_location": "Calumet",
+                "assigned_sponsor_id": 8,
+            },
+        ]
+        _seed(
+            gen_cfg,
+            children,
+            families,
+            sponsors=[_sponsor(sponsor_id=7), _sponsor(sponsor_id=8)],
+        )
+        gen.run(gen_cfg, sponsor=7)
+        # Only sponsor 7's child was rendered.
+        assert [name for name, _data in render_calls] == [
+            f"AT{gen_cfg.season}_1A.odt"
+        ]
+        # Only sponsor 7's packet directory was built.
+        packets_root = Path(gen_cfg.sponsor_packets.output_dir)
+        assert [d.name for d in sorted(packets_root.iterdir())] == ["7"]
+
+    def test_sponsor_option_unknown_sponsor_raises(
+        self,
+        gen_cfg: Config,
+        two_children: list[dict[str, Any]],
+        render_calls: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """--sponsor with an unknown sponsor id raises a typed error."""
+        _seed(gen_cfg, two_children, _family())
+        with pytest.raises(SponsorPacketError, match="sponsor 9"):
+            gen.run(gen_cfg, sponsor=9)
+        assert render_calls == []
 
 
 class TestParallelGeneration:
@@ -1325,18 +1358,18 @@ class TestParallelGeneration:
         monkeypatch.setattr(gen, "_render_one", fake_render)
         monkeypatch.setattr(gen, "_convert_to_pdf", fake_convert)
         _seed(gen_cfg, children, _family())
+        before = read_final(gen_cfg, "child")
         with pytest.raises(KeyboardInterrupt):
             gen.run(gen_cfg, max_workers=1)
         # 1A finished and is flagged; 1B was interrupted mid-flight and
         # 1C never converted (cancelled through the stop event).
         assert converts == [f"AT{gen_cfg.season}_1A"]
-        frame = read_sheet(gen_cfg.excel_file, "final_child")
-        assert frame is not None
-        assert frame["generated_info_sheet"].to_list() == [
-            True,
-            False,
-            False,
-        ]
+        after = read_final(gen_cfg, "child")
+        _assert_only_generated_flags_changed(
+            before,
+            after,
+            {"c1": True, "c2": False, "c3": False},
+        )
 
     def test_progress_bar_tracks_every_sheet(
         self,
@@ -1426,49 +1459,3 @@ def test_placeholder_shown_in_converted_pdf(
         page.extract_text() or "" for page in PdfReader(str(pdfs[0])).pages
     )
     assert gen.SPONSOR_CONTACT_PLACEHOLDER in text
-
-    def test_sponsor_option_limits_sheets_and_packet(
-        self,
-        gen_cfg: Config,
-        render_calls: list[tuple[str, dict[str, Any]]],
-    ) -> None:
-        """--sponsor renders only that sponsor's children and packet."""
-        children = [child_row("c1", "1A", 1), child_row("c2", "2A", 2)]
-        families = [
-            {
-                "family_id": 1,
-                "gift_pickup_location": "Hancock",
-                "assigned_sponsor_id": 7,
-            },
-            {
-                "family_id": 2,
-                "gift_pickup_location": "Calumet",
-                "assigned_sponsor_id": 8,
-            },
-        ]
-        _seed(
-            gen_cfg,
-            children,
-            families,
-            sponsors=[_sponsor(sponsor_id=7), _sponsor(sponsor_id=8)],
-        )
-        gen.run(gen_cfg, sponsor=7)
-        # Only sponsor 7's child was rendered.
-        assert [name for name, _data in render_calls] == [
-            f"AT{gen_cfg.season}_1A.odt"
-        ]
-        # Only sponsor 7's packet directory was built.
-        packets_root = Path(gen_cfg.sponsor_packets.output_dir)
-        assert [d.name for d in sorted(packets_root.iterdir())] == ["7"]
-
-    def test_sponsor_option_unknown_sponsor_raises(
-        self,
-        gen_cfg: Config,
-        two_children: list[dict[str, Any]],
-        render_calls: list[tuple[str, dict[str, Any]]],
-    ) -> None:
-        """--sponsor with an unknown sponsor id raises a typed error."""
-        _seed(gen_cfg, two_children, _family())
-        with pytest.raises(SponsorPacketError, match="sponsor 9"):
-            gen.run(gen_cfg, sponsor=9)
-        assert render_calls == []

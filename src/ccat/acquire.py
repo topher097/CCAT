@@ -77,7 +77,7 @@ EMAIL_RE = re.compile(
     r"(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$"
 )
 
-#: Derived columns appended to each prepared ({table}_submissions) sheet.
+#: Derived columns added by in-memory preparation for each entity table.
 DERIVED_COLUMNS = {
     "sponsor": ["sponsor_id", "pref_age_min", "pref_age_max"],
     "family": ["family_id"],
@@ -585,7 +585,7 @@ DOB_CONFLICT_LOG_SCHEMA: dict[str, PolarsDataType] = {
 
 
 def sibling_dob_conflicts(
-    rows: list[dict[str, Any]], cfg: Config
+    rows: list[dict[str, Any]], cfg: Config, report: bool = True
 ) -> list[dict[str, Any]]:
     """Find same-family children born too close together (§6.6).
 
@@ -602,6 +602,8 @@ def sibling_dob_conflicts(
     Args:
         rows: Cleaned, ID-assigned child rows.
         cfg: Pipeline configuration (threshold in days).
+        report: Emit one warning per conflicting pair when True; call sites
+            that only need the log rows (such as audit startup) pass False.
 
     Returns:
         One log row per conflicting pair, ordered deterministically
@@ -656,18 +658,19 @@ def sibling_dob_conflicts(
                         "gap_days": gap_days,
                     }
                 )
-                logger.warning(
-                    "sibling dob conflict for family %s: %s (%s, dob %s) and"
-                    " %s (%s, dob %s) are %d day(s) apart",
-                    family_id,
-                    child_a.get("first_name"),
-                    child_a.get("angel_id"),
-                    child_a.get("dob"),
-                    child_b.get("first_name"),
-                    child_b.get("angel_id"),
-                    child_b.get("dob"),
-                    gap_days,
-                )
+                if report:
+                    logger.warning(
+                        "sibling dob conflict for family %s: %s (%s, dob %s)"
+                        " and %s (%s, dob %s) are %d day(s) apart",
+                        family_id,
+                        child_a.get("first_name"),
+                        child_a.get("angel_id"),
+                        child_a.get("dob"),
+                        child_b.get("first_name"),
+                        child_b.get("angel_id"),
+                        child_b.get("dob"),
+                        gap_days,
+                    )
     return log_rows
 
 

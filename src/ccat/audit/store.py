@@ -1,39 +1,36 @@
-"""Module 3 data layer — dense adjudication store (audit_architecture.md §5–§7).
+"""Persistent entity store shared by screening, audit, match, and generate.
 
-Pure polars/pydantic helpers over the dense ``adj_*`` sheets and their
-``final_*`` projections.  No NiceGUI imports: every pipeline module
-(screening, match, generate, migrate) shares this layer, so the adj
-contract is defined exactly once.
+The three ``final_*`` sheets are the complete, editable system of record.
+Every row retains its full schema and controls; ignored, orphaned, duplicate,
+and raw-missing entities are never removed by ordinary reruns. Output
+eligibility is an explicit reader filter, not a destructive projection.
 
-Core model (§5.1):
-
-- An adj row's data columns ARE the adjudicated record — seeded from the
-  entity's baseline (§5.2), pre-filled by screening (§7.3), then edited
-  by humans.  A null cell means the value is genuinely absent, never
-  "see raw".
-- ``final_X`` is a pure projection of ``adj_X`` (§7.1): drop ignored
-  rows, drop the pure control columns (``audited``/``ignore`` plus the
-  child-only ``screened``), keep everything else in the documented
-  column order.
-- ``status`` (§5.3) is a derived, snake_case string recomputed on every
-  audit save so the workbook is filterable in Excel and downstream
-  modules can gate on it (§7.5).
+Human edits and module-owned values survive deliberate field-scoped writes.
+Age formulas, atomic replacement, and sheet ownership remain in ``ccat.io``.
+No NiceGUI imports live here, keeping the store unit-testable.
 """
 
 import logging
 import threading
 from datetime import datetime, UTC
+from pathlib import Path
 from typing import Any
-from collections.abc import Sequence
 
 import polars as pl
 from polars._typing import PolarsDataType
 from pydantic import BaseModel, Field
 
-from ccat.acquire import AGE_PREF_BOUNDS, compute_age_at_xmas
+from ccat.acquire import AGE_PREF_BOUNDS, _created_value, compute_age_at_xmas
 from ccat.audit import AuditError
 from ccat.config import Config
-from ccat.io import read_sheet, write_sheets
+from ccat.io import list_sheets, read_sheet, write_sheets
+from ccat.preparation import (
+    Preparation,
+    append_note,
+    dob_notes_by_child,
+    duplicate_note,
+    prepare_workbook,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,12 +56,11 @@ STATUS_ORDER = (
     STATUS_AUDITED,
 )
 
-#: Common control columns on all three adj sheets (§4.3).
+#: Common control columns on all three final sheets.
 CONTROL_COLUMNS = (
     "status",
-    "audited",
     "ignore",
-    "require_clarification",
+    "clarification_notes",
     "audited_at",
 )
 
@@ -80,7 +76,7 @@ DOB_CONFLICT_PREFIX = "Sibling DOB conflict"
 # Sheet schemas (§4.3) — the single source of truth for adj/final columns.
 # ---------------------------------------------------------------------------
 
-ADJ_CHILD_COLUMNS: tuple[str, ...] = (
+FINAL_CHILD_COLUMNS: tuple[str, ...] = (
     "zite_record_id",
     "zite_created_at",
     "created",
@@ -117,7 +113,7 @@ ADJ_CHILD_COLUMNS: tuple[str, ...] = (
     *CONTROL_COLUMNS,
 )
 
-ADJ_CHILD_SCHEMA: dict[str, PolarsDataType] = {
+FINAL_CHILD_SCHEMA: dict[str, PolarsDataType] = {
     "zite_record_id": pl.String,
     "zite_created_at": pl.String,
     "created": pl.String,
@@ -152,13 +148,12 @@ ADJ_CHILD_SCHEMA: dict[str, PolarsDataType] = {
     "screened": pl.Boolean,
     "potential_duplicate": pl.Boolean,
     "status": pl.String,
-    "audited": pl.Boolean,
     "ignore": pl.Boolean,
-    "require_clarification": pl.String,
+    "clarification_notes": pl.String,
     "audited_at": pl.String,
 }
 
-#: adj_child column partitions (§4.3).
+#: final_child column partitions.
 CHILD_LINKAGE_COLUMNS = (
     "zite_record_id",
     "zite_created_at",
@@ -199,12 +194,12 @@ CHILD_CONTROL_COLUMNS = (*CONTROL_COLUMNS, "screened")
 #: Column keys the child detail UI accepts in a save payload.
 CHILD_SAVE_FIELDS = (
     *CHILD_EDITABLE_COLUMNS,
-    "audited",
+    "status",
     "ignore",
-    "require_clarification",
+    "clarification_notes",
 )
 
-ADJ_FAMILY_COLUMNS: tuple[str, ...] = (
+FINAL_FAMILY_COLUMNS: tuple[str, ...] = (
     "family_id",
     "zite_record_id",
     "zite_created_at",
@@ -232,7 +227,7 @@ ADJ_FAMILY_COLUMNS: tuple[str, ...] = (
     *CONTROL_COLUMNS,
 )
 
-ADJ_FAMILY_SCHEMA: dict[str, PolarsDataType] = {
+FINAL_FAMILY_SCHEMA: dict[str, PolarsDataType] = {
     "family_id": pl.Int64,
     "zite_record_id": pl.String,
     "zite_created_at": pl.String,
@@ -258,9 +253,8 @@ ADJ_FAMILY_SCHEMA: dict[str, PolarsDataType] = {
     "assigned_angel_ids": pl.String,
     "num_angels_in_family": pl.Int64,
     "status": pl.String,
-    "audited": pl.Boolean,
     "ignore": pl.Boolean,
-    "require_clarification": pl.String,
+    "clarification_notes": pl.String,
     "audited_at": pl.String,
 }
 
@@ -294,12 +288,12 @@ FAMILY_ASSIGNMENT_COLUMNS = (
 )
 FAMILY_SAVE_FIELDS = (
     *FAMILY_EDITABLE_COLUMNS,
-    "audited",
+    "status",
     "ignore",
-    "require_clarification",
+    "clarification_notes",
 )
 
-ADJ_SPONSOR_COLUMNS: tuple[str, ...] = (
+FINAL_SPONSOR_COLUMNS: tuple[str, ...] = (
     "sponsor_id",
     "zite_record_id",
     "create",
@@ -324,7 +318,7 @@ ADJ_SPONSOR_COLUMNS: tuple[str, ...] = (
     *CONTROL_COLUMNS,
 )
 
-ADJ_SPONSOR_SCHEMA: dict[str, PolarsDataType] = {
+FINAL_SPONSOR_SCHEMA: dict[str, PolarsDataType] = {
     "sponsor_id": pl.Int64,
     "zite_record_id": pl.String,
     "create": pl.String,
@@ -347,9 +341,8 @@ ADJ_SPONSOR_SCHEMA: dict[str, PolarsDataType] = {
     "assigned_angel_ids": pl.String,
     "num_angels_assigned": pl.Int64,
     "status": pl.String,
-    "audited": pl.Boolean,
     "ignore": pl.Boolean,
-    "require_clarification": pl.String,
+    "clarification_notes": pl.String,
     "audited_at": pl.String,
 }
 
@@ -376,37 +369,18 @@ SPONSOR_COMPUTED_COLUMNS = ("pref_age_min", "pref_age_max")
 SPONSOR_ASSIGNMENT_COLUMNS = ("assigned_angel_ids", "num_angels_assigned")
 SPONSOR_SAVE_FIELDS = (
     *SPONSOR_EDITABLE_COLUMNS,
-    "audited",
+    "status",
     "ignore",
-    "require_clarification",
-)
-
-#: Final-sheet column orders (§7.1): the adj order minus the pure control
-#: columns dropped by the projection.
-_DROPPED_BY_PROJECTION = {"audited", "ignore", "screened"}
-FINAL_CHILD_COLUMNS: tuple[str, ...] = tuple(
-    column
-    for column in ADJ_CHILD_COLUMNS
-    if column not in _DROPPED_BY_PROJECTION
-)
-FINAL_FAMILY_COLUMNS: tuple[str, ...] = tuple(
-    column
-    for column in ADJ_FAMILY_COLUMNS
-    if column not in _DROPPED_BY_PROJECTION
-)
-FINAL_SPONSOR_COLUMNS: tuple[str, ...] = tuple(
-    column
-    for column in ADJ_SPONSOR_COLUMNS
-    if column not in _DROPPED_BY_PROJECTION
+    "clarification_notes",
 )
 
 #: Entity registry: name -> (sheet, key column, columns, schema, editable).
 ENTITY_SPECS: dict[str, dict[str, Any]] = {
     "child": {
-        "sheet": "adj_child",
+        "sheet": "final_child",
         "key": "zite_record_id",
-        "columns": ADJ_CHILD_COLUMNS,
-        "schema": ADJ_CHILD_SCHEMA,
+        "columns": FINAL_CHILD_COLUMNS,
+        "schema": FINAL_CHILD_SCHEMA,
         "editable": CHILD_EDITABLE_COLUMNS,
         "save_fields": CHILD_SAVE_FIELDS,
         "status_editable": tuple(
@@ -416,19 +390,19 @@ ENTITY_SPECS: dict[str, dict[str, Any]] = {
         ),
     },
     "family": {
-        "sheet": "adj_family",
+        "sheet": "final_family",
         "key": "family_id",
-        "columns": ADJ_FAMILY_COLUMNS,
-        "schema": ADJ_FAMILY_SCHEMA,
+        "columns": FINAL_FAMILY_COLUMNS,
+        "schema": FINAL_FAMILY_SCHEMA,
         "editable": FAMILY_EDITABLE_COLUMNS,
         "save_fields": FAMILY_SAVE_FIELDS,
         "status_editable": FAMILY_EDITABLE_COLUMNS,
     },
     "sponsor": {
-        "sheet": "adj_sponsor",
+        "sheet": "final_sponsor",
         "key": "sponsor_id",
-        "columns": ADJ_SPONSOR_COLUMNS,
-        "schema": ADJ_SPONSOR_SCHEMA,
+        "columns": FINAL_SPONSOR_COLUMNS,
+        "schema": FINAL_SPONSOR_SCHEMA,
         "editable": SPONSOR_EDITABLE_COLUMNS,
         "save_fields": SPONSOR_SAVE_FIELDS,
         "status_editable": SPONSOR_EDITABLE_COLUMNS,
@@ -446,10 +420,13 @@ _WRITE_LOCK = threading.Lock()
 
 
 def as_bool(value: Any) -> bool:
-    """Coerce a sheet value (bool or string) to bool, tolerating round-trips.
+    """Coerce a sheet value (bool, number, or string) to bool.
+
+    Tolerates round-trips.
 
     Args:
-        value: Raw cell value (may be None, bool, or "true"/"false" text).
+        value: Raw cell value (may be None, bool, "true"/"false" text, or
+            a numeric 1/0).
 
     Returns:
         The boolean value; None and unrecognized text are False.
@@ -458,7 +435,9 @@ def as_bool(value: Any) -> bool:
         return value
     if value is None:
         return False
-    return str(value).strip().lower() == "true"
+    if isinstance(value, int | float):
+        return value != 0
+    return str(value).strip().lower() in {"true", "1"}
 
 
 def _as_int(value: Any) -> int | None:
@@ -512,14 +491,18 @@ def _values_differ(left: Any, right: Any) -> bool:
 
 
 def compute_status(
-    has_edits: bool, has_note: bool, audited: bool, ignore: bool
+    has_edits: bool,
+    has_note: bool,
+    audited: bool = False,
+    ignore: bool = False,
 ) -> str:
     """Derive one entity's status (§5.3).
 
     Args:
         has_edits: Any adjudicable data column differs from the baseline.
         has_note: The clarification note is non-empty.
-        audited: The "information is audited" checkbox state.
+        audited: Optional compatibility input from a converted Boolean;
+            normal persisted rows derive this from ``status``.
         ignore: The ignore flag.
 
     Returns:
@@ -539,31 +522,19 @@ def compute_status(
 def status_of(
     row: dict[str, Any], baseline: dict[str, Any], entity: str
 ) -> str:
-    """Compute the status of one adj row against its baseline.
-
-    Special-needs selection is a control, not an override (§5.3): it
-    never counts toward ``has_edits``, mirroring today's checkbox which
-    never affected queue state.
-
-    Args:
-        row: The dense adj row (already normalized).
-        baseline: The entity's baseline values (§5.2).
-        entity: "child", "family", or "sponsor".
-
-    Returns:
-        The derived status string (§5.3).
-    """
+    """Compute one final row's status, using status as audit authority."""
+    if _as_text(row.get("status")) == STATUS_AUDITED:
+        return STATUS_AUDITED
     editable = ENTITY_SPECS[entity]["status_editable"]
     has_edits = any(
         _values_differ(row.get(column), baseline.get(column))
         for column in editable
     )
-    has_note = _as_text(row.get("require_clarification")) is not None
+    has_note = _as_text(row.get("clarification_notes")) is not None
     return compute_status(
         has_edits,
         has_note,
-        as_bool(row.get("audited")),
-        as_bool(row.get("ignore")),
+        ignore=as_bool(row.get("ignore")),
     )
 
 
@@ -732,7 +703,14 @@ def group_submissions(
 #: Columns an ignored row keeps, per entity, beyond the controls (§5.5).
 _IGNORE_RETAINED: dict[str, frozenset[str]] = {
     "child": frozenset(
-        {"zite_record_id", "first_name", "primary_email", "potential_duplicate"}
+        {
+            "zite_record_id",
+            "family_id",
+            "angel_id",
+            "first_name",
+            "primary_email",
+            "potential_duplicate",
+        }
     ),
     "family": frozenset(
         {
@@ -765,10 +743,10 @@ _IGNORE_RETAINED_CONTROLS: dict[str, tuple[str, ...]] = {
 
 
 def reduce_ignored(row: dict[str, Any], entity: str) -> dict[str, Any]:
-    """Reduce one adj row to its identity skeleton (§5.5, D7).
+    """Reduce one final row to its identity skeleton.
 
     Args:
-        row: The dense adj row (already carrying ``ignore`` set).
+        row: The full final row (already carrying ``ignore`` set).
         entity: "child", "family", or "sponsor".
 
     Returns:
@@ -792,7 +770,7 @@ def reduce_ignored(row: dict[str, Any], entity: str) -> dict[str, Any]:
 
 
 def normalize_row(entity: str, row: dict[str, Any]) -> dict[str, Any]:
-    """Coerce one adj row's cells to the documented schema types.
+    """Coerce one final row's cells to the documented schema types.
 
     Args:
         entity: "child", "family", or "sponsor".
@@ -814,82 +792,222 @@ def normalize_row(entity: str, row: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def build_adj_frame(entity: str, rows: list[dict[str, Any]]) -> pl.DataFrame:
-    """Build one typed adj DataFrame from row dicts (§4.3).
+def _entity_for_sheet(sheet: str) -> str:
+    """Resolve an active final sheet name to its entity name."""
+    for entity, spec in ENTITY_SPECS.items():
+        if spec["sheet"] == sheet:
+            return entity
+    raise AuditError(f"unknown persistent entity sheet {sheet!r}")
+
+
+def _normalized_key(entity: str, value: Any) -> str | None:
+    """Return one normalized, comparable entity key."""
+    if entity in {"family", "sponsor"}:
+        number = _as_int(value)
+        return str(number) if number is not None else None
+    return _as_text(value)
+
+
+def _validate_entity_rows(entity: str, rows: list[dict[str, Any]]) -> None:
+    """Reject null, duplicate, or silently coercible persistent identities."""
+    key = ENTITY_SPECS[entity]["key"]
+    for row in rows:
+        value = row.get(key)
+        if entity in {"family", "sponsor"} and value is not None:
+            if isinstance(value, bool):
+                raise AuditError(
+                    f"final_{entity} contains boolean {key} {value!r};"
+                    " stable IDs must remain integers"
+                )
+            if isinstance(value, float) and not value.is_integer():
+                raise AuditError(
+                    f"final_{entity} contains non-integral {key} {value!r};"
+                    " stable IDs must not be truncated"
+                )
+            if isinstance(value, str):
+                text = value.strip()
+                try:
+                    numeric = float(text)
+                except ValueError:
+                    numeric = None
+                if numeric is not None and not numeric.is_integer():
+                    raise AuditError(
+                        f"final_{entity} contains non-integral {key}"
+                        f" {value!r}; stable IDs must not be truncated"
+                    )
+    keys = [_normalized_key(entity, row.get(key)) for row in rows]
+    if any(value is None for value in keys):
+        raise AuditError(f"final_{entity} contains a missing {key} key")
+    present = [value for value in keys if value is not None]
+    if len(present) != len(set(present)):
+        raise AuditError(f"final_{entity} contains duplicate {key} keys")
+
+
+def validate_final_frame(sheet: str, frame: pl.DataFrame) -> None:
+    """Validate a complete persistent-final frame before any replacement.
+
+    Args:
+        sheet: Active ``final_*`` sheet name.
+        frame: Candidate full-store frame.
+
+    Raises:
+        AuditError: If columns are missing/extra or entity keys are invalid.
+    """
+    entity = _entity_for_sheet(sheet)
+    expected = list(ENTITY_SPECS[entity]["columns"])
+    missing = [column for column in expected if column not in frame.columns]
+    extra = [column for column in frame.columns if column not in expected]
+    if missing or extra:
+        raise AuditError(
+            f"{sheet} does not have the persistent full schema;"
+            f" missing={missing}, extra={extra}. Convert legacy projected"
+            " finals with `ccat consolidate-migrate`; never seed over them"
+        )
+    _validate_entity_rows(entity, frame.to_dicts())
+
+
+def build_final_frame(entity: str, rows: list[dict[str, Any]]) -> pl.DataFrame:
+    """Build and validate one typed persistent-final DataFrame.
 
     Args:
         entity: "child", "family", or "sponsor".
-        rows: The adj rows (values of any type; normalized here).
+        rows: Full entity rows; values are normalized here.
 
     Returns:
-        The frame with the documented column order and dtypes.
+        A frame with the complete schema, column order, and dtypes.
     """
     schema: dict[str, PolarsDataType] = ENTITY_SPECS[entity]["schema"]
+    _validate_entity_rows(entity, rows)
     normalized = [normalize_row(entity, row) for row in rows]
-    return pl.DataFrame(normalized, schema=schema)
-
-
-def project_final(
-    adj_frame: pl.DataFrame, final_columns: Sequence[str]
-) -> pl.DataFrame:
-    """Project one adj frame into its final sheet (§7.1, D2).
-
-    Drops every row with ``ignore == true`` and selects the documented
-    final column order.  The input frame must already be typed (built
-    via :func:`build_adj_frame`), so the projection keeps adj dtypes.
-
-    Args:
-        adj_frame: The typed adj frame.
-        final_columns: The documented final-sheet column order.
-
-    Returns:
-        The projection frame.
-    """
-    kept = adj_frame.filter(~pl.col("ignore"))
-    return kept.select(list(final_columns))
-
-
-def project_final_child(adj_frame: pl.DataFrame) -> pl.DataFrame:
-    """Project ``adj_child`` into ``final_child`` (§7.1, plus orphan rule).
-
-    Like :func:`project_final` (drop ignored rows, documented column
-    order) and additionally drops orphaned children — ``adj_child`` rows
-    with a null ``family_id`` (no matching family registration) never
-    reach ``final_child``; they stay in ``adj_child`` for the audit tool
-    to fix.
-
-    Args:
-        adj_frame: The typed adj_child frame.
-
-    Returns:
-        The projection frame.
-    """
-    kept = adj_frame.filter(
-        ~pl.col("ignore") & pl.col("family_id").is_not_null()
+    _validate_entity_rows(entity, normalized)
+    frame = pl.DataFrame(normalized, schema=schema).select(
+        list(ENTITY_SPECS[entity]["columns"])
     )
-    return kept.select(list(FINAL_CHILD_COLUMNS))
+    validate_final_frame(ENTITY_SPECS[entity]["sheet"], frame)
+    return frame
 
 
-def read_adj(cfg: Config, entity: str) -> list[dict[str, Any]]:
-    """Read one adj sheet as normalized row dicts.
+def read_final(
+    cfg: Config,
+    entity: str,
+    *,
+    workbook: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Read one full persistent entity store as normalized row dictionaries.
 
     Args:
         cfg: Pipeline configuration.
         entity: "child", "family", or "sponsor".
+        workbook: Optional explicit workbook path, used by conversion checks.
 
     Returns:
-        The adj rows; empty list when the sheet is absent.
+        Every stored row, including ignored/orphan/raw-missing entities.
+
+    Raises:
+        AuditError: If a projected legacy final, sparse legacy workbook, or
+            malformed full store is encountered.
     """
-    frame = read_sheet(cfg.excel_file, ENTITY_SPECS[entity]["sheet"])
+    path = workbook or cfg.excel_file
+    sheet = ENTITY_SPECS[entity]["sheet"]
+    frame = read_sheet(path, sheet)
     if frame is None:
+        if f"adj_{entity}" in list_sheets(path):
+            raise AuditError(
+                f"{path} contains adj_{entity} without {sheet}; this legacy"
+                " workbook requires `ccat consolidate-migrate` before use"
+            )
         return []
-    return [normalize_row(entity, row) for row in frame.to_dicts()]
+    validate_final_frame(sheet, frame)
+    rows = [normalize_row(entity, row) for row in frame.to_dicts()]
+    _validate_entity_rows(entity, rows)
+    return rows
+
+
+def read_final_frame(cfg: Config, entity: str) -> pl.DataFrame:
+    """Read one complete persistent store as its typed full frame."""
+    return build_final_frame(entity, read_final(cfg, entity))
+
+
+def eligible_output_rows(
+    rows: list[dict[str, Any]], entity: str
+) -> list[dict[str, Any]]:
+    """Apply the population filter of the retired projected final sheets.
+
+    Families and sponsors exclude ignored rows. Children additionally
+    exclude orphans (null ``family_id``). Other gates, such as audited
+    status, sponsor assignment, or angel linkage, remain consumer-specific.
+    """
+    return [
+        row
+        for row in rows
+        if not as_bool(row.get("ignore"))
+        and (entity != "child" or row.get("family_id") is not None)
+    ]
+
+
+def read_eligible_final(cfg: Config, entity: str) -> list[dict[str, Any]]:
+    """Read only rows eligible for downstream output consumers."""
+    return eligible_output_rows(read_final(cfg, entity), entity)
+
+
+def read_eligible_final_frame(cfg: Config, entity: str) -> pl.DataFrame:
+    """Read the legacy-projection-equivalent output population as a frame."""
+    return build_final_frame(entity, read_eligible_final(cfg, entity))
+
+
+def merge_owned_fields(
+    stored_rows: list[dict[str, Any]],
+    updated_rows: list[dict[str, Any]],
+    entity: str,
+    owned_columns: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Patch owned columns onto complete rows without dropping other state.
+
+    Args:
+        stored_rows: Complete current persistent store.
+        updated_rows: Rows containing new module-owned values.
+        entity: Entity whose key joins the two collections.
+        owned_columns: Fields that may change; all others come from storage.
+
+    Returns:
+        Complete stored rows with only the declared fields patched.
+    """
+    key = ENTITY_SPECS[entity]["key"]
+    updates = {
+        _normalized_key(entity, row.get(key)): row for row in updated_rows
+    }
+    merged: list[dict[str, Any]] = []
+    for stored in stored_rows:
+        row = dict(stored)
+        updated = updates.get(_normalized_key(entity, row.get(key)))
+        if updated is not None:
+            for column in owned_columns:
+                row[column] = updated.get(column)
+        merged.append(row)
+    _validate_entity_rows(entity, merged)
+    return merged
+
+
+def write_final_rows(
+    cfg: Config,
+    module: str,
+    entity: str,
+    rows: list[dict[str, Any]],
+) -> None:
+    """Atomically write one complete persistent store with formula context."""
+    sheet = ENTITY_SPECS[entity]["sheet"]
+    write_sheets(
+        cfg.excel_file,
+        module,
+        {sheet: build_final_frame(entity, rows)},
+        xmas=cfg.xmas if entity == "child" else None,
+    )
 
 
 def _upsert_row(
     rows: list[dict[str, Any]], row: dict[str, Any], key: str
 ) -> None:
-    """Insert or replace one adj row in place, keyed by its id column.
+    """Insert or replace one final row in place, keyed by its id column.
 
     Args:
         rows: The mutable row list.
@@ -909,9 +1027,9 @@ def _upsert_row(
 
 
 class ControlState(BaseModel):
-    """The three human controls shared by every entity (§5.3)."""
+    """Human-controlled final state shared by every entity."""
 
-    audited: bool = False
+    status: str = STATUS_NEW
     ignore: bool = False
     note: str | None = None
 
@@ -971,13 +1089,12 @@ class AuditData(BaseModel):
 
 
 def _default_row(entity: str, key_value: Any) -> dict[str, Any]:
-    """One all-default adj row (controls defaulted, §7.4)."""
+    """One all-default final row (controls defaulted, §7.4)."""
     row: dict[str, Any] = {
         column: None for column in ENTITY_SPECS[entity]["columns"]
     }
     row[ENTITY_SPECS[entity]["key"]] = key_value
     row["status"] = STATUS_NEW
-    row["audited"] = False
     row["ignore"] = False
     row["potential_duplicate"] = False
     if entity == "child":
@@ -1012,125 +1129,133 @@ def _raw_columns(entity: str) -> tuple[str, ...]:
 
 
 def load_audit_data(cfg: Config) -> AuditData:
-    """Load all entities, groups, orphans, and stats in one read (§9.2).
+    """Load the full final stores with current in-memory raw baselines.
 
-    Works from the prepared ``{entity}_submissions`` rows (cleaned,
-    ID-assigned, written by ``ccat screen``); legacy workbooks whose
-    submissions sheets predate that stage fall back to their ``raw_*``
-    sheets.  Duplicate-group baselines always come from the
-    ``child_submissions`` sheet alone (legacy raw rows are never
-    regrouped).
+    Current prepared submissions provide duplicate comparisons. Entities
+    absent from current raw remain visible using their stored final values
+    as the baseline, so raw-missing human work is neither lost nor invented.
 
     Args:
         cfg: Pipeline configuration.
 
     Returns:
-        The aggregate :class:`AuditData`.
+        Every persistent entity plus family/child groups and dashboard stats.
 
     Raises:
-        AuditError: If no prepared/raw rows exist (run ``ccat acquire``
-            and ``ccat screen``).
+        AuditError: If neither prepared nor persistent entities exist.
     """
-    sponsors = _entity_rows(cfg, "sponsor")
-    families = _entity_rows(cfg, "family")
-    children = _entity_rows(cfg, "child")
-    if not sponsors and not families and not children:
+    preparation = prepare_persistent_store(cfg, report=False)
+    final_rows = {
+        entity: read_final(cfg, entity)
+        for entity in ("sponsor", "family", "child")
+    }
+    if not any(preparation.rows.values()) and not any(final_rows.values()):
         raise AuditError(
             "no prepared sponsor/family/child rows;"
             " run `ccat acquire` and `ccat screen` first"
         )
-    adj_sponsors = {row["sponsor_id"]: row for row in read_adj(cfg, "sponsor")}
-    adj_families = {row["family_id"]: row for row in read_adj(cfg, "family")}
-    adj_children = {
-        row["zite_record_id"]: row for row in read_adj(cfg, "child")
+    prepared_groups = {
+        entity: _prepared_groups(preparation, entity)
+        for entity in ("sponsor", "family", "child")
     }
-    family_submission_frame = read_sheet(cfg.excel_file, "family_submissions")
-    email_to_submissions: dict[str, list[dict[str, Any]]] = {}
-    for row in (
-        family_submission_frame.to_dicts()
-        if family_submission_frame is not None
-        else []
-    ):
-        email = _as_text(row.get("primary_email"))
-        if email is not None:
-            email_to_submissions.setdefault(email, []).append(row)
-    dob_log = read_sheet(cfg.excel_file, "dob_conflict_log")
-    log_rows = dob_log.to_dicts() if dob_log is not None else []
-
     data = AuditData()
-    seen_sponsor_ids: set[int] = set()
-    for prepared in sponsors:
-        sponsor_id = _as_int(prepared.get("sponsor_id"))
-        if sponsor_id is None or sponsor_id in seen_sponsor_ids:
-            continue
-        seen_sponsor_ids.add(sponsor_id)
+
+    sponsor_final = {
+        _normalized_key("sponsor", row.get("sponsor_id")): row
+        for row in final_rows["sponsor"]
+    }
+    sponsor_tokens = sorted(
+        set(sponsor_final) | set(prepared_groups["sponsor"]),
+        key=lambda value: int(value or 0),
+    )
+    for token in sponsor_tokens:
+        group = prepared_groups["sponsor"].get(token, [])
+        prepared = group[0] if group else sponsor_final[token]
+        stored = sponsor_final.get(token)
+        row = stored or _seed_sponsor_row(prepared)
         baseline = {
             column: prepared.get(column) for column in _raw_columns("sponsor")
         }
-        adj = adj_sponsors.get(sponsor_id) or _default_row(
-            "sponsor", sponsor_id
-        )
         data.sponsors.append(
             SponsorEntry(
-                sponsor_id=sponsor_id,
-                adj=adj,
+                sponsor_id=int(token or 0),
+                adj=row,
                 baseline=baseline,
-                status=str(adj.get("status") or STATUS_NEW),
+                status=str(row.get("status") or STATUS_NEW),
             )
         )
-    seen_family_ids: set[int] = set()
-    for prepared in families:
-        family_id = _as_int(prepared.get("family_id"))
-        if family_id is None or family_id in seen_family_ids:
-            continue  # duplicate submissions share one family entity
-        seen_family_ids.add(family_id)
+
+    family_final = {
+        _normalized_key("family", row.get("family_id")): row
+        for row in final_rows["family"]
+    }
+    family_tokens = sorted(
+        set(family_final) | set(prepared_groups["family"]),
+        key=lambda value: int(value or 0),
+    )
+    for token in family_tokens:
+        group = prepared_groups["family"].get(token, [])
+        prepared = _family_survivor(group) if group else family_final[token]
+        stored = family_final.get(token)
+        row = stored or _seed_family_row(prepared)
         baseline = {
             column: prepared.get(column) for column in _raw_columns("family")
         }
-        adj = adj_families.get(family_id) or _default_row("family", family_id)
-        email = _as_text(prepared.get("primary_email"))
-        submissions = email_to_submissions.get(email, [])
         data.families.append(
             FamilyEntry(
-                family_id=family_id,
-                adj=adj,
+                family_id=int(token or 0),
+                adj=row,
                 baseline=baseline,
-                submissions=submissions,
-                status=str(adj.get("status") or STATUS_NEW),
+                submissions=group,
+                status=str(row.get("status") or STATUS_NEW),
             )
         )
-    child_groups = _child_groups(cfg)
-    keyed_child_groups: dict[
-        tuple[str | None, str | None], list[dict[str, Any]]
-    ] = {}
-    for values, rows in child_groups.items():
-        if len(values) == 2:
-            keyed_child_groups[(values[0], values[1])] = rows
-    for prepared in children:
-        record_id = _as_text(prepared.get("zite_record_id"))
+
+    child_final = {
+        _normalized_key("child", row.get("zite_record_id")): row
+        for row in final_rows["child"]
+    }
+    child_tokens = [
+        token for token in prepared_groups["child"] if token is not None
+    ] + [
+        token
+        for token in child_final
+        if token not in prepared_groups["child"] and token is not None
+    ]
+    groups = _child_groups(cfg, preparation)
+    for record_id in child_tokens:
         if record_id is None:
             continue
-        group = keyed_child_groups.get(
-            (
-                _as_text(prepared.get("primary_email")),
-                _as_text(prepared.get("first_name")),
+        group = prepared_groups["child"].get(record_id, [])
+        prepared = group[0] if group else child_final[record_id]
+        duplicate_group = (
+            groups.get(
+                (
+                    _as_text(prepared.get("primary_email")),
+                    _as_text(prepared.get("first_name")),
+                ),
+                [],
             )
+            if group
+            else []
         )
-        baseline = _child_baseline(prepared, group or [])
-        adj = adj_children.get(record_id) or _default_row("child", record_id)
+        baseline = _child_baseline(prepared, duplicate_group)
+        stored = child_final.get(record_id)
+        row = stored or _seed_child_row(prepared, baseline, cfg)
         entry = ChildEntry(
             zite_record_id=record_id,
-            family_id=_as_int(prepared.get("family_id")),
-            angel_id=_as_text(prepared.get("angel_id")),
-            adj=adj,
+            family_id=_as_int(row.get("family_id")),
+            angel_id=_as_text(row.get("angel_id")),
+            adj=row,
             baseline=baseline,
-            submissions=group or [],
-            status=str(adj.get("status") or STATUS_NEW),
-            conflict_note=dob_conflict_notes(log_rows, record_id),
+            submissions=duplicate_group,
+            status=str(row.get("status") or STATUS_NEW),
+            conflict_note=dob_conflict_notes(preparation.dob_log, record_id),
         )
         data.children.append(entry)
         if entry.family_id is None:
             data.orphans.append(entry)
+
     data.sponsor_stats = _stats(
         [entry.status for entry in data.sponsors],
         [entry.status for entry in data.children],
@@ -1144,55 +1269,21 @@ def load_audit_data(cfg: Config) -> AuditData:
 
 
 def _entity_rows(cfg: Config, entity: str) -> list[dict[str, Any]]:
-    """Read one entity's prepared rows (raw rows fill any gaps).
-
-    The ``{entity}_submissions`` rows are the cleaned, ID-assigned
-    submissions written by ``ccat screen``.  Legacy workbooks (written
-    before that stage prepared submissions) have no such sheet; their
-    ``raw_{entity}`` rows -- which carried the same columns under the
-    old pipeline -- are used instead.  Rows present only in the raw
-    sheet (e.g. a legacy row missing from partial submissions) are
-    appended after the prepared rows.
-
-    Args:
-        cfg: Pipeline configuration.
-        entity: "sponsor", "family", or "child".
-
-    Returns:
-        The prepared rows plus any raw-only rows.
-    """
-    prepared_frame = read_sheet(cfg.excel_file, f"{entity}_submissions")
-    raw_frame = read_sheet(cfg.excel_file, f"raw_{entity}")
-    prepared = prepared_frame.to_dicts() if prepared_frame is not None else []
-    if raw_frame is None:
-        return prepared
-    known = {
-        str(row.get("zite_record_id") or "")
-        for row in prepared
-        if row.get("zite_record_id") is not None
-    }
-    extra = [
-        row
-        for row in raw_frame.to_dicts()
-        if str(row.get("zite_record_id") or "") not in known
-    ]
-    return [*prepared, *extra]
+    """Return freshly prepared raw rows with stable persistent identities."""
+    return prepare_persistent_store(cfg, report=False).rows[entity]
 
 
 def _child_groups(
     cfg: Config,
+    preparation: Preparation | None = None,
 ) -> dict[tuple[str | None, str | None], list[dict[str, Any]]]:
-    """Duplicate-child groups from the ``child_submissions`` sheet (§6).
-
-    Legacy workbooks without that sheet group nothing: their raw rows
-    already carry one adjudicated row per child.
-    """
-    frame = read_sheet(cfg.excel_file, "child_submissions")
-    if frame is None:
-        return {}
+    """Return duplicate-child comparison groups from in-memory preparation."""
+    current = preparation or prepare_persistent_store(cfg, report=False)
     return {
         values: rows
-        for values, rows in group_submissions(frame.to_dicts(), "child").items()
+        for values, rows in group_submissions(
+            current.rows["child"], "child"
+        ).items()
         if len(values) == 2
     }
 
@@ -1224,7 +1315,7 @@ def _stats(statuses: list[str], child_statuses: list[str]) -> AuditStats:
 def _seed_child_row(
     raw: dict[str, Any], baseline: dict[str, Any], cfg: Config
 ) -> dict[str, Any]:
-    """Build one seeded adj_child row from its baseline (§7.4).
+    """Build one seeded final-child row from its baseline (§7.4).
 
     Orphaned children (``family_id`` null — no matching family
     registration) get the ``ORPHAN_NOTE`` clarification note, so they
@@ -1235,12 +1326,12 @@ def _seed_child_row(
         row[column] = baseline.get(column, raw.get(column))
     row["age_at_xmas"] = _computed_age(row.get("dob"), cfg)
     if row.get("family_id") is None:
-        row["require_clarification"] = ORPHAN_NOTE
+        row["clarification_notes"] = ORPHAN_NOTE
     return row
 
 
 def _seed_family_row(raw: dict[str, Any]) -> dict[str, Any]:
-    """Build one seeded adj_family row from the coalesced survivor (§7.4)."""
+    """Build one seeded final-family row from the stable survivor."""
     row = _default_row("family", _as_int(raw.get("family_id")))
     for column in (*FAMILY_LINKAGE_COLUMNS, *FAMILY_EDITABLE_COLUMNS):
         row[column] = raw.get(column)
@@ -1248,7 +1339,7 @@ def _seed_family_row(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _seed_sponsor_row(raw: dict[str, Any]) -> dict[str, Any]:
-    """Build one seeded adj_sponsor row from its raw row (§7.4)."""
+    """Build one seeded final-sponsor row from its prepared row."""
     row = _default_row("sponsor", _as_int(raw.get("sponsor_id")))
     for column in (*SPONSOR_LINKAGE_COLUMNS, *SPONSOR_EDITABLE_COLUMNS):
         row[column] = raw.get(column)
@@ -1277,114 +1368,269 @@ def _computed_age(dob: Any, cfg: Config) -> int | None:
         return None
 
 
-def ensure_adj_sheets(cfg: Config) -> None:
-    """Seed adj rows for every prepared entity missing one (§7.4, idempotent).
+def _apply_diagnostics(
+    row: dict[str, Any],
+    duplicate_text: str | None,
+    validation_notes: list[str],
+) -> None:
+    """Merge global duplicate/validation diagnostics without replacing text."""
+    row["potential_duplicate"] = bool(
+        as_bool(row.get("potential_duplicate")) or duplicate_text is not None
+    )
+    note = "; ".join([*validation_notes, duplicate_text or ""]).strip("; ")
+    row["clarification_notes"] = append_note(
+        row.get("clarification_notes"), note or None
+    )
 
-    ``ccat screen`` seeds the adj sheets itself now (§7.3); this
-    backstop only fills rows missing from the workbook -- e.g. legacy
-    workbooks that were never re-screened.  Every prepared entity
-    without an adj row gets a dense row seeded from its prepared row
-    (§5.2/§6), computed columns filled, controls defaulted.
-    ``final_child`` is re-projected afterwards (with ``xmas``, §7.2).
+
+def _refresh_metadata(
+    existing: dict[str, Any], prepared: dict[str, Any], entity: str
+) -> dict[str, Any]:
+    """Copy the survivor's complete source-metadata bundle.
+
+    Args:
+        existing: Current persistent row.
+        prepared: The selected survivor submission.
+        entity: "child", "family", or "sponsor".
+
+    Returns:
+        The row with stable entity key and one consistent source bundle.
+    """
+    row = dict(existing)
+    if as_bool(row.get("ignore")):
+        return row
+    # Preserve the entity key, but copy every other linkage field -- including
+    # family zite_record_id -- so identity and metadata describe one source.
+    excluded = {ENTITY_SPECS[entity]["key"]}
+    for column in _linkage_columns(entity):
+        if column not in excluded and column in prepared:
+            row[column] = prepared.get(column)
+    return row
+
+
+def _family_survivor(group: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the deterministic earliest submission for one family group."""
+    return min(
+        group,
+        key=lambda row: (
+            _created_value(row) or "",
+            str(row.get("zite_record_id") or ""),
+        ),
+    )
+
+
+def _reconcile_rows(
+    entity: str,
+    existing: list[dict[str, Any]],
+    prepared_groups: dict[Any, list[dict[str, Any]]],
+    preparation: Preparation,
+    cfg: Config,
+    refresh_existing: bool,
+) -> list[dict[str, Any]]:
+    """Append new entities and deliberately merge diagnostics into old rows."""
+    key = ENTITY_SPECS[entity]["key"]
+    dob_notes = dob_notes_by_child(preparation.dob_log)
+    merged: list[dict[str, Any]] = []
+    consumed: set[str] = set()
+    for stored in existing:
+        token = _normalized_key(entity, stored.get(key))
+        row = dict(stored)
+        group = prepared_groups.get(token)
+        if group is not None and refresh_existing:
+            prepared = (
+                _family_survivor(group) if entity == "family" else group[0]
+            )
+            row = _refresh_metadata(row, prepared, entity)
+            if entity == "child" and not as_bool(row.get("ignore")):
+                row["family_id"] = prepared.get("family_id")
+                row["angel_id"] = prepared.get("angel_id")
+            record_ids = [
+                str(item.get("zite_record_id") or "") for item in group
+            ]
+            duplicate_text = (
+                duplicate_note(
+                    record_ids[0], preparation.survivors[entity], entity
+                )
+                if record_ids
+                else None
+            )
+            validation = [
+                note
+                for current_id in record_ids
+                for note in preparation.validation_notes[entity].get(
+                    current_id, []
+                )
+            ]
+            _apply_diagnostics(row, duplicate_text, validation)
+            if entity == "child":
+                row["potential_anomoly"] = merge_anomoly(
+                    row.get("potential_anomoly"),
+                    dob_notes.get(str(row.get("zite_record_id") or "")),
+                )
+                if row.get("family_id") is None:
+                    row["clarification_notes"] = append_note(
+                        row.get("clarification_notes"), ORPHAN_NOTE
+                    )
+                    if row.get("status") == STATUS_NEW:
+                        row["status"] = STATUS_NEEDS_CLARIFICATION
+        if token is not None:
+            consumed.add(token)
+        merged.append(row)
+
+    for token, group in prepared_groups.items():
+        if token in consumed:
+            continue
+        prepared = _family_survivor(group) if entity == "family" else group[0]
+        if entity == "child":
+            row = _seed_child_row(
+                prepared, _child_baseline(prepared, group), cfg
+            )
+        elif entity == "family":
+            row = _seed_family_row(prepared)
+        else:
+            row = _seed_sponsor_row(prepared)
+        record_ids = [str(item.get("zite_record_id") or "") for item in group]
+        duplicate_text = (
+            duplicate_note(record_ids[0], preparation.survivors[entity], entity)
+            if record_ids
+            else None
+        )
+        validation = [
+            note
+            for current_id in record_ids
+            for note in preparation.validation_notes[entity].get(current_id, [])
+        ]
+        _apply_diagnostics(row, duplicate_text, validation)
+        if entity == "child":
+            row["potential_anomoly"] = merge_anomoly(
+                row.get("potential_anomoly"),
+                dob_notes.get(str(row.get("zite_record_id") or "")),
+            )
+            if row.get("family_id") is None:
+                row["status"] = STATUS_NEEDS_CLARIFICATION
+        merged.append(row)
+
+    if refresh_existing:
+        for row in merged:
+            if as_bool(row.get("ignore")):
+                continue
+            if entity == "child":
+                row["age_at_xmas"] = _computed_age(row.get("dob"), cfg)
+            elif entity == "sponsor":
+                bounds = AGE_PREF_BOUNDS.get(
+                    str(row.get("age_preference") or "")
+                )
+                row["pref_age_min"] = bounds[0] if bounds else None
+                row["pref_age_max"] = bounds[1] if bounds else None
+    _validate_entity_rows(entity, merged)
+    return merged
+
+
+def _prepared_groups(
+    preparation: Preparation, entity: str
+) -> dict[Any, list[dict[str, Any]]]:
+    """Index prepared submissions by their stable persistent entity key."""
+    groups: dict[Any, list[dict[str, Any]]] = {}
+    for row in preparation.rows[entity]:
+        key = ENTITY_SPECS[entity]["key"]
+        token = _normalized_key(entity, row.get(key))
+        if token is None:
+            raise AuditError(f"prepared {entity} row lacks stable {key}")
+        groups.setdefault(token, []).append(row)
+    return groups
+
+
+def reconcile_preparation(
+    cfg: Config,
+    preparation: Preparation,
+    module: str,
+    *,
+    refresh_existing: bool,
+    existing: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Reconcile and atomically persist all changed full final stores.
+
+    ``refresh_existing=True`` is the screen path: safe source metadata,
+    stable child linkage, global diagnostics, and computed fields merge into
+    existing rows. ``False`` is the audit backstop: only genuinely missing
+    entities are seeded. Raw-missing rows are retained in both modes.
+    """
+    stored = existing or {
+        entity: read_final(cfg, entity)
+        for entity in ("sponsor", "family", "child")
+    }
+    updated: dict[str, list[dict[str, Any]]] = {}
+    sheets: dict[str, pl.DataFrame] = {}
+    for entity in ("sponsor", "family", "child"):
+        rows = _reconcile_rows(
+            entity,
+            stored[entity],
+            _prepared_groups(preparation, entity),
+            preparation,
+            cfg,
+            refresh_existing,
+        )
+        updated[entity] = rows
+        normalized_old = [normalize_row(entity, row) for row in stored[entity]]
+        normalized_new = [normalize_row(entity, row) for row in rows]
+        if normalized_new != normalized_old:
+            sheets[ENTITY_SPECS[entity]["sheet"]] = build_final_frame(
+                entity, rows
+            )
+    if sheets:
+        write_sheets(
+            cfg.excel_file,
+            module,
+            sheets,
+            xmas=cfg.xmas if "final_child" in sheets else None,
+        )
+    return updated
+
+
+def prepare_persistent_store(cfg: Config, report: bool = True) -> Preparation:
+    """Prepare raw rows against the current validated persistent identities.
+
+    Args:
+        cfg: Pipeline configuration.
+        report: Emit duplicate/DOB-conflict warnings when True; audit call
+            sites pass False so startup only checks conflicts silently.
+
+    Returns:
+        The pure preparation result for the workbook's current raw/final rows.
+    """
+    existing = {
+        entity: read_final(cfg, entity)
+        for entity in ("sponsor", "family", "child")
+    }
+    return prepare_workbook(cfg, existing, report=report)
+
+
+def ensure_final_sheets(cfg: Config) -> None:
+    """Backfill only genuinely missing entities before opening the audit UI.
+
+    Existing persistent rows are never refreshed or projected by audit
+    startup. Missing raw data remains an actionable acquire/screen error.
 
     Args:
         cfg: Pipeline configuration.
 
     Raises:
-        AuditError: If no prepared rows exist, or the workbook's
-            ``adj_child`` still has the pre-v2 sparse schema (a legacy
-            workbook the v2 audit tool must never write; bootstrap the
-            v2 workbook with ``ccat audit-migrate`` instead, §10.1/§11).
+        AuditError: If no prepared raw rows exist or finals are malformed.
     """
     with _WRITE_LOCK:
-        existing_adj = read_sheet(cfg.excel_file, "adj_child")
-        if existing_adj is not None and "screened" not in existing_adj.columns:
-            raise AuditError(
-                f"adj_child in {cfg.excel_file} has the pre-v2 sparse"
-                " schema; this workbook predates the v2 audit system and"
-                " must never be written by it. Bootstrap the v2 workbook"
-                " with `ccat audit-migrate --config"
-                " config/ccat_2026_v2.json --from <old workbook>`"
-                " (audit_architecture.md §10.1)"
-            )
-        prepared_sponsors = _entity_rows(cfg, "sponsor")
-        prepared_families = _entity_rows(cfg, "family")
-        prepared_children = _entity_rows(cfg, "child")
-        if (
-            not prepared_sponsors
-            and not prepared_families
-            and not prepared_children
-        ):
+        existing = {
+            entity: read_final(cfg, entity)
+            for entity in ("sponsor", "family", "child")
+        }
+        preparation = prepare_workbook(cfg, existing, report=False)
+        if not any(preparation.rows.values()) and not any(existing.values()):
             raise AuditError(
                 "no prepared sponsor/family/child rows;"
                 " run `ccat acquire` and `ccat screen` first"
             )
-        adj_children = read_adj(cfg, "child")
-        adj_families = read_adj(cfg, "family")
-        adj_sponsors = read_adj(cfg, "sponsor")
-        known_children = {row["zite_record_id"] for row in adj_children}
-        known_families = {row["family_id"] for row in adj_families}
-        known_sponsors = {row["sponsor_id"] for row in adj_sponsors}
-
-        child_groups = _child_groups(cfg)
-        added_children = 0
-        for prepared in prepared_children:
-            record_id = _as_text(prepared.get("zite_record_id"))
-            if record_id is None or record_id in known_children:
-                continue
-            group = child_groups.get(
-                (
-                    _as_text(prepared.get("primary_email")),
-                    _as_text(prepared.get("first_name")),
-                )
-            )
-            baseline = _child_baseline(prepared, group or [])
-            adj_children.append(_seed_child_row(prepared, baseline, cfg))
-            added_children += 1
-        added_families = 0
-        for prepared in prepared_families:
-            family_id = _as_int(prepared.get("family_id"))
-            if family_id is None or family_id in known_families:
-                continue
-            adj_families.append(_seed_family_row(prepared))
-            known_families.add(family_id)
-            added_families += 1
-        added_sponsors = 0
-        for prepared in prepared_sponsors:
-            sponsor_id = _as_int(prepared.get("sponsor_id"))
-            if sponsor_id is None or sponsor_id in known_sponsors:
-                continue
-            adj_sponsors.append(_seed_sponsor_row(prepared))
-            known_sponsors.add(sponsor_id)
-            added_sponsors += 1
-
-        sheets: dict[str, pl.DataFrame] = {}
-        if added_children:
-            sheets["adj_child"] = build_adj_frame("child", adj_children)
-        if added_families:
-            sheets["adj_family"] = build_adj_frame("family", adj_families)
-        if added_sponsors:
-            sheets["adj_sponsor"] = build_adj_frame("sponsor", adj_sponsors)
-        if added_children or added_families or added_sponsors:
-            logger.info(
-                "seeded adj rows: %d children, %d families, %d sponsors",
-                added_children,
-                added_families,
-                added_sponsors,
-            )
-        # final_child is always re-projected at startup (§7.4), with the
-        # adj sheets in the same atomic write when any were seeded.
-        # Orphaned children (family_id null) never reach final_child.
-        sheets["final_child"] = project_final_child(
-            build_adj_frame("child", adj_children)
+        reconcile_preparation(
+            cfg, preparation, "audit", refresh_existing=False, existing=existing
         )
-        write_sheets(cfg.excel_file, "audit", sheets, xmas=cfg.xmas)
-
-
-def _project_final_child(cfg: Config, adj_rows: list[dict[str, Any]]) -> None:
-    """Re-project ``final_child`` from adj rows (§7.2, with ``xmas``)."""
-    frame = project_final_child(build_adj_frame("child", adj_rows))
-    write_sheets(cfg.excel_file, "audit", {"final_child": frame}, xmas=cfg.xmas)
 
 
 # ---------------------------------------------------------------------------
@@ -1404,8 +1650,8 @@ def _save_row(
         cfg: Pipeline configuration.
         entity: "child", "family", or "sponsor".
         key_value: The row's key (zite id / family_id / sponsor_id).
-        payload: Edited data columns plus ``audited``/``ignore``/
-            ``require_clarification`` controls.
+        payload: Edited data columns plus ``status``/``ignore``/
+            ``clarification_notes`` controls.
 
     Returns:
         The persisted row.
@@ -1421,17 +1667,19 @@ def _save_row(
     ]
     if unknown:
         raise AuditError(f"unknown {entity} fields: {sorted(unknown)}")
-    raw = _find_raw_row(cfg, entity, key_value)
+    raw, raw_is_current = _find_raw_row_state(cfg, entity, key_value)
     if raw is None:
         raise AuditError(f"unknown {entity} {key_value!r}")
     with _WRITE_LOCK:
-        rows = read_adj(cfg, entity)
+        rows = read_final(cfg, entity)
         existing = next(
             (row for row in rows if str(row.get(key)) == str(key_value)), None
         )
         ignore_now = as_bool(payload.get("ignore"))
         ignore_before = as_bool(existing.get("ignore")) if existing else False
-        baseline = _entity_baseline(cfg, entity, raw)
+        baseline = _entity_baseline(
+            cfg, entity, raw, is_current_raw=raw_is_current
+        )
 
         if ignore_now or (ignore_before and not ignore_now):
             # Ignore, or un-ignore: either way the data columns restart
@@ -1448,11 +1696,18 @@ def _save_row(
         for column in _linkage_columns(entity):
             row[column] = raw.get(column)
         row[key] = key_value
-        # Controls.
-        row["audited"] = as_bool(payload.get("audited"))
+        # Controls. `status` is the sole audit authority; no Boolean control
+        # exists. Omitted status preserves an existing audited state for
+        # backward-compatible direct callers; UI always supplies it.
+        requested_status = _as_text(payload.get("status"))
+        audited_now = requested_status == STATUS_AUDITED or (
+            requested_status is None
+            and existing is not None
+            and _as_text(existing.get("status")) == STATUS_AUDITED
+        )
         row["ignore"] = ignore_now
-        note = _as_text(payload.get("require_clarification"))
-        row["require_clarification"] = note
+        note = _as_text(payload.get("clarification_notes"))
+        row["clarification_notes"] = note
         row["audited_at"] = datetime.now(UTC).isoformat()
         # Entity-specific computed columns.
         if entity == "child":
@@ -1467,6 +1722,9 @@ def _save_row(
                 row[column] = existing.get(column)
         if ignore_now:
             row = reduce_ignored(row, entity)
+            if existing is not None:
+                for column in _module_owned_columns(entity):
+                    row[column] = existing.get(column)
             row["status"] = STATUS_IGNORED
         else:
             if entity == "child":
@@ -1476,20 +1734,20 @@ def _save_row(
                     row.get("potential_anomoly"),
                     dob_conflict_notes(log_rows, str(key_value)),
                 )
-            row["status"] = status_of(row, baseline, entity)
+            if audited_now:
+                row["status"] = STATUS_AUDITED
+            else:
+                row["status"] = requested_status or STATUS_NEW
+                row["status"] = status_of(row, baseline, entity)
         _upsert_row(rows, row, key)
         sheets: dict[str, pl.DataFrame] = {
-            spec["sheet"]: build_adj_frame(entity, rows)
+            spec["sheet"]: build_final_frame(entity, rows)
         }
-        if entity == "child":
-            sheets["final_child"] = project_final_child(
-                build_adj_frame("child", rows)
-            )
         write_sheets(
             cfg.excel_file,
             "audit",
             sheets,
-            xmas=cfg.xmas if "final_child" in sheets else None,
+            xmas=cfg.xmas if entity == "child" else None,
         )
     return row
 
@@ -1529,10 +1787,26 @@ def _seed_row_from_baseline(
 
 
 def _entity_baseline(
-    cfg: Config, entity: str, raw: dict[str, Any]
+    cfg: Config,
+    entity: str,
+    raw: dict[str, Any],
+    *,
+    is_current_raw: bool = True,
 ) -> dict[str, Any]:
-    """Return the entity's baseline (§5.2): prepared row, or combined child group."""
+    """Return the entity baseline without borrowing another submission.
+
+    Args:
+        cfg: Pipeline configuration.
+        entity: Entity name.
+        raw: Current prepared row, or the raw-missing stored fallback.
+        is_current_raw: False when ``raw`` is a raw-missing stored row.
+
+    Returns:
+        Linkage/editable baseline values.
+    """
     if entity != "child":
+        return {column: raw.get(column) for column in _raw_columns(entity)}
+    if not is_current_raw:
         return {column: raw.get(column) for column in _raw_columns(entity)}
     group = _child_groups(cfg).get(
         (_as_text(raw.get("primary_email")), _as_text(raw.get("first_name")))
@@ -1540,27 +1814,39 @@ def _entity_baseline(
     return _child_baseline(raw, group or [])
 
 
-def _find_raw_row(
+def _find_raw_row_state(
     cfg: Config, entity: str, key_value: Any
-) -> dict[str, Any] | None:
-    """Find one entity's prepared row by key.
+) -> tuple[dict[str, Any] | None, bool]:
+    """Find a row and whether it came from current prepared raw data.
 
-    Searches the prepared ``{entity}_submissions`` rows (legacy
-    workbooks fall back to their ``raw_{entity}`` sheet), keeping the
-    first matching submission (the survivor: prepared rows are sorted
-    by created ascending).
+    Returns:
+        (row, is_current_raw); the fallback is a raw-missing stored row.
     """
     key = ENTITY_SPECS[entity]["key"]
     for row in _entity_rows(cfg, entity):
         if str(row.get(key)) == str(key_value):
-            return row
-    return None
+            return row, True
+    for row in read_final(cfg, entity):
+        if str(row.get(key)) == str(key_value):
+            return row, False
+    return None, False
+
+
+def _find_raw_row(
+    cfg: Config, entity: str, key_value: Any
+) -> dict[str, Any] | None:
+    """Find a current prepared row, or its raw-missing persistent row.
+
+    The fallback deliberately uses stored effective values as the baseline;
+    it never reconstructs raw-missing entities from another source.
+    """
+    return _find_raw_row_state(cfg, entity, key_value)[0]
 
 
 def save_child(
     cfg: Config, zite_record_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Save one child's dense adj row and re-project final_child (§9.2).
+    """Save one child's complete final row directly (§9.2).
 
     Args:
         cfg: Pipeline configuration.
@@ -1577,8 +1863,8 @@ def save_child(
     raw = _find_raw_row(cfg, "child", zite_record_id)
     if (
         raw is not None
-        and raw.get("angel_id") is None
-        and as_bool(payload.get("audited"))
+        and raw.get("family_id") is None
+        and _as_text(payload.get("status")) == STATUS_AUDITED
     ):
         raise AuditError(
             "orphaned child cannot be marked audited before a matching"
@@ -1590,7 +1876,7 @@ def save_child(
 def save_family(
     cfg: Config, family_id: int, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Save one family's dense adj row (assignment columns preserved).
+    """Save one family's complete final row (assignment columns preserved).
 
     Args:
         cfg: Pipeline configuration.
@@ -1609,7 +1895,7 @@ def save_family(
 def save_sponsor(
     cfg: Config, sponsor_id: int, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """Save one sponsor's dense adj row (assignment columns preserved).
+    """Save one sponsor's complete final row (assignment columns preserved).
 
     Args:
         cfg: Pipeline configuration.
