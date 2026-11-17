@@ -5,54 +5,42 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
+from openpyxl import Workbook
 import pytest
 
 import ccat.stats as stats
+from ccat.audit.store import build_final_frame
 from ccat.config import Config, ReportSpec
-from ccat.io import write_sheets
+from ccat.io import list_sheets, write_sheets
 from ccat.stats import StatsError
-
-CHILD_SCHEMA: dict[str, Any] = {
-    "zite_record_id": pl.String,
-    "family_id": pl.Int64,
-    "angel_id": pl.String,
-    "created": pl.Datetime,
-    "age_at_xmas": pl.Int64,
-    "gender": pl.String,
-}
-
-FAMILY_SCHEMA: dict[str, Any] = {
-    "family_id": pl.Int64,
-    "gift_pickup_location": pl.String,
-    "assigned_sponsor_id": pl.Int64,
-}
-
-SPONSOR_SCHEMA: dict[str, Any] = {
-    "sponsor_id": pl.Int64,
-    "num_children": pl.Int64,
-    "dropoff_location": pl.String,
-}
 
 
 def sponsor_row(
-    sponsor_id: int, num_children: int, location: str | None
+    sponsor_id: int,
+    num_children: int,
+    location: str | None,
+    *,
+    ignore: bool = False,
 ) -> dict[str, Any]:
-    """One sponsor row for stats tests."""
+    """One full-store sponsor row for stats tests."""
     return {
         "sponsor_id": sponsor_id,
         "num_children": num_children,
         "dropoff_location": location,
+        "ignore": ignore,
     }
 
 
 def child_row(
     record_id: str,
-    family_id: int,
+    family_id: int | None,
     created: datetime,
     gender: str | None,
     age: int = 8,
+    *,
+    ignore: bool = False,
 ) -> dict[str, Any]:
-    """One final_child row for stats tests."""
+    """One full-store child row for stats tests."""
     return {
         "zite_record_id": record_id,
         "family_id": family_id,
@@ -60,17 +48,23 @@ def child_row(
         "created": created,
         "age_at_xmas": age,
         "gender": gender,
+        "ignore": ignore,
     }
 
 
 def family_row(
-    family_id: int, location: str | None, sponsor: int | None
+    family_id: int,
+    location: str | None,
+    sponsor: int | None,
+    *,
+    ignore: bool = False,
 ) -> dict[str, Any]:
-    """One final_family row for stats tests."""
+    """One full-store family row for stats tests."""
     return {
         "family_id": family_id,
         "gift_pickup_location": location,
         "assigned_sponsor_id": sponsor,
+        "ignore": ignore,
     }
 
 
@@ -80,24 +74,107 @@ def _seed(
     families: list[dict[str, Any]],
     sponsors: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Write final_child, final_family, and final_sponsor sheets."""
+    """Write complete persistent-final stores."""
     write_sheets(
         cfg.excel_file,
         "audit",
-        {"final_child": pl.DataFrame(children, schema=CHILD_SCHEMA)},
+        {"final_child": build_final_frame("child", children)},
         xmas=cfg.xmas,
     )
     write_sheets(
         cfg.excel_file,
         "match",
-        {"final_family": pl.DataFrame(families, schema=FAMILY_SCHEMA)},
+        {"final_family": build_final_frame("family", families)},
     )
     if sponsors is not None:
         write_sheets(
             cfg.excel_file,
             "match",
-            {"final_sponsor": pl.DataFrame(sponsors, schema=SPONSOR_SCHEMA)},
+            {"final_sponsor": build_final_frame("sponsor", sponsors)},
         )
+
+
+def _raw_frame(
+    cfg: Config, entity: str, rows: list[dict[str, Any]]
+) -> pl.DataFrame:
+    """Build a raw sheet containing every configured source column."""
+    complete = [
+        {**{column: None for column in cfg.tables[entity].columns}, **row}
+        for row in rows
+    ]
+    return pl.DataFrame(complete)
+
+
+def _seed_raw(cfg: Config, *, include_child: bool = True) -> None:
+    """Seed raw forms for ephemeral preparation, not submissions sheets."""
+    sheets = {
+        "raw_sponsor": _raw_frame(
+            cfg,
+            "sponsor",
+            [
+                {
+                    "zite_record_id": "sponsor-1",
+                    "create": "2026-10-01T08:00:00",
+                    "email": "sam@example.com",
+                    "first_name": "Sam",
+                    "num_children": 2,
+                    "dropoff_location": "Hancock",
+                }
+            ],
+        ),
+        "raw_family": _raw_frame(
+            cfg,
+            "family",
+            [
+                {
+                    "zite_record_id": "family-1",
+                    "zite_created_at": "2026-10-01T09:00:00",
+                    "created": "2026-10-01T09:00:00",
+                    "primary_email": "family@example.com",
+                    "first_name": "Caroline",
+                    "gift_pickup_location": "Hancock",
+                }
+            ],
+        ),
+    }
+    if include_child:
+        sheets["raw_child"] = _raw_frame(
+            cfg,
+            "child",
+            [
+                {
+                    "zite_record_id": "rec1",
+                    "zite_created_at": "2026-10-02T11:00:00",
+                    "created": "2026-10-02T12:00:00",
+                    "primary_email": "family@example.com",
+                    "first_name": "Aspen",
+                    "dob": "2018-01-01",
+                    "age_reported": 8,
+                    "gender": "Male",
+                },
+                {
+                    "zite_record_id": "rec2",
+                    "zite_created_at": "2026-10-02T11:00:00",
+                    "created": "2026-10-02T12:00:00",
+                    "primary_email": "family@example.com",
+                    "first_name": "Birch",
+                    "dob": "2021-01-01",
+                    "age_reported": 5,
+                    "gender": "Female",
+                },
+                {
+                    "zite_record_id": "rec-orphan",
+                    "zite_created_at": "2026-10-02T11:00:00",
+                    "created": "2026-10-02T12:00:00",
+                    "primary_email": "orphan@example.com",
+                    "first_name": "Cedar",
+                    "dob": "2017-01-01",
+                    "age_reported": 9,
+                    "gender": "Male",
+                },
+            ],
+        )
+    write_sheets(cfg.excel_file, "acquire", sheets)
 
 
 def _report_cfg(cfg: Config, tmp_path: Path) -> Config:
@@ -142,6 +219,39 @@ class TestNormalizeHelpers:
         )
         assert ordered[:3] == ["Hancock", "Calumet", "Zoo"]
         assert ordered[-1] == "Unknown"
+
+
+class TestOutputEligibility:
+    """Default report sources match the legacy projected populations."""
+
+    def test_filters_entities_independently(self, cfg: Config) -> None:
+        """Ignored rows and orphans vanish; children of ignored families stay."""
+        stamp = datetime(2026, 10, 2, 12, 0)
+        _seed(
+            cfg,
+            [
+                child_row("rec1", 1, stamp, "Male"),
+                child_row("rec2", 1, stamp, "Female", ignore=True),
+                child_row("rec3", 2, stamp, "Female"),
+                child_row("rec-orphan", None, stamp, "Male"),
+            ],
+            [
+                family_row(1, "Hancock", 7),
+                family_row(2, "Calumet", 8, ignore=True),
+            ],
+            [
+                sponsor_row(7, 5, "Hancock"),
+                sponsor_row(8, 10, "Calumet", ignore=True),
+            ],
+        )
+        enriched, family, sponsor, _locations = stats._load_enriched(cfg)
+        assert enriched["zite_record_id"].to_list() == ["rec1", "rec3"]
+        assert enriched["gift_pickup_location"].to_list() == [
+            "Hancock",
+            "Unknown",
+        ]
+        assert family["family_id"].to_list() == [1]
+        assert sponsor["sponsor_id"].to_list() == [7]
 
 
 class TestDailyAdmissions:
@@ -380,92 +490,76 @@ class TestRun:
         with pytest.raises(StatsError):
             stats.run(report_cfg)
 
-    def test_run_raw_reads_raw_sheets(
+    def test_run_raw_prepares_ephemerally_without_workbook_writes(
         self, cfg: Config, tmp_path: Path
     ) -> None:
-        """--raw builds the report from the child/family submissions."""
-        stamp = datetime(2026, 10, 2, 12, 0)
-        write_sheets(
-            cfg.excel_file,
-            "screen",
-            {
-                "child_submissions": pl.DataFrame(
-                    [
-                        child_row("rec1", 1, stamp, "Male"),
-                        child_row("rec2", 1, stamp, "Female", age=5),
-                    ],
-                    schema=CHILD_SCHEMA,
-                ),
-                "family_submissions": pl.DataFrame(
-                    [family_row(1, "Hancock", None)],
-                    schema={
-                        key: value
-                        for key, value in FAMILY_SCHEMA.items()
-                        if key != "assigned_sponsor_id"
-                    },
-                ),
-            },
-        )
+        """--raw cleans/assigns raw rows and creates no submissions/adj state."""
+        _seed_raw(cfg)
         report_cfg = _report_cfg(cfg, tmp_path)
+        workbook_before = Path(cfg.excel_file).read_bytes()
+        sheets_before = list_sheets(cfg.excel_file)
         stats.run(report_cfg, raw=True)
+        assert Path(cfg.excel_file).read_bytes() == workbook_before
+        assert list_sheets(cfg.excel_file) == sheets_before
+        assert not any(
+            sheet.endswith("_submissions") or sheet.startswith("adj_")
+            for sheet in sheets_before
+        )
         stem = f"report_{date.today().isoformat()}"
         html_path = tmp_path / "reports" / f"{stem}.html"
         assert html_path.is_file() and html_path.stat().st_size > 0
         html = html_path.read_text(encoding="utf-8")
         assert "Pickup location" in html
-        enriched, _family, _sponsor, _locations = stats._load_enriched(
+        enriched, family, sponsor, _locations = stats._load_enriched(
             report_cfg, raw=True
         )
+        assert Path(cfg.excel_file).read_bytes() == workbook_before
+        assert list_sheets(cfg.excel_file) == sheets_before
+        assert enriched["zite_record_id"].to_list() == [
+            "rec-orphan",
+            "rec1",
+            "rec2",
+        ]
+        assert enriched["family_id"].to_list() == [None, 1, 1]
         assert enriched["assigned_sponsor_id"].null_count() == len(enriched)
+        assert family["family_id"].to_list() == [1]
+        assert sponsor["sponsor_id"].to_list() == [1]
 
     def test_run_raw_raises_when_raw_child_missing(
         self, cfg: Config, tmp_path: Path
     ) -> None:
-        """--raw without child_submissions raises naming the sheet."""
+        """--raw without raw_child fails during local preparation."""
+        _seed_raw(cfg, include_child=False)
         report_cfg = _report_cfg(cfg, tmp_path)
-        with pytest.raises(StatsError, match="child_submissions"):
+        with pytest.raises(StatsError, match="raw_child"):
             stats.run(report_cfg, raw=True)
+        assert not any(
+            sheet.endswith("_submissions") or sheet.startswith("adj_")
+            for sheet in list_sheets(cfg.excel_file)
+        )
 
-    def test_run_raises_when_created_column_missing(
+    def test_run_rejects_projected_final_schema(
         self, cfg: Config, tmp_path: Path
     ) -> None:
-        """final_child without the created column raises StatsError."""
-        rows = [
-            {
-                "zite_record_id": "rec1",
-                "family_id": 1,
-                "angel_id": "A1",
-                "age_at_xmas": 8,
-                "gender": "Male",
-            }
-        ]
-        write_sheets(
-            cfg.excel_file,
-            "audit",
-            {
-                "final_child": pl.DataFrame(
-                    rows,
-                    schema={
-                        key: value
-                        for key, value in CHILD_SCHEMA.items()
-                        if key != "created"
-                    },
-                )
-            },
-            xmas=cfg.xmas,
+        """A legacy projected child final cannot stand in for the full store."""
+        workbook = Workbook()
+        sheet = workbook.active
+        assert sheet is not None
+        sheet.title = "final_child"
+        sheet.append(
+            [
+                "zite_record_id",
+                "family_id",
+                "angel_id",
+                "created",
+                "age_at_xmas",
+                "gender",
+            ]
         )
-        write_sheets(
-            cfg.excel_file,
-            "match",
-            {
-                "final_family": pl.DataFrame(
-                    [family_row(1, "Hancock", None)],
-                    schema=FAMILY_SCHEMA,
-                )
-            },
-        )
+        sheet.append(["rec1", 1, "1A", "2026-10-02T12:00:00", 8, "Male"])
+        workbook.save(cfg.excel_file)
         report_cfg = _report_cfg(cfg, tmp_path)
-        with pytest.raises(StatsError):
+        with pytest.raises(StatsError, match="persistent full schema"):
             stats.run(report_cfg)
 
 

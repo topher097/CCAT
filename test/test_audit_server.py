@@ -14,7 +14,7 @@ from ccat.audit.server import (
     run,
     stop_audit_processes,
 )
-from ccat.audit.store import read_adj
+from ccat.audit.store import read_eligible_final, read_final
 from ccat.config import Config
 from ccat.io import read_sheet
 
@@ -107,33 +107,46 @@ class TestRun:
 
     @pytest.fixture
     def seeded_cfg(self, cfg: Config) -> Config:
-        """Return a config whose workbook has the raw sheets."""
-        from test_audit_store import seed_raw
+        """Return a config with raw and complete persistent-final sheets."""
+        from test_audit_store import seed_final_sheets
 
-        seed_raw(cfg)
+        seed_final_sheets(cfg)
         return cfg
 
-    def test_run_seeds_and_serves(
+    def test_run_reconciles_and_serves_without_projecting(
         self, seeded_cfg: Config, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """run() seeds adj sheets, sets state, and calls ui.run."""
+        """run() calls ensure_final_sheets and leaves full stored rows intact."""
         started: dict[str, Any] = {}
+        ensure_calls: list[Config] = []
+        real_ensure = server.ensure_final_sheets
+
+        def checked_ensure(cfg: Config) -> None:
+            ensure_calls.append(cfg)
+            real_ensure(cfg)
 
         def fake_ui_run(**kwargs: Any) -> None:
             started.update(kwargs)
 
+        before_bytes = Path(seeded_cfg.excel_file).read_bytes()
+        monkeypatch.setattr(server, "ensure_final_sheets", checked_ensure)
         monkeypatch.setattr(server.ui, "run", fake_ui_run)
         run(seeded_cfg)
+
+        assert ensure_calls == [seeded_cfg]
         assert started["host"] == seeded_cfg.audit.host
         assert started["port"] == seeded_cfg.audit.port
         assert started["reload"] is False
         assert "Human Audit" in started["title"]
-        children = read_adj(seeded_cfg, "child")
+        children = read_final(seeded_cfg, "child")
         assert len(children) == 3
         final_child = read_sheet(seeded_cfg.excel_file, "final_child")
-        assert final_child is not None and final_child.height == 2
-        # The orphaned child stays in adj_child but never in final_child.
-        assert "orphan1" not in final_child["zite_record_id"].to_list()
+        assert final_child is not None and final_child.height == 3
+        assert "orphan1" in final_child["zite_record_id"].to_list()
+        eligible = read_eligible_final(seeded_cfg, "child")
+        assert len(eligible) == 2
+        assert "orphan1" not in {row["zite_record_id"] for row in eligible}
+        assert Path(seeded_cfg.excel_file).read_bytes() == before_bytes
 
     def test_run_restart_stops_stale_server_first(
         self,
@@ -156,7 +169,7 @@ class TestRun:
 
     def test_run_requires_raw_sheets(self, cfg: Config) -> None:
         """Missing raw sheets fail with an actionable error."""
-        from ccat.audit import AuditError
+        from ccat.preparation import PreparationError
 
-        with pytest.raises(AuditError, match="acquire"):
+        with pytest.raises(PreparationError, match="acquire"):
             run(cfg)

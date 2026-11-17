@@ -63,6 +63,8 @@ include = [
     "scripts/audit_ui_smoke.py",
     "test/test_audit_migrate.py",
     "test/test_audit_server.py",
+    "test/test_consolidate.py",
+    "test/test_remediation.py",
 ]
 rules = { unresolved-import = "ignore" }
 

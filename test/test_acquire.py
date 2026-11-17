@@ -698,7 +698,11 @@ def test_run_is_deterministic_on_rerun(tmp_path, monkeypatch) -> None:
 def test_run_never_touches_final_sheets(tmp_path, monkeypatch) -> None:
     """final_child is byte-identical before and after a run (§5)."""
     cfg = _acquire_cfg(tmp_path)
-    sentinel = pl.DataFrame({"zite_record_id": ["x"], "audited": [True]})
+    from ccat.audit.store import build_final_frame
+
+    sentinel = build_final_frame(
+        "child", [{"zite_record_id": "x", "status": "audited"}]
+    )
     write_sheets(
         cfg.excel_file,
         "audit",

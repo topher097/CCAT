@@ -1,7 +1,10 @@
 """Module 5b — sponsor packet generation (§13b).
 
-For every ``final_sponsor`` row with assigned angels, builds one
-**sponsor packet** directory under ``sponsor_packets.output_dir``:
+For every output-eligible row in the complete persistent ``final_sponsor``
+store with assigned angels, builds one **sponsor packet** directory under
+``sponsor_packets.output_dir``.  Children and families use their own eligible
+populations independently: ignored entities are excluded, and orphaned
+children are excluded:
 
 - ``<filename_prefix>_<sponsor_id>.html`` — the email draft: a greeting
   with the
@@ -41,8 +44,8 @@ import polars as pl
 from jinja2 import Environment
 from pypdf import PdfWriter
 
+from ccat.audit.store import read_eligible_final_frame
 from ccat.config import Config
-from ccat.io import read_sheet
 from ccat.match import canonical_location
 
 logger = logging.getLogger(__name__)
@@ -92,7 +95,10 @@ def _angel_sort_key(angel: dict[str, Any]) -> tuple[int, str, int, str]:
 def _sponsors_with_angels(
     cfg: Config, sponsor_id: int | None = None
 ) -> list[dict[str, Any]]:
-    """Join each assigned sponsor with their angels' details (§13b).
+    """Join eligible assigned sponsors with eligible angels' details (§13b).
+
+    Each complete persistent final store is filtered independently: ignored
+    families/sponsors/children and orphaned children do not enter this join.
 
     Args:
         cfg: The pipeline configuration.
@@ -104,12 +110,11 @@ def _sponsors_with_angels(
         ``assigned_angel_ids`` are empty or unparseable are skipped.
 
     Raises:
-        SponsorPacketError: If ``final_sponsor``/``final_child`` is
-            missing, the workbook has no matched sponsors, or
-            ``sponsor_id`` is given but that sponsor has no assigned
-            angels.
+        SponsorPacketError: If ``final_sponsor``/``final_child`` has no
+            eligible rows, the workbook has no matched sponsors, or
+            ``sponsor_id`` is given but that sponsor has no assigned angels.
     """
-    sponsors = read_sheet(cfg.excel_file, "final_sponsor")
+    sponsors = read_eligible_final_frame(cfg, "sponsor")
     if sponsors is None or sponsors.is_empty():
         raise SponsorPacketError(
             "final_sponsor sheet is missing or empty; run `ccat match` first"
@@ -118,15 +123,15 @@ def _sponsors_with_angels(
         sponsors = sponsors.filter(pl.col("sponsor_id") == sponsor_id)
         if sponsors.is_empty():
             raise SponsorPacketError(
-                f"sponsor {sponsor_id} has no row in final_sponsor;"
-                " run `ccat match` first"
+                f"sponsor {sponsor_id} has no eligible row in final_sponsor;"
+                " run `ccat match` first or restore the ignored sponsor"
             )
-    children = read_sheet(cfg.excel_file, "final_child")
+    children = read_eligible_final_frame(cfg, "child")
     if children is None or children.is_empty():
         raise SponsorPacketError(
             "final_child sheet is missing or empty; run `ccat audit` first"
         )
-    family = read_sheet(cfg.excel_file, "final_family")
+    family = read_eligible_final_frame(cfg, "family")
     location_by_family: dict[Any, Any] = {}
     if family is None or family.is_empty():
         logger.warning(
@@ -269,22 +274,24 @@ def validate_all_sheets_exist(
     """Require a generated info sheet PDF for every sponsored angel (§13b).
 
     The sponsor packets combine the child information sheets, so the
-    packet phase must never run with sheets missing.  With
-    ``sponsor_id``, only the angels assigned to that sponsor count.
+    packet phase must never run with sheets missing.  Only output-eligible
+    children and families participate, filtered independently from their full
+    persistent stores.  With ``sponsor_id``, only angels assigned to that
+    sponsor count.
 
     Args:
         cfg: The pipeline configuration.
         sponsor_id: Restrict the check to one ``sponsor_id``.
 
     Raises:
-        SponsorPacketError: If any child whose family has an assigned
-            sponsor (the given sponsor when scoped) lacks its
+        SponsorPacketError: If any eligible child whose eligible family has
+            an assigned sponsor (the given sponsor when scoped) lacks its
             ``AT<season>_<angel_id>.pdf`` file.
     """
-    children = read_sheet(cfg.excel_file, "final_child")
+    children = read_eligible_final_frame(cfg, "child")
     if children is None or children.is_empty():
         return
-    family = read_sheet(cfg.excel_file, "final_family")
+    family = read_eligible_final_frame(cfg, "family")
     if family is None:
         return
     family_rows = family.to_dicts()
@@ -327,10 +334,10 @@ def build_packets(
     """Build one sponsor packet directory per assigned sponsor (§13b).
 
     Each packet directory holds the HTML email draft and the combined
-    child-information PDF (all the sponsor's angel sheets, ordered by
-    family ID then angel letter), plus a copy of the sponsor
-    instruction PDF.  Sponsors without assigned angels produce no
-    directory.
+    child-information PDF (all the sponsor's eligible angel sheets, ordered by
+    family ID then angel letter), plus a copy of the sponsor instruction PDF.
+    Sponsors without assigned angels produce no directory.  Workbook finals
+    are read-only throughout packet generation.
 
     Args:
         cfg: The pipeline configuration.

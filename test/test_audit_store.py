@@ -1,33 +1,41 @@
-"""Tests for the audit store — module 3 data layer (audit_architecture.md §5–§7)."""
+"""Tests for the persistent-final audit store and its output filters."""
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
+from openpyxl import load_workbook
 
+import ccat.audit.store as audit_store
+from ccat.audit import AuditError
 from ccat.audit.store import (
-    ADJ_CHILD_COLUMNS,
     ENTITY_SPECS,
     FINAL_CHILD_COLUMNS,
+    FINAL_CHILD_SCHEMA,
     FINAL_FAMILY_COLUMNS,
+    FINAL_FAMILY_SCHEMA,
+    FINAL_SPONSOR_COLUMNS,
+    FINAL_SPONSOR_SCHEMA,
     STATUS_AUDITED,
     STATUS_IGNORED,
     STATUS_IN_PROGRESS,
     STATUS_NEEDS_CLARIFICATION,
     STATUS_NEW,
     as_bool,
-    build_adj_frame,
+    build_final_frame,
     coalesce_family_group,
     combine_child_group,
     compute_status,
-    ensure_adj_sheets,
+    dob_conflict_notes,
+    eligible_output_rows,
+    ensure_final_sheets,
     group_submissions,
     load_audit_data,
     merge_anomoly,
-    dob_conflict_notes,
-    project_final,
-    read_adj,
+    read_eligible_final,
+    read_final,
     reduce_ignored,
     save_child,
     save_family,
@@ -35,8 +43,12 @@ from ccat.audit.store import (
     status_of,
 )
 from ccat.config import Config
-from ccat.io import read_sheet, write_sheets
-from ccat.io import _final_child_formula_caches
+from ccat.io import (
+    _final_child_formula_caches,
+    list_sheets,
+    read_sheet,
+    write_sheets,
+)
 
 STATUS_TABLE = [
     # ignore, audited, note, edits -> expected
@@ -77,8 +89,8 @@ def test_compute_status_dynamic_recompute_on_audited_deselect() -> None:
 
 
 def _row(**overrides: Any) -> dict[str, Any]:
-    """One adj-like row for status tests."""
-    base: dict[str, Any] = {column: None for column in ADJ_CHILD_COLUMNS}
+    """One full-final child row for store tests."""
+    base: dict[str, Any] = {column: None for column in FINAL_CHILD_COLUMNS}
     base.update(overrides)
     return base
 
@@ -90,7 +102,7 @@ def test_status_of_excludes_special_needs_and_computed() -> None:
         dob="2018-05-10",
         special_needs="ADHD; other: speech delay",
         age_at_xmas=8,
-        audited=False,
+        status="new",
         ignore=False,
     )
     assert status_of(row, baseline, "child") == STATUS_NEW
@@ -98,10 +110,10 @@ def test_status_of_excludes_special_needs_and_computed() -> None:
 
 def test_status_of_counts_data_edits_and_notes() -> None:
     """Adjudicable edits and notes derive in_progress/needs_clarification."""
-    baseline = {"need_1": "raw", "require_clarification": None}
-    row = _row(need_1="fixed", require_clarification=None)
+    baseline = {"need_1": "raw", "clarification_notes": None}
+    row = _row(need_1="fixed", clarification_notes=None)
     assert status_of(row, baseline, "child") == STATUS_IN_PROGRESS
-    row = _row(need_1="raw", require_clarification="call the family")
+    row = _row(need_1="raw", clarification_notes="call the family")
     assert status_of(row, baseline, "child") == STATUS_NEEDS_CLARIFICATION
 
 
@@ -126,9 +138,9 @@ def test_combine_child_group_most_recent_non_null_wins() -> None:
     assert combine_child_group([]) == {}
 
 
-def test_group_submissions_keys_and_singletons() -> None:
-    """Children group by (email, name); unkeyed rows stay singletons (§6)."""
-    submissions = [
+def test_group_prepared_rows_keys_and_singletons() -> None:
+    """Prepared children group by email/name; unkeyed rows stay singletons."""
+    prepared = [
         {
             "primary_email": "a@x.com",
             "first_name": "Kid",
@@ -146,22 +158,22 @@ def test_group_submissions_keys_and_singletons() -> None:
         },
         {"primary_email": None, "first_name": "Kid", "zite_record_id": "4"},
     ]
-    groups = group_submissions(submissions, "child")
+    groups = group_submissions(prepared, "child")
     assert len(groups[("a@x.com", "Kid")]) == 2
     assert len(groups[("a@x.com", "Other")]) == 1
-    assert ("4",) in groups  # email-less rows are their own group
-    family_groups = group_submissions(submissions, "family")
+    assert ("4",) in groups
+    family_groups = group_submissions(prepared, "family")
     assert len(family_groups[("a@x.com",)]) == 3
 
 
 @pytest.mark.parametrize("entity", ["child", "family", "sponsor"])
 def test_reduce_ignored_keeps_only_skeleton(entity: str) -> None:
-    """Ignored rows keep key, zite id, names, email, and controls (§5.5)."""
+    """Ignored rows keep identity fields, duplicate state, and controls."""
     controls = (
         "status",
         "audited",
         "ignore",
-        "require_clarification",
+        "clarification_notes",
         "audited_at",
     ) + (("screened",) if entity == "child" else ())
     row: dict[str, Any] = {
@@ -171,9 +183,20 @@ def test_reduce_ignored_keeps_only_skeleton(entity: str) -> None:
     row["audited"] = False
     row["status"] = STATUS_IGNORED
     reduced = reduce_ignored(row, entity)
+    module_owned = {
+        "child": {"generated_info_sheet"},
+        "family": {
+            "assigned_sponsor_id",
+            "assigned_angel_ids",
+            "num_angels_in_family",
+        },
+        "sponsor": {"assigned_angel_ids", "num_angels_assigned"},
+    }[entity]
     retained = {
         "child": {
             "zite_record_id",
+            "family_id",
+            "angel_id",
             "first_name",
             "primary_email",
             "potential_duplicate",
@@ -196,6 +219,8 @@ def test_reduce_ignored_keeps_only_skeleton(entity: str) -> None:
         },
     }[entity]
     for column in ENTITY_SPECS[entity]["columns"]:
+        if column in module_owned:
+            continue
         if column in retained:
             assert reduced[column] == "keep", column
         elif column in controls:
@@ -204,114 +229,213 @@ def test_reduce_ignored_keeps_only_skeleton(entity: str) -> None:
             assert reduced[column] is None, column
 
 
-def test_project_final_rule() -> None:
-    """Projection drops ignored rows + pure controls, keeps the rest (§7.1)."""
+def test_eligible_output_rows_match_retired_child_projection(
+    cfg: Config,
+) -> None:
+    """Output filtering excludes ignored/orphans without changing final storage."""
     rows = [
         _row(
             zite_record_id="c1",
-            status="audited",
-            audited=True,
+            family_id=1,
+            angel_id="1A",
+            status=STATUS_AUDITED,
             ignore=False,
             screened=True,
-            require_clarification=None,
-            audited_at="2026-01-01T00:00:00+00:00",
+            generated_info_sheet=True,
+            clarification_notes=None,
             age_at_xmas=8,
         ),
-        _row(zite_record_id="c2", ignore=True, audited=False, screened=False),
+        _row(
+            zite_record_id="ignored",
+            family_id=1,
+            status=STATUS_IGNORED,
+            ignore=True,
+            screened=False,
+        ),
+        _row(
+            zite_record_id="orphan",
+            family_id=None,
+            angel_id=None,
+            status=STATUS_NEEDS_CLARIFICATION,
+            ignore=False,
+            screened=False,
+        ),
+        _row(
+            zite_record_id="letterless-duplicate",
+            family_id=1,
+            angel_id=None,
+            status=STATUS_NEW,
+            ignore=False,
+            screened=False,
+        ),
     ]
-    frame = project_final(build_adj_frame("child", rows), FINAL_CHILD_COLUMNS)
-    assert frame.height == 1
-    assert frame["zite_record_id"].to_list() == ["c1"]
+    write_sheets(
+        cfg.excel_file,
+        "audit",
+        {"final_child": build_final_frame("child", rows)},
+        xmas=cfg.xmas,
+    )
+    before_bytes = Path(cfg.excel_file).read_bytes()
+    before = read_final(cfg, "child")
+
+    eligible = read_eligible_final(cfg, "child")
+
+    assert [row["zite_record_id"] for row in eligible] == [
+        "c1",
+        "letterless-duplicate",
+    ]
+    assert read_final(cfg, "child") == before
+    assert {row["zite_record_id"] for row in before} == {
+        "c1",
+        "ignored",
+        "orphan",
+        "letterless-duplicate",
+    }
+    assert Path(cfg.excel_file).read_bytes() == before_bytes
+    frame = build_final_frame("child", before)
     assert list(frame.columns) == list(FINAL_CHILD_COLUMNS)
+    for control in ("ignore", "screened", "status", "clarification_notes"):
+        assert control in frame.columns
     assert "audited" not in frame.columns
-    assert "ignore" not in frame.columns
-    assert "screened" not in frame.columns
-    assert "status" in frame.columns
-    assert "require_clarification" in frame.columns
-    assert "audited_at" in frame.columns
-    assert "age_at_xmas" in frame.columns
 
 
-def test_project_final_family_keeps_assignments() -> None:
-    """final_family keeps assignment columns plus status (§7.1)."""
-    row = {column: None for column in ENTITY_SPECS["family"]["columns"]}
-    row.update(
-        {
-            "family_id": 1,
-            "assigned_sponsor_id": 3,
-            "assigned_angel_ids": "1A",
-            "num_angels_in_family": 1,
-            "status": "new",
-            "audited": False,
-            "ignore": False,
-        }
+@pytest.mark.parametrize("entity", ["family", "sponsor"])
+def test_eligible_output_rows_keep_full_assignments(entity: str) -> None:
+    """Family/sponsor output filters only ignore rows, never project columns."""
+    columns = (
+        FINAL_FAMILY_COLUMNS if entity == "family" else FINAL_SPONSOR_COLUMNS
     )
-    frame = project_final(
-        build_adj_frame("family", [row]), FINAL_FAMILY_COLUMNS
-    )
-    assert list(frame.columns) == list(FINAL_FAMILY_COLUMNS)
-    saved = frame.to_dicts()[0]
-    assert saved["assigned_sponsor_id"] == 3
-    assert saved["status"] == "new"
+    key = ENTITY_SPECS[entity]["key"]
+    kept = {column: None for column in columns}
+    kept.update({key: 1, "status": STATUS_NEW, "ignore": False})
+    ignored = dict(kept)
+    ignored.update({key: 2, "status": STATUS_IGNORED, "ignore": True})
+    if entity == "family":
+        kept.update(
+            assigned_sponsor_id=3,
+            assigned_angel_ids="1A",
+            num_angels_in_family=1,
+        )
+    else:
+        kept.update(assigned_angel_ids="1A", num_angels_assigned=1)
+
+    eligible = eligible_output_rows([kept, ignored], entity)
+
+    assert eligible == [kept]
+    assert set(eligible[0]) == set(columns)
+    assert eligible[0]["assigned_angel_ids"] == "1A"
+    assert ignored["ignore"] is True
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([_row(zite_record_id="c1"), _row(zite_record_id="c1")], "duplicate"),
+        ([_row(zite_record_id=None)], "missing zite_record_id"),
+    ],
+)
+def test_build_final_frame_rejects_duplicate_and_null_keys(
+    rows: list[dict[str, Any]], message: str
+) -> None:
+    """Persistent entity identities must be present and unique before writes."""
+    with pytest.raises(AuditError, match=message):
+        build_final_frame("child", rows)
 
 
 # ---------------------------------------------------------------------------
-# Workbook fixtures.
+# Raw + complete persistent-final workbook fixtures.
 # ---------------------------------------------------------------------------
 
 
 RAW_CHILD_SCHEMA = {
-    "zite_record_id": pl.String,
-    "zite_created_at": pl.String,
-    "created": pl.String,
-    "family_id": pl.Int64,
-    "angel_id": pl.String,
-    "first_name": pl.String,
-    "primary_email": pl.String,
-    "dob": pl.String,
-    "age_reported": pl.Int64,
-    "gender": pl.String,
-    "need_1": pl.String,
-    "shoe_size": pl.String,
-    "age_at_xmas": pl.Int64,
-    "source": pl.String,
+    column: FINAL_CHILD_SCHEMA[column]
+    for column in (
+        "zite_record_id",
+        "zite_created_at",
+        "created",
+        "family_id",
+        "angel_id",
+        "first_name",
+        "primary_email",
+        "dob",
+        "age_reported",
+        "gender",
+        "need_1",
+        "need_2",
+        "desire_1",
+        "desire_2",
+        "shoe_size",
+        "shoe_size_type",
+        "pant_waist_size",
+        "pant_inseam",
+        "pant_size_letter",
+        "pant_size_type",
+        "jean_size",
+        "shirt_size_letter",
+        "shirt_size_type",
+        "favorite_colors",
+        "interests",
+        "other_notes",
+        "age_at_xmas",
+        "source",
+    )
 }
 
 RAW_FAMILY_SCHEMA = {
-    "family_id": pl.Int64,
-    "zite_record_id": pl.String,
-    "zite_created_at": pl.String,
-    "created": pl.String,
-    "primary_email": pl.String,
-    "first_name": pl.String,
-    "last_name": pl.String,
-    "phone": pl.String,
-    "gift_pickup_location": pl.String,
-    "source": pl.String,
+    column: FINAL_FAMILY_SCHEMA[column]
+    for column in (
+        "family_id",
+        "zite_record_id",
+        "zite_created_at",
+        "created",
+        "primary_email",
+        "accepts_disclaimer",
+        "first_name",
+        "last_name",
+        "phone",
+        "street_address",
+        "apt_floor",
+        "city",
+        "zip_code",
+        "state",
+        "secondary_first_name",
+        "secondary_last_name",
+        "secondary_email",
+        "secondary_phone",
+        "gift_pickup_location",
+        "source",
+    )
 }
 
 RAW_SPONSOR_SCHEMA = {
-    "sponsor_id": pl.Int64,
-    "zite_record_id": pl.String,
-    "create": pl.String,
-    "email": pl.String,
-    "sponsor_type": pl.String,
-    "num_children": pl.Int64,
-    "age_preference": pl.String,
-    "gender_preference": pl.String,
-    "dropoff_location": pl.String,
-    "first_name": pl.String,
-    "last_name": pl.String,
-    "pref_age_min": pl.Int64,
-    "pref_age_max": pl.Int64,
-    "source": pl.String,
+    column: FINAL_SPONSOR_SCHEMA[column]
+    for column in (
+        "sponsor_id",
+        "zite_record_id",
+        "create",
+        "email",
+        "accepts_disclaimer",
+        "sponsor_type",
+        "organization_name",
+        "prior_assigned_angel_ids",
+        "num_children",
+        "age_preference",
+        "gender_preference",
+        "dropoff_location",
+        "first_name",
+        "last_name",
+        "phone",
+        "pref_age_min",
+        "pref_age_max",
+        "source",
+    )
 }
 
 
 def raw_child_row(
     record_id: str, angel_id: str | None = "1A", family_id: int | None = 1
 ) -> dict[str, Any]:
-    """One raw_child row for store tests."""
+    """One raw_child row; null family linkage gets an unmatched email."""
     return {
         "zite_record_id": record_id,
         "zite_created_at": "2026-02-01T09:00:00Z",
@@ -319,7 +443,9 @@ def raw_child_row(
         "family_id": family_id,
         "angel_id": angel_id,
         "first_name": "Kiddo",
-        "primary_email": "fam@example.com",
+        "primary_email": (
+            "fam@example.com" if family_id is not None else "orphan@example.com"
+        ),
         "dob": "2018-05-10",
         "age_reported": 7,
         "gender": "Male",
@@ -330,53 +456,87 @@ def raw_child_row(
     }
 
 
+def default_raw_families() -> list[dict[str, Any]]:
+    """One raw family matching the default children's primary email."""
+    return [
+        {
+            "family_id": 1,
+            "zite_record_id": "rec_f1",
+            "zite_created_at": "2026-01-05T10:00:00Z",
+            "created": "2026-01-05T10:00:00Z",
+            "primary_email": "fam@example.com",
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "phone": "(906) 555-9876",
+            "gift_pickup_location": "TSA (Hancock)",
+            "source": "web",
+        }
+    ]
+
+
+def default_raw_sponsors() -> list[dict[str, Any]]:
+    """One raw sponsor with explicit age-preference bounds in its raw fixture."""
+    return [
+        {
+            "sponsor_id": 1,
+            "zite_record_id": "rec_s1",
+            "create": "2026-01-01T10:00:00Z",
+            "email": "sponsor@example.com",
+            "sponsor_type": "Individual",
+            "num_children": 2,
+            "age_preference": "Any Age",
+            "gender_preference": "Any Gender",
+            "dropoff_location": None,
+            "first_name": "Mary",
+            "last_name": "Smith",
+            "pref_age_min": 0,
+            "pref_age_max": 18,
+            "source": "web",
+        }
+    ]
+
+
+def duplicate_raw_children() -> list[dict[str, Any]]:
+    """Two prepared child duplicates plus one genuinely orphaned child."""
+    earlier = raw_child_row("c2", None)
+    earlier.update(
+        {
+            "zite_created_at": "2026-02-01T09:00:00Z",
+            "created": "2026-02-01T09:00:00Z",
+            "need_1": "old coat",
+            "desire_1": "blocks",
+        }
+    )
+    latest = raw_child_row("c1", "1A")
+    latest.update(
+        {
+            "zite_created_at": "2026-02-10T09:00:00Z",
+            "created": "2026-02-10T09:00:00Z",
+            "need_1": "winter coat taht fits",
+            "desire_1": None,
+        }
+    )
+    return [latest, earlier, raw_child_row("orphan1", None, None)]
+
+
+def default_raw_children() -> list[dict[str, Any]]:
+    """Duplicate pair plus unmatched-email orphan as the child source."""
+    return duplicate_raw_children()
+
+
 def seed_raw(
     cfg: Config,
     children: list[dict[str, Any]] | None = None,
     families: list[dict[str, Any]] | None = None,
     sponsors: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Write the three raw sheets (children default to a family of two + orphan)."""
+    """Write only raw sheets; preparation remains shared and in memory."""
     if children is None:
-        children = [
-            raw_child_row("c1"),
-            raw_child_row("c2", "1B"),
-            raw_child_row("orphan1", None, None),
-        ]
+        children = default_raw_children()
     if families is None:
-        families = [
-            {
-                "family_id": 1,
-                "zite_record_id": "rec_f1",
-                "zite_created_at": "2026-01-05T10:00:00Z",
-                "created": "2026-01-05T10:00:00Z",
-                "primary_email": "fam@example.com",
-                "first_name": "Jane",
-                "last_name": "Doe",
-                "phone": "(906) 555-9876",
-                "gift_pickup_location": "TSA (Hancock)",
-                "source": "web",
-            }
-        ]
+        families = default_raw_families()
     if sponsors is None:
-        sponsors = [
-            {
-                "sponsor_id": 1,
-                "zite_record_id": "rec_s1",
-                "create": "2026-01-01T10:00:00Z",
-                "email": "sponsor@example.com",
-                "sponsor_type": "Individual",
-                "num_children": 2,
-                "age_preference": "Any Age",
-                "gender_preference": "Any Gender",
-                "dropoff_location": None,
-                "first_name": "Mary",
-                "last_name": "Smith",
-                "pref_age_min": 0,
-                "pref_age_max": 18,
-                "source": "web",
-            }
-        ]
+        sponsors = default_raw_sponsors()
     write_sheets(
         cfg.excel_file,
         "acquire",
@@ -388,106 +548,35 @@ def seed_raw(
     )
 
 
-def seed_submissions(cfg: Config) -> None:
-    """Write prepared submission sheets: two family submissions, a child group.
+def seed_final_sheets(
+    cfg: Config,
+    children: list[dict[str, Any]] | None = None,
+    families: list[dict[str, Any]] | None = None,
+    sponsors: list[dict[str, Any]] | None = None,
+) -> None:
+    """Create a raw + full-final fixture without submissions or adj sheets."""
+    seed_raw(cfg, children, families, sponsors)
+    ensure_final_sheets(cfg)
 
-    Mirrors what ``ccat screen`` now writes: cleaned rows with the
-    derived IDs (family_id/angel_id/age_at_xmas), one row per
-    submission.
-    """
-    family_submissions = pl.DataFrame(
-        [
-            {
-                "family_id": 1,
-                "zite_record_id": "rec_f1",
-                "zite_created_at": "2026-01-05T10:00:00Z",
-                "created": "2026-01-05T10:00:00Z",
-                "primary_email": "fam@example.com",
-                "first_name": "Jane",
-                "last_name": "Doe",
-            },
-            {
-                "family_id": 1,
-                "zite_record_id": "rec_f2",
-                "zite_created_at": "2026-01-20T10:00:00Z",
-                "created": "2026-01-20T10:00:00Z",
-                "primary_email": "fam@example.com",
-                "first_name": "Jane",
-                "last_name": "Doe",
-                "phone": "(906) 555-0000",
-            },
-        ],
-        schema={
-            "family_id": pl.Int64,
-            "zite_record_id": pl.String,
-            "zite_created_at": pl.String,
-            "created": pl.String,
-            "primary_email": pl.String,
-            "first_name": pl.String,
-            "last_name": pl.String,
-            "phone": pl.String,
-        },
-    )
-    child_submissions = pl.DataFrame(
-        [
-            {
-                "family_id": 1,
-                "angel_id": "1B",
-                "zite_record_id": "c2",
-                "zite_created_at": "2026-02-01T09:00:00Z",
-                "created": "2026-02-01T09:00:00Z",
-                "primary_email": "fam@example.com",
-                "first_name": "Kiddo",
-                "dob": "2018-05-10",
-                "need_1": "old coat",
-                "desire_1": "blocks",
-            },
-            {
-                "family_id": 1,
-                "angel_id": "1A",
-                "zite_record_id": "c1",
-                "zite_created_at": "2026-02-10T09:00:00Z",
-                "created": "2026-02-10T09:00:00Z",
-                "primary_email": "fam@example.com",
-                "first_name": "Kiddo",
-                "dob": "2018-05-10",
-                "need_1": "winter coat taht fits",
-                "desire_1": None,
-            },
-        ],
-        schema={
-            "family_id": pl.Int64,
-            "angel_id": pl.String,
-            "zite_record_id": pl.String,
-            "zite_created_at": pl.String,
-            "created": pl.String,
-            "primary_email": pl.String,
-            "first_name": pl.String,
-            "dob": pl.String,
-            "need_1": pl.String,
-            "desire_1": pl.String,
-        },
-    )
-    write_sheets(
-        cfg.excel_file,
-        "screen",
-        {
-            "family_submissions": family_submissions,
-            "child_submissions": child_submissions,
-        },
-    )
+
+def assert_no_legacy_entity_sheets(cfg: Config) -> None:
+    """Fail if a test writer recreates retired entity persistence layers."""
+    sheets = list_sheets(cfg.excel_file)
+    assert not any(sheet.startswith("adj_") for sheet in sheets)
+    assert not any(sheet.endswith("_submissions") for sheet in sheets)
 
 
 # ---------------------------------------------------------------------------
-# ensure_adj_sheets (§7.4).
+# ensure_final_sheets: guarded initial seed and append-only audit backstop.
 # ---------------------------------------------------------------------------
 
 
-def test_ensure_adj_sheets_seeds_dense_rows(cfg: Config) -> None:
-    """Every raw entity gets a dense adj row; controls default (§7.4)."""
+def test_ensure_final_sheets_seeds_dense_rows(cfg: Config) -> None:
+    """Every prepared entity gets a full final row with default controls."""
     seed_raw(cfg)
-    ensure_adj_sheets(cfg)
-    children = read_adj(cfg, "child")
+    ensure_final_sheets(cfg)
+
+    children = read_final(cfg, "child")
     assert {row["zite_record_id"] for row in children} == {
         "c1",
         "c2",
@@ -497,192 +586,361 @@ def test_ensure_adj_sheets_seeds_dense_rows(cfg: Config) -> None:
     assert by_id["c1"]["need_1"] == "winter coat taht fits"
     assert by_id["c1"]["age_at_xmas"] == 8
     assert by_id["c1"]["status"] == STATUS_NEW
-    assert by_id["c1"]["audited"] is False
+    assert by_id["c1"]["status"] != STATUS_AUDITED
     assert by_id["c1"]["screened"] is False
     assert by_id["c1"]["generated_info_sheet"] is False
-    families = read_adj(cfg, "family")
+    families = read_final(cfg, "family")
     assert len(families) == 1
     assert families[0]["assigned_sponsor_id"] is None
     assert families[0]["status"] == STATUS_NEW
-    sponsors = read_adj(cfg, "sponsor")
+    sponsors = read_final(cfg, "sponsor")
     assert len(sponsors) == 1
     assert sponsors[0]["pref_age_min"] == 0
     assert sponsors[0]["pref_age_max"] == 18
+    assert_no_legacy_entity_sheets(cfg)
 
 
-def test_ensure_adj_sheets_uses_child_group_baseline(cfg: Config) -> None:
-    """Child seeds come from the combined duplicate group (§6.2)."""
+def test_ensure_final_sheets_uses_raw_child_group_baseline(cfg: Config) -> None:
+    """A new child seed combines its in-memory raw duplicate group."""
     seed_raw(cfg)
-    seed_submissions(cfg)
-    ensure_adj_sheets(cfg)
-    by_id = {row["zite_record_id"]: row for row in read_adj(cfg, "child")}
-    # need_1 from the latest submission, desire_1 filled from the earlier.
+    ensure_final_sheets(cfg)
+
+    by_id = {row["zite_record_id"]: row for row in read_final(cfg, "child")}
     assert by_id["c1"]["need_1"] == "winter coat taht fits"
-    assert by_id["c1"]["desire_1"] == "blocks"
+    assert by_id["c1"]["desire_1"] == "N/A"
 
 
-def test_ensure_adj_sheets_idempotent(cfg: Config) -> None:
-    """A second run changes nothing (§7.4)."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
-    before = read_sheet(cfg.excel_file, "adj_child")
-    ensure_adj_sheets(cfg)
-    after = read_sheet(cfg.excel_file, "adj_child")
-    assert before is not None and after is not None
-    assert before.equals(after)
+def test_ensure_final_sheets_no_change_is_byte_and_row_identical(
+    cfg: Config,
+) -> None:
+    """Startup never refreshes existing finals or strips ignored/orphans."""
+    seed_final_sheets(cfg)
+    save_child(cfg, "c1", {"ignore": True, "status": "new"})
+    before_rows = {
+        entity: read_final(cfg, entity)
+        for entity in ("sponsor", "family", "child")
+    }
+    before_bytes = Path(cfg.excel_file).read_bytes()
+
+    ensure_final_sheets(cfg)
+
+    assert Path(cfg.excel_file).read_bytes() == before_bytes
+    for entity, expected in before_rows.items():
+        assert read_final(cfg, entity) == expected
+    stored_ids = {row["zite_record_id"] for row in before_rows["child"]}
+    assert stored_ids == {"c1", "c2", "orphan1"}
+    assert {
+        row["zite_record_id"] for row in read_eligible_final(cfg, "child")
+    } == {"c2"}
+    assert_no_legacy_entity_sheets(cfg)
 
 
-def test_ensure_adj_sheets_projects_final_child(cfg: Config) -> None:
-    """The startup projection writes final_child with live formulas (§7.2)."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
-    final = read_sheet(cfg.excel_file, "final_child")
-    assert final is not None
-    # Orphaned children (family_id null) never reach final_child.
-    assert final.height == 2
-    assert "orphan1" not in final["zite_record_id"].to_list()
-    assert final["zite_record_id"].to_list() == ["c1", "c2"]
-    assert final["status"].to_list() == [STATUS_NEW] * 2
-    caches = _final_child_formula_caches(Path(cfg.excel_file))
-    assert caches  # age cells are formulas with cached values
-
-
-def test_ensure_adj_sheets_requires_raw(cfg: Config) -> None:
-    """Missing raw sheets fail with an actionable error."""
-    with pytest.raises(Exception, match="acquire"):
-        ensure_adj_sheets(cfg)
-
-
-def test_ensure_adj_sheets_refuses_legacy_workbook(cfg: Config) -> None:
-    """A pre-v2 sparse adj_child blocks the v2 audit tool (§10.1).
-
-    The old system-of-record workbook must never be written by the v2
-    audit tool; the guard reads the sparse schema (no ``screened``
-    column) and refuses before any write happens.
-    """
-    seed_raw(cfg)
-    # the old screening's sparse sheet: no controls, no screened marker
-    write_sheets(
-        cfg.excel_file,
-        "screen",
+def test_ensure_final_sheets_only_appends_genuinely_missing_rows(
+    cfg: Config,
+) -> None:
+    """A new prepared child appends; every pre-existing final row stays exact."""
+    original = raw_child_row("c1")
+    seed_final_sheets(
+        cfg, children=[original, raw_child_row("orphan1", None, None)]
+    )
+    save_child(
+        cfg,
+        "c1",
         {
-            "adj_child": pl.DataFrame(
-                [{"zite_record_id": "c1", "need_1": "coat"}],
-                schema={"zite_record_id": pl.String, "need_1": pl.String},
-            )
+            "need_1": "human edit survives startup",
+            "status": "audited",
+            "ignore": False,
+            "clarification_notes": None,
         },
     )
-    with pytest.raises(Exception, match="pre-v2 sparse"):
-        ensure_adj_sheets(cfg)
-    # and nothing was written: no adj_family/final_child appeared
-    assert read_sheet(cfg.excel_file, "adj_family") is None
-    assert read_sheet(cfg.excel_file, "final_child") is None
+    c1_before = next(
+        row for row in read_final(cfg, "child") if row["zite_record_id"] == "c1"
+    )
+    before = {
+        entity: read_final(cfg, entity)
+        for entity in ("sponsor", "family", "child")
+    }
+    added = raw_child_row("c2", "1B")
+    added["first_name"] = "Sibling"
+    seed_raw(
+        cfg, children=[original, added, raw_child_row("orphan1", None, None)]
+    )
+
+    ensure_final_sheets(cfg)
+
+    after_children = read_final(cfg, "child")
+    assert {row["zite_record_id"] for row in after_children} == {
+        "c1",
+        "c2",
+        "orphan1",
+    }
+    assert len(after_children) == len(before["child"]) + 1
+    assert (
+        next(row for row in after_children if row["zite_record_id"] == "c1")
+        == c1_before
+    )
+    for entity in ("sponsor", "family"):
+        assert read_final(cfg, entity) == before[entity]
+    assert_no_legacy_entity_sheets(cfg)
 
 
-# ---------------------------------------------------------------------------
-# load_audit_data (§9.2).
-# ---------------------------------------------------------------------------
-
-
-def test_load_audit_data_groups_and_orphans(cfg: Config) -> None:
-    """Groups, orphans, and stats are built from one read (§6, §8.1)."""
+def test_ensure_final_sheets_full_final_keeps_orphan_and_xmas_formulas(
+    cfg: Config,
+) -> None:
+    """Initial final storage includes orphans and live age formula caches."""
     seed_raw(cfg)
-    seed_submissions(cfg)
-    ensure_adj_sheets(cfg)
+    ensure_final_sheets(cfg)
+
+    final = read_sheet(cfg.excel_file, "final_child")
+    assert final is not None
+    assert final.height == 3
+    assert final["zite_record_id"].to_list() == ["c2", "c1", "orphan1"]
+    assert list(final.columns) == list(FINAL_CHILD_COLUMNS)
+    assert final["status"].to_list() == [
+        STATUS_NEW,
+        STATUS_NEW,
+        STATUS_NEEDS_CLARIFICATION,
+    ]
+    caches = _final_child_formula_caches(Path(cfg.excel_file))
+    assert caches
+    assert all(value == "8" for value in caches.values())
+    assert [
+        row["zite_record_id"] for row in read_eligible_final(cfg, "child")
+    ] == [
+        "c2",
+        "c1",
+    ]
+    assert read_sheet(cfg.excel_file, "final_child") is not None
+    stored_final = read_sheet(cfg.excel_file, "final_child")
+    assert stored_final is not None and stored_final.height == 3
+
+
+def test_ensure_final_sheets_requires_raw(cfg: Config) -> None:
+    """Missing raw sheets fail with actionable acquire guidance."""
+    with pytest.raises(Exception, match="acquire"):
+        ensure_final_sheets(cfg)
+
+
+def test_legacy_projected_final_requires_consolidate_migrate(
+    cfg: Config,
+) -> None:
+    """A projected final fails closed and is never expanded in place."""
+    seed_raw(cfg)
+    workbook = load_workbook(cfg.excel_file)
+    legacy = workbook.create_sheet("final_child")
+    legacy.append(["zite_record_id", "first_name", "status"])
+    legacy.append(["legacy-c1", "Legacy", STATUS_AUDITED])
+    workbook.save(cfg.excel_file)
+    workbook.close()
+
+    with pytest.raises(AuditError) as caught:
+        ensure_final_sheets(cfg)
+
+    message = str(caught.value)
+    assert "persistent full schema" in message
+    assert "consolidate-migrate" in message
+    legacy_after = read_sheet(cfg.excel_file, "final_child")
+    assert legacy_after is not None
+    assert legacy_after.to_dicts() == [
+        {
+            "zite_record_id": "legacy-c1",
+            "first_name": "Legacy",
+            "status": STATUS_AUDITED,
+        }
+    ]
+    assert read_sheet(cfg.excel_file, "final_family") is None
+    assert read_sheet(cfg.excel_file, "final_sponsor") is None
+
+
+# ---------------------------------------------------------------------------
+# load_audit_data: final truth plus current in-memory prepared baselines.
+# ---------------------------------------------------------------------------
+
+
+def test_load_audit_data_groups_and_keeps_orphans(cfg: Config) -> None:
+    """Prepared groups and final orphan/ignored workflows share one load."""
+    seed_final_sheets(cfg)
     data = load_audit_data(cfg)
+
     assert [entry.sponsor_id for entry in data.sponsors] == [1]
     assert [entry.family_id for entry in data.families] == [1]
     family = data.families[0]
-    assert len(family.submissions) == 2
+    assert len(family.submissions) == 1
     by_id = {entry.zite_record_id: entry for entry in data.children}
     assert len(by_id["c1"].submissions) == 2
+    assert by_id["c1"].baseline["desire_1"] == "N/A"
     assert [entry.zite_record_id for entry in data.orphans] == ["orphan1"]
     assert data.child_stats.total == 3
-    assert data.child_stats.by_status[STATUS_NEW] == 3
+    assert data.child_stats.by_status[STATUS_NEW] == 2
+    assert data.child_stats.by_status[STATUS_NEEDS_CLARIFICATION] == 1
     assert data.sponsor_stats.by_status[STATUS_NEW] == 1
 
 
+def test_raw_missing_final_retains_edits_loads_and_saves(cfg: Config) -> None:
+    """Stored rows supply the raw-missing baseline instead of an unknown-ID error."""
+    seed_final_sheets(cfg)
+    save_child(
+        cfg,
+        "c1",
+        {
+            "need_1": "kept human edit",
+            "status": "new",
+            "ignore": False,
+            "clarification_notes": None,
+        },
+    )
+    current_children = default_raw_children()
+    seed_raw(
+        cfg,
+        children=[
+            row for row in current_children if row["zite_record_id"] != "c1"
+        ],
+    )
+    before_keys = {row["zite_record_id"] for row in read_final(cfg, "child")}
+
+    ensure_final_sheets(cfg)
+    data = load_audit_data(cfg)
+    by_id = {entry.zite_record_id: entry for entry in data.children}
+    assert "c1" in by_id
+    assert by_id["c1"].adj["need_1"] == "kept human edit"
+    assert by_id["c1"].baseline["need_1"] == "kept human edit"
+    assert {
+        row["zite_record_id"] for row in read_final(cfg, "child")
+    } == before_keys
+
+    saved = save_child(
+        cfg,
+        "c1",
+        {
+            "need_1": "second raw-missing edit",
+            "status": "new",
+            "ignore": False,
+            "clarification_notes": None,
+        },
+    )
+    assert saved["need_1"] == "second raw-missing edit"
+    stored = {row["zite_record_id"]: row for row in read_final(cfg, "child")}[
+        "c1"
+    ]
+    assert stored["need_1"] == "second raw-missing edit"
+    assert stored["status"] == STATUS_IN_PROGRESS
+
+    save_child(cfg, "c1", {"ignore": True, "status": "new"})
+    restored = save_child(
+        cfg,
+        "c1",
+        {"ignore": False, "status": "new", "clarification_notes": None},
+    )
+    assert restored["ignore"] is False
+    assert restored["zite_record_id"] == "c1"
+    assert "c1" in {row["zite_record_id"] for row in read_final(cfg, "child")}
+
+
 # ---------------------------------------------------------------------------
-# Saves (§9.2).
+# Direct full-final saves.
 # ---------------------------------------------------------------------------
 
 
 def test_save_child_dense_round_trip(cfg: Config) -> None:
-    """A save persists the full dense row and re-projects final_child."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
+    """A save persists the full dense row directly to final_child."""
+    seed_final_sheets(cfg)
     row = save_child(
         cfg,
         "c1",
         {
             "need_1": "winter coat that fits",
             "special_needs": "ADHD; other: speech delay",
-            "audited": True,
+            "status": "audited",
             "ignore": False,
-            "require_clarification": None,
+            "clarification_notes": None,
         },
     )
     assert row["need_1"] == "winter coat that fits"
     assert row["special_needs"] == "ADHD; other: speech delay"
     assert row["status"] == STATUS_AUDITED
     assert row["age_at_xmas"] == 8
-    by_id = {r["zite_record_id"]: r for r in read_adj(cfg, "child")}
-    assert by_id["c1"]["audited"] is True
+    by_id = {r["zite_record_id"]: r for r in read_final(cfg, "child")}
+    assert by_id["c1"]["status"] == STATUS_AUDITED
     assert by_id["c1"]["special_needs"] == "ADHD; other: speech delay"
-    final = read_sheet(cfg.excel_file, "final_child")
-    assert final is not None
-    saved = {r["zite_record_id"]: r for r in final.to_dicts()}
-    assert saved["c1"]["status"] == STATUS_AUDITED
-    assert saved["c1"]["special_needs"] == "ADHD; other: speech delay"
-    assert saved["c2"]["status"] == STATUS_NEW
+    assert by_id["c1"]["status"] == STATUS_AUDITED
+    assert by_id["c2"]["status"] == STATUS_NEW
+    assert set(by_id) == {"c1", "c2", "orphan1"}
 
 
 def test_save_child_recomputes_age_from_adjudicated_dob(cfg: Config) -> None:
-    """An adjudicated dob fix carries its matching age (D13)."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
-    row = save_child(cfg, "c1", {"dob": "2014-01-01", "audited": True})
+    """An adjudicated dob fix carries its matching formula-cached age."""
+    seed_final_sheets(cfg)
+    row = save_child(cfg, "c1", {"dob": "2014-01-01", "status": "audited"})
     assert row["age_at_xmas"] == 12
-    final = read_sheet(cfg.excel_file, "final_child")
-    assert final is not None
-    saved = {r["zite_record_id"]: r for r in final.to_dicts()}
+    saved = {r["zite_record_id"]: r for r in read_final(cfg, "child")}
     assert saved["c1"]["age_at_xmas"] == 12
-    # the final's age cell is a formula whose cached value matches
     caches = _final_child_formula_caches(Path(cfg.excel_file))
     assert "12" in caches.values()
 
 
-def test_save_child_orphan_cannot_be_audited(cfg: Config) -> None:
-    """Orphaned children cannot be marked audited (§8.7)."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
+def test_save_child_orphan_gate_uses_family_not_angel(cfg: Config) -> None:
+    """Letterless family children audit; only null family_id blocks approval."""
+    seed_final_sheets(cfg)
+    letterless = next(
+        row
+        for row in read_final(cfg, "child")
+        if row["family_id"] is not None and row["angel_id"] is None
+    )
+    approved = save_child(
+        cfg,
+        letterless["zite_record_id"],
+        {
+            "status": "audited",
+            "ignore": False,
+            "clarification_notes": None,
+        },
+    )
+    assert approved["family_id"] == 1
+    assert approved["angel_id"] is None
+    assert approved["status"] == STATUS_AUDITED
+
     with pytest.raises(Exception, match="orphaned child"):
-        save_child(cfg, "orphan1", {"audited": True})
+        save_child(cfg, "orphan1", {"status": "audited"})
     row = save_child(
         cfg,
         "orphan1",
-        {"audited": False, "require_clarification": "find family"},
+        {"status": "new", "clarification_notes": "find family"},
     )
     assert row["status"] == STATUS_NEEDS_CLARIFICATION
+    assert "orphan1" in {
+        row["zite_record_id"] for row in read_final(cfg, "child")
+    }
 
 
 def test_save_child_unknown_fields_rejected(cfg: Config) -> None:
-    """Only known columns are accepted."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
+    """Only known full-final save fields and stored identities are accepted."""
+    seed_final_sheets(cfg)
     with pytest.raises(Exception, match="unknown child fields"):
         save_child(cfg, "c1", {"nickname": "x"})
     with pytest.raises(Exception, match="unknown child"):
-        save_child(cfg, "nope", {"audited": False})
+        save_child(cfg, "nope", {"status": "new"})
 
 
-def test_save_child_ignore_skeletonizes_and_excludes(cfg: Config) -> None:
-    """Ignore reduces the row to its skeleton and drops the final row (§5.5)."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
-    save_child(cfg, "c1", {"need_1": "edited", "audited": False})
-    save_child(cfg, "c1", {"ignore": True, "audited": False})
-    by_id = {r["zite_record_id"]: r for r in read_adj(cfg, "child")}
+def test_save_child_ignore_skeletonizes_but_stays_stored(cfg: Config) -> None:
+    """Ignore clears editable data while retaining identity and module state."""
+    seed_final_sheets(cfg)
+    before_keys = {row["zite_record_id"] for row in read_final(cfg, "child")}
+    children = read_final(cfg, "child")
+    for stored in children:
+        if stored["zite_record_id"] == "c1":
+            stored["screened"] = True
+            stored["generated_info_sheet"] = True
+            stored["potential_duplicate"] = True
+    write_sheets(
+        cfg.excel_file,
+        "generate",
+        {"final_child": build_final_frame("child", children)},
+        xmas=cfg.xmas,
+    )
+    save_child(cfg, "c1", {"need_1": "edited", "status": "new"})
+    save_child(cfg, "c1", {"ignore": True, "status": "new"})
+
+    by_id = {r["zite_record_id"]: r for r in read_final(cfg, "child")}
     ignored = by_id["c1"]
     assert ignored["ignore"] is True
     assert ignored["status"] == STATUS_IGNORED
@@ -690,61 +948,137 @@ def test_save_child_ignore_skeletonizes_and_excludes(cfg: Config) -> None:
     assert ignored["age_at_xmas"] is None
     assert ignored["first_name"] == "Kiddo"
     assert ignored["primary_email"] == "fam@example.com"
-    final = read_sheet(cfg.excel_file, "final_child")
-    assert final is not None
-    assert "c1" not in final["zite_record_id"].to_list()
+    assert ignored["screened"] is True
+    assert ignored["generated_info_sheet"] is True
+    assert ignored["potential_duplicate"] is True
+    assert set(by_id) == before_keys
+    assert "c1" not in {
+        row["zite_record_id"] for row in read_eligible_final(cfg, "child")
+    }
 
 
-def test_save_child_unignore_reseeds_from_baseline(cfg: Config) -> None:
-    """Un-ignore re-seeds from the baseline; edits are lost (§5.5)."""
-    seed_raw(cfg)
-    seed_submissions(cfg)
-    ensure_adj_sheets(cfg)
-    save_child(cfg, "c1", {"need_1": "human edit", "audited": False})
-    save_child(cfg, "c1", {"ignore": True, "audited": False})
+def test_save_child_unignore_reseeds_from_prepared_group_baseline(
+    cfg: Config,
+) -> None:
+    """Un-ignore restores the current raw-derived group baseline, not edits."""
+    seed_final_sheets(cfg)
+    children = read_final(cfg, "child")
+    for stored in children:
+        if stored["zite_record_id"] == "c1":
+            stored["screened"] = True
+            stored["generated_info_sheet"] = True
+            stored["potential_duplicate"] = True
+    write_sheets(
+        cfg.excel_file,
+        "generate",
+        {"final_child": build_final_frame("child", children)},
+        xmas=cfg.xmas,
+    )
+    save_child(cfg, "c1", {"need_1": "human edit", "status": "new"})
+    save_child(cfg, "c1", {"ignore": True, "status": "new"})
     row = save_child(
         cfg,
         "c1",
-        {"ignore": False, "audited": False, "require_clarification": None},
+        {"ignore": False, "status": "new", "clarification_notes": None},
     )
     assert row["ignore"] is False
-    # back to the combined-group baseline, not the lost human edit
     assert row["need_1"] == "winter coat taht fits"
-    assert row["desire_1"] == "blocks"
+    assert row["desire_1"] == "N/A"
     assert row["status"] == STATUS_NEW
-    final = read_sheet(cfg.excel_file, "final_child")
-    assert final is not None
-    assert "c1" in final["zite_record_id"].to_list()
+    assert row["screened"] is True
+    assert row["generated_info_sheet"] is True
+    assert row["potential_duplicate"] is True
+    assert "c1" in {row["zite_record_id"] for row in read_final(cfg, "child")}
+    assert "c1" in {
+        row["zite_record_id"] for row in read_eligible_final(cfg, "child")
+    }
 
 
-def test_save_child_preserves_generated_info_sheet_and_screened(
+def test_saves_preserve_child_generation_and_match_assignments(
     cfg: Config,
 ) -> None:
-    """Module-owned columns survive audit saves (§4.4)."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
-    # module 2 screened the child; module 5 generated its sheet
-    rows = read_adj(cfg, "child")
-    for row in rows:
+    """Generation, screening, family, and sponsor module fields survive saves."""
+    seed_final_sheets(cfg)
+    children = read_final(cfg, "child")
+    for row in children:
         if row["zite_record_id"] == "c1":
             row["screened"] = True
             row["generated_info_sheet"] = True
     write_sheets(
         cfg.excel_file,
         "generate",
-        {"adj_child": build_adj_frame("child", rows)},
+        {"final_child": build_final_frame("child", children)},
+        xmas=cfg.xmas,
     )
-    row = save_child(cfg, "c1", {"need_1": "new edit", "audited": True})
-    assert row["screened"] is True
-    assert row["generated_info_sheet"] is True
+    families = read_final(cfg, "family")
+    families[0]["assigned_sponsor_id"] = 1
+    families[0]["assigned_angel_ids"] = "1A"
+    families[0]["num_angels_in_family"] = 1
+    sponsors = read_final(cfg, "sponsor")
+    sponsors[0]["assigned_angel_ids"] = "1A"
+    sponsors[0]["num_angels_assigned"] = 1
+    write_sheets(
+        cfg.excel_file,
+        "match",
+        {
+            "final_family": build_final_frame("family", families),
+            "final_sponsor": build_final_frame("sponsor", sponsors),
+        },
+    )
+
+    child = save_child(cfg, "c1", {"need_1": "new edit", "status": "audited"})
+    family = save_family(
+        cfg,
+        1,
+        {"phone": "(906) 555-1111", "status": "audited"},
+    )
+    sponsor = save_sponsor(
+        cfg, 1, {"age_preference": "Middle School (11-13 yrs)"}
+    )
+
+    assert child["screened"] is True
+    assert child["generated_info_sheet"] is True
+    stored_child = {
+        row["zite_record_id"]: row for row in read_final(cfg, "child")
+    }["c1"]
+    assert stored_child["screened"] is True
+    assert stored_child["generated_info_sheet"] is True
+    assert family["assigned_sponsor_id"] == 1
+    assert family["assigned_angel_ids"] == "1A"
+    assert family["num_angels_in_family"] == 1
+    assert family["status"] == STATUS_AUDITED
+    stored_family = read_final(cfg, "family")[0]
+    assert stored_family["phone"] == "(906) 555-1111"
+    assert stored_family["assigned_sponsor_id"] == 1
+    assert stored_family["assigned_angel_ids"] == "1A"
+    assert stored_family["num_angels_in_family"] == 1
+    assert sponsor["pref_age_min"] == 11
+    assert sponsor["pref_age_max"] == 13
+    assert sponsor["assigned_angel_ids"] == "1A"
+    stored_sponsor = read_final(cfg, "sponsor")[0]
+    assert stored_sponsor["assigned_angel_ids"] == "1A"
+    assert stored_sponsor["num_angels_assigned"] == 1
+
+
+def test_save_child_uses_write_lock(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every read-modify-write final save serializes through _WRITE_LOCK."""
+    seed_final_sheets(cfg)
+    lock = MagicMock()
+    monkeypatch.setattr(audit_store, "_WRITE_LOCK", lock)
+
+    save_child(cfg, "c1", {"need_1": "locked edit", "status": "new"})
+
+    lock.__enter__.assert_called_once_with()
+    lock.__exit__.assert_called_once_with(None, None, None)
 
 
 def test_save_child_merges_dob_conflict_note_idempotently(
     cfg: Config,
 ) -> None:
     """Conflict notes merge into potential_anomoly exactly once (§9.2)."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
+    seed_final_sheets(cfg)
     write_sheets(
         cfg.excel_file,
         "screen",
@@ -755,7 +1089,7 @@ def test_save_child_merges_dob_conflict_note_idempotently(
                         "family_id": 1,
                         "primary_email": "fam@example.com",
                         "child_a_zite_record_id": "c2",
-                        "child_a_angel_id": "1B",
+                        "child_a_angel_id": None,
                         "child_a_first_name": "Kiddo",
                         "child_a_dob": "2018-05-10",
                         "child_b_zite_record_id": "c1",
@@ -783,14 +1117,15 @@ def test_save_child_merges_dob_conflict_note_idempotently(
             )
         },
     )
-    save_child(cfg, "c1", {"audited": True, "potential_anomoly": "hand note"})
-    by_id = {r["zite_record_id"]: r for r in read_adj(cfg, "child")}
+    save_child(
+        cfg, "c1", {"status": "audited", "potential_anomoly": "hand note"}
+    )
+    by_id = {r["zite_record_id"]: r for r in read_final(cfg, "child")}
     anomoly = by_id["c1"]["potential_anomoly"] or ""
     assert anomoly.count("Sibling DOB conflict") == 1
     assert anomoly.startswith("hand note")
-    # re-save with the merged text already present: still once
-    save_child(cfg, "c1", {"audited": True, "potential_anomoly": anomoly})
-    by_id = {r["zite_record_id"]: r for r in read_adj(cfg, "child")}
+    save_child(cfg, "c1", {"status": "audited", "potential_anomoly": anomoly})
+    by_id = {r["zite_record_id"]: r for r in read_final(cfg, "child")}
     assert (by_id["c1"]["potential_anomoly"] or "").count(
         "Sibling DOB conflict"
     ) == 1
@@ -798,77 +1133,45 @@ def test_save_child_merges_dob_conflict_note_idempotently(
 
 def test_save_child_status_transitions(cfg: Config) -> None:
     """Status flows new -> in_progress -> needs_clarification -> audited."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
-    assert read_adj(cfg, "child")[0]["status"] == STATUS_NEW
+    seed_final_sheets(cfg)
+    assert read_final(cfg, "child")[0]["status"] == STATUS_NEW
     save_child(cfg, "c1", {"need_1": "edited"})
-    by_id = {r["zite_record_id"]: r for r in read_adj(cfg, "child")}
+    by_id = {r["zite_record_id"]: r for r in read_final(cfg, "child")}
     assert by_id["c1"]["status"] == STATUS_IN_PROGRESS
-    save_child(cfg, "c1", {"need_1": "edited", "require_clarification": "call"})
-    by_id = {r["zite_record_id"]: r for r in read_adj(cfg, "child")}
+    save_child(cfg, "c1", {"need_1": "edited", "clarification_notes": "call"})
+    by_id = {r["zite_record_id"]: r for r in read_final(cfg, "child")}
     assert by_id["c1"]["status"] == STATUS_NEEDS_CLARIFICATION
     save_child(
         cfg,
         "c1",
-        {"need_1": "edited", "require_clarification": "call", "audited": True},
-    )
-    by_id = {r["zite_record_id"]: r for r in read_adj(cfg, "child")}
-    assert by_id["c1"]["status"] == STATUS_AUDITED
-    # audited is revocable: unchecking recomputes from note/edit state
-    save_child(
-        cfg,
-        "c1",
-        {"need_1": "edited", "require_clarification": "call", "audited": False},
-    )
-    by_id = {r["zite_record_id"]: r for r in read_adj(cfg, "child")}
-    assert by_id["c1"]["status"] == STATUS_NEEDS_CLARIFICATION
-
-
-def test_save_family_and_sponsor_preserve_assignments(cfg: Config) -> None:
-    """Family/sponsor saves preserve assignment columns and project nothing."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
-    # module 4 wrote assignments into the adj sheets
-    families = read_adj(cfg, "family")
-    families[0]["assigned_sponsor_id"] = 1
-    families[0]["assigned_angel_ids"] = "1A,1B"
-    families[0]["num_angels_in_family"] = 2
-    sponsors = read_adj(cfg, "sponsor")
-    sponsors[0]["assigned_angel_ids"] = "1A,1B"
-    sponsors[0]["num_angels_assigned"] = 2
-    write_sheets(
-        cfg.excel_file,
-        "audit",
         {
-            "adj_family": build_adj_frame("family", families),
-            "adj_sponsor": build_adj_frame("sponsor", sponsors),
+            "need_1": "edited",
+            "clarification_notes": "call",
+            "status": "audited",
         },
     )
-    row = save_family(cfg, 1, {"phone": "(906) 555-1111", "audited": True})
-    assert row["assigned_sponsor_id"] == 1
-    assert row["assigned_angel_ids"] == "1A,1B"
-    assert row["num_angels_in_family"] == 2
-    assert row["status"] == STATUS_AUDITED
-    saved = read_adj(cfg, "family")[0]
-    assert saved["phone"] == "(906) 555-1111"
-    assert saved["assigned_sponsor_id"] == 1
-    # family saves do not write final_family (match projects it, §7.2)
-    assert read_sheet(cfg.excel_file, "final_family") is None
-    row = save_sponsor(cfg, 1, {"age_preference": "Middle School (11-13 yrs)"})
-    assert row["pref_age_min"] == 11
-    assert row["pref_age_max"] == 13
-    assert row["assigned_angel_ids"] == "1A,1B"
+    by_id = {r["zite_record_id"]: r for r in read_final(cfg, "child")}
+    assert by_id["c1"]["status"] == STATUS_AUDITED
+    save_child(
+        cfg,
+        "c1",
+        {"need_1": "edited", "clarification_notes": "call", "status": "new"},
+    )
+    by_id = {r["zite_record_id"]: r for r in read_final(cfg, "child")}
+    assert by_id["c1"]["status"] == STATUS_NEEDS_CLARIFICATION
 
 
-def test_adj_only_save_keeps_final_child_formula_caches(cfg: Config) -> None:
-    """A sponsor/family save restores the final_child caches (§7.2)."""
-    seed_raw(cfg)
-    ensure_adj_sheets(cfg)
+def test_non_child_save_keeps_final_child_formula_caches(cfg: Config) -> None:
+    """A family/sponsor write does not strip final-child formula caches."""
+    seed_final_sheets(cfg)
     before = _final_child_formula_caches(Path(cfg.excel_file))
     assert before
     save_sponsor(cfg, 1, {"phone": "(906) 555-2222"})
-    after = _final_child_formula_caches(Path(cfg.excel_file))
-    assert after == before
+    after_sponsor = _final_child_formula_caches(Path(cfg.excel_file))
+    assert after_sponsor == before
+    save_family(cfg, 1, {"phone": "(906) 555-3333"})
+    after_family = _final_child_formula_caches(Path(cfg.excel_file))
+    assert after_family == before
 
 
 def test_as_bool_tolerates_string_round_trips() -> None:
@@ -883,7 +1186,7 @@ def test_dob_conflict_notes_and_merge_helpers() -> None:
     log_rows = [
         {
             "child_a_zite_record_id": "c2",
-            "child_a_angel_id": "1B",
+            "child_a_angel_id": None,
             "child_a_first_name": "Kiddo",
             "child_a_dob": "2018-05-10",
             "child_b_zite_record_id": "c1",
@@ -903,20 +1206,20 @@ def test_dob_conflict_notes_and_merge_helpers() -> None:
     assert merge_anomoly("AI text", None) == "AI text"
 
 
-def test_build_adj_frame_normalizes_string_booleans() -> None:
-    """String booleans and float ints coerce to the schema types."""
+def test_build_final_frame_normalizes_string_booleans() -> None:
+    """String booleans and float ints coerce to full-final schema types."""
     rows = [
         {
             "zite_record_id": "c1",
-            "audited": "true",
+            "status": "audited",
             "ignore": "false",
             "screened": None,
             "family_id": 1.0,
         }
     ]
-    frame = build_adj_frame("child", rows)
-    assert frame.schema["audited"] == pl.Boolean
-    assert frame["audited"].to_list() == [True]
+    frame = build_final_frame("child", rows)
+    assert frame.schema["status"] == pl.String
+    assert frame["status"].to_list() == ["audited"]
     assert frame["ignore"].to_list() == [False]
     assert frame["screened"].to_list() == [False]
     assert frame["family_id"].to_list() == [1]

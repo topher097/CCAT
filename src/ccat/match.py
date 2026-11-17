@@ -2,14 +2,15 @@
 
 Assigns whole families to sponsors: special-needs sponsors first, then
 Individuals, then Organization/Walmart sponsors, honoring exact child counts
-and lexicographic preference tiers.  Reads the dense ``adj_*`` sheets
-directly (never ``raw_*``): the child pool is every ``adj_child`` row with
-``status == "audited"``, a non-null ``angel_id``, and ``ignore != true``;
-family/sponsor pools are the non-ignored ``adj_family``/``adj_sponsor``
-rows.  Writes assignments into the assignment columns of
-``adj_family``/``adj_sponsor`` (all other columns preserved), projects
-``final_family``/``final_sponsor`` from the adj sheets (archiving previous
-finals to timestamped sheets), and writes ``match_report``.
+and lexicographic preference tiers. Reads complete persistent ``final_*``
+stores, then builds separate match pools: linked, audited, non-ignored
+children with non-null ``angel_id`` and non-ignored families/sponsors. Only
+assignment-owned fields are patched back onto the complete family and sponsor
+stores. Ignored and raw-missing rows, human edits, controls, source metadata,
+and AI fields remain intact. Previous complete outputs are archived to
+timestamped sheets before replacement unless ``overwrite`` is requested;
+``match_report`` and its CSV retain their existing behavior. ``final_child``
+is never written.
 """
 
 import logging
@@ -22,13 +23,14 @@ import polars as pl
 
 from ccat.acquire import SPECIAL_NEEDS_LABEL
 from ccat.audit.store import (
-    FINAL_FAMILY_COLUMNS,
-    FINAL_SPONSOR_COLUMNS,
+    FAMILY_ASSIGNMENT_COLUMNS,
+    SPONSOR_ASSIGNMENT_COLUMNS,
     STATUS_AUDITED,
     as_bool,
-    build_adj_frame,
-    project_final,
-    read_adj,
+    build_final_frame,
+    eligible_output_rows,
+    merge_owned_fields,
+    read_final,
 )
 from ccat.config import Config
 from ccat.io import list_sheets, write_sheets
@@ -304,64 +306,44 @@ def greedy_subset(
     return backtrack(0, 0, [])
 
 
-def _load_adj_sheets(
+def _load_final_stores(
     cfg: Config,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Load the dense adj sheets match works from (§7.5).
+    """Load every row from the three complete persistent stores.
 
     Args:
         cfg: Pipeline configuration.
 
     Returns:
-        A tuple of (adj_family rows sorted by family_id, adj_sponsor
-        rows sorted by sponsor_id, adj_child rows).
-
-    Raises:
-        MatchError: If the adj sheets are missing or empty (run
-            ``ccat audit`` first, which seeds them).
+        A tuple of complete ``final_family``, ``final_sponsor``, and
+        ``final_child`` rows. No eligibility filtering happens here, so
+        ignored, orphaned, and raw-missing rows remain available for writeback.
     """
-    adj_family = sorted(
-        (
-            row
-            for row in read_adj(cfg, "family")
-            if not as_bool(row.get("ignore"))
-        ),
-        key=lambda row: row["family_id"],
+    return (
+        read_final(cfg, "family"),
+        read_final(cfg, "sponsor"),
+        read_final(cfg, "child"),
     )
-    adj_sponsor = sorted(
-        (
-            row
-            for row in read_adj(cfg, "sponsor")
-            if not as_bool(row.get("ignore"))
-        ),
-        key=lambda row: row["sponsor_id"],
-    )
-    if not adj_family or not adj_sponsor:
-        raise MatchError(
-            "adj_family/adj_sponsor sheets are missing or empty; run"
-            " `ccat audit` first (it seeds the adj sheets from raw)"
-        )
-    adj_child = read_adj(cfg, "child")
-    return adj_family, adj_sponsor, adj_child
 
 
 def _participating_children(
-    adj_child: list[dict[str, Any]],
+    final_child: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Select adj_child rows that participate in matchmaking (§7.5).
+    """Select final_child rows that participate in matchmaking (§7.5).
 
     Only rows with ``status == "audited"``, ``ignore != true``, and a
-    non-null ``angel_id``.
+    non-null ``angel_id``. The caller supplies persistent-final children
+    already filtered to non-ignored rows with a non-null ``family_id``.
 
     Args:
-        adj_child: All dense adj_child rows.
+        final_child: Linked final_child rows eligible for downstream output.
 
     Returns:
         The participating child rows.
     """
     return [
         row
-        for row in adj_child
+        for row in final_child
         if row.get("status") == STATUS_AUDITED
         and not as_bool(row.get("ignore"))
         and row.get("angel_id")
@@ -369,19 +351,19 @@ def _participating_children(
 
 
 def _children_per_family(
-    adj_child: list[dict[str, Any]],
+    final_child: list[dict[str, Any]],
 ) -> dict[Any, int]:
-    """Count non-ignored ``adj_child`` rows per ``family_id`` (§7.5).
+    """Count non-ignored ``final_child`` rows per ``family_id`` (§7.5).
 
     Args:
-        adj_child: All dense adj_child rows.
+        final_child: All final_child rows.
 
     Returns:
         Mapping of ``family_id`` to the number of non-ignored child
         rows sharing it.
     """
     counts: dict[Any, int] = {}
-    for row in adj_child:
+    for row in final_child:
         if as_bool(row.get("ignore")):
             continue
         family_id = row.get("family_id")
@@ -401,8 +383,8 @@ def reconcile_pre_assignments(
     the sponsor's num_children allows).
 
     Args:
-        sponsor_rows: Dense adj_sponsor rows.
-        children: Participating adj_child rows.
+        sponsor_rows: Non-ignored persistent-final sponsor pool rows.
+        children: Participating final_child rows.
 
     Returns:
         A tuple of (sponsor_id -> SponsorPlan for pre-assigned sponsors,
@@ -642,16 +624,16 @@ def match_sponsors(
 
 
 def _reconcile_sponsor_assignments(
-    adj_sponsor: list[dict[str, Any]],
+    sponsor_pool: list[dict[str, Any]],
 ) -> list[str]:
-    """Propagate prior angel assignments inside ``adj_sponsor`` (§7.2).
+    """Propagate prior angel assignments in the final sponsor pool (§7.2).
 
     A non-empty ``prior_assigned_angel_ids`` is propagated to the
     sponsor's ``assigned_angel_ids`` (the raw manual entry wins over the
     carried-over list); otherwise the existing assignment carries over.
 
     Args:
-        adj_sponsor: All dense adj_sponsor rows, updated in place.
+        sponsor_pool: Non-ignored persistent-final sponsor rows, updated in place.
 
     Returns:
         Warning messages for anomalies the auditor should know about.
@@ -662,7 +644,7 @@ def _reconcile_sponsor_assignments(
     """
     warnings: list[str] = []
     owners: dict[str, set[int]] = {}
-    for row in adj_sponsor:
+    for row in sponsor_pool:
         sponsor_id = row["sponsor_id"]
         prior_text = row.get("prior_assigned_angel_ids")
         prior_ids = parse_prior_assigned(str(prior_text)) if prior_text else []
@@ -690,27 +672,27 @@ def _reconcile_sponsor_assignments(
             for angel_id, sponsor_ids in sorted(duplicates.items())
         )
         raise MatchError(
-            "duplicate angel assignments in adj_sponsor:"
+            "duplicate angel assignments in final_sponsor:"
             f" {detail}; resolve manually and rerun"
         )
     return warnings
 
 
 def _reconcile_family_assignments(
-    adj_family: list[dict[str, Any]],
+    family_pool: list[dict[str, Any]],
     children_per_family: dict[Any, int],
 ) -> list[str]:
-    """Refresh ``num_angels_in_family`` on every adj_family row (§7.5).
+    """Refresh child counts on every eligible persistent-final family row.
 
     Args:
-        adj_family: All dense adj_family rows, updated in place.
-        children_per_family: Non-ignored adj_child row count per family.
+        family_pool: Non-ignored persistent-final family rows, updated in place.
+        children_per_family: Non-ignored final_child row count per family.
 
     Returns:
         Warning messages (families whose assigned sponsor vanished are
         reported by the caller via the sponsor pool).
     """
-    for row in adj_family:
+    for row in family_pool:
         row["num_angels_in_family"] = children_per_family.get(
             row["family_id"], 0
         )
@@ -718,22 +700,22 @@ def _reconcile_family_assignments(
 
 
 def _angel_family_map(
-    adj_child: list[dict[str, Any]],
+    final_child: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Map ``angel_id`` to ``family_id`` from ``adj_child`` (§8.5).
+    """Map ``angel_id`` to ``family_id`` from ``final_child`` (§8.5).
 
     Includes every non-ignored row with a non-null ``angel_id``,
     regardless of audit state — reconciliation syncs assignments, it
     does not matchmake.
 
     Args:
-        adj_child: All dense adj_child rows.
+        final_child: All final_child rows.
 
     Returns:
         Mapping of ``angel_id`` to the child's ``family_id``.
     """
     mapping: dict[str, Any] = {}
-    for row in adj_child:
+    for row in final_child:
         if as_bool(row.get("ignore")):
             continue
         angel_id = row.get("angel_id")
@@ -756,12 +738,12 @@ def _apply_prior_to_family_rows(
     prior angel's family gets ``assigned_sponsor_id`` set to that sponsor
     and ``assigned_angel_ids`` set to that sponsor's prior angels of the
     family.  Sibling carry-over lists are replaced, not merged — the raw
-    manual entry is authoritative.  Unknown angel ids and families absent
-    from ``adj_family`` warn.  A family assigned to another current
-    ``adj_sponsor`` sponsor keeps that assignment and warns (split
-    family); iterating in ``sponsor_id`` order makes the earlier sponsor
-    win deterministically.  A family assigned to a sponsor no longer in
-    ``adj_sponsor`` is a stale assignment: the prior wins.
+    manual entry is authoritative. Unknown angel ids and families absent
+    from the eligible ``final_family`` pool warn. A family assigned to another
+    current, non-ignored ``final_sponsor`` keeps that assignment and warns
+    (split family); iterating in ``sponsor_id`` order makes the earlier
+    sponsor win deterministically. A family assigned to a sponsor absent from
+    the eligible sponsor pool has a stale assignment: the prior wins.
 
     With ``unassigned_only`` (the full-match path), families that already
     carry an assignment are skipped entirely — the §8.5 machinery and
@@ -770,11 +752,11 @@ def _apply_prior_to_family_rows(
 
     Args:
         family_rows: ``final_family`` rows, updated in place.
-        sponsor_rows: Dense adj_sponsor rows, sorted by
-            ``sponsor_id``.
+        sponsor_rows: Non-ignored persistent-final sponsor pool rows, sorted
+            by ``sponsor_id``.
         angel_family: ``angel_id`` to ``family_id`` map from
-            ``adj_child``.
-        valid_sponsor_ids: ``sponsor_id``s present in ``adj_sponsor``.
+            ``final_child``.
+        valid_sponsor_ids: ``sponsor_id``s present in the sponsor pool.
         unassigned_only: Only fill families with no current assignment.
 
     Returns:
@@ -794,7 +776,7 @@ def _apply_prior_to_family_rows(
             if family_id is None:
                 message = (
                     f"sponsor {sponsor_id} prior angel {angel_id} is not"
-                    " in adj_child; family assignment skipped"
+                    " in final_child; family assignment skipped"
                 )
                 warnings.append(message)
                 logger.warning("%s", message)
@@ -806,7 +788,7 @@ def _apply_prior_to_family_rows(
                 message = (
                     f"sponsor {sponsor_id} prior angel(s) {angel_ids}"
                     f" reference family {family_id}, which is not in"
-                    " adj_family; skipped"
+                    " eligible final_family match pool; skipped"
                 )
                 warnings.append(message)
                 logger.warning("%s", message)
@@ -821,8 +803,8 @@ def _apply_prior_to_family_rows(
                     # Stale pointer to a vanished sponsor; prior wins.
                     message = (
                         f"family {family_id} had stale assignment to"
-                        f" sponsor {current}, who is no longer in"
-                        f" adj_sponsor; reassigned to sponsor"
+                        f" sponsor {current}, who is no longer in the"
+                        f" eligible final_sponsor pool; reassigned to sponsor"
                         f" {sponsor_id} via prior angels {angel_ids}"
                     )
                     warnings.append(message)
@@ -845,8 +827,8 @@ def _apply_prior_to_family_rows(
 
 
 def _duplicate_pool_warnings(
-    adj_family: list[dict[str, Any]],
-    adj_sponsor: list[dict[str, Any]],
+    family_pool: list[dict[str, Any]],
+    sponsor_pool: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
     """Flag unresolved duplicate entities left in the pools (§8.7).
 
@@ -857,15 +839,15 @@ def _duplicate_pool_warnings(
     reported here.
 
     Args:
-        adj_family: The non-ignored adj_family rows.
-        adj_sponsor: The non-ignored adj_sponsor rows.
+        family_pool: Non-ignored persistent-final family rows.
+        sponsor_pool: Non-ignored persistent-final sponsor rows.
 
     Returns:
         match_report rows (kind ``duplicate``), one per unresolved pair.
     """
     report: list[dict[str, str]] = []
     by_email: dict[str, list[str]] = {}
-    for row in adj_family:
+    for row in family_pool:
         email = row.get("primary_email")
         if email:
             by_email.setdefault(str(email).strip().lower(), []).append(
@@ -885,7 +867,7 @@ def _duplicate_pool_warnings(
                 }
             )
     by_sponsor_email: dict[str, list[str]] = {}
-    for row in adj_sponsor:
+    for row in sponsor_pool:
         email = row.get("email")
         if email:
             by_sponsor_email.setdefault(str(email).strip().lower(), []).append(
@@ -913,69 +895,87 @@ def run(
     overwrite: bool = False,
     skip_match: bool = False,
 ) -> None:
-    """Run module 4 end to end (§8, audit_architecture.md §7.5).
+    """Run module 4 against the complete persistent-final stores.
 
-    Pools come straight from the dense adj sheets: children with
-    ``status == "audited"`` and a non-null ``angel_id``, non-ignored
-    families and sponsors.  Assignments are written into the assignment
-    columns of ``adj_family``/``adj_sponsor`` (every other column is
-    preserved), then ``final_family``/``final_sponsor`` are projected
-    from the adj sheets and ``match_report`` written (previous finals
-    archived to timestamped sheets unless ``overwrite``).
+    Match pools contain linked children with ``status == "audited"``,
+    ``ignore != true``, and a non-null ``angel_id``, plus non-ignored
+    families and sponsors. Assignment results update only their owned fields
+    on the complete ``final_family`` and ``final_sponsor`` rows. All other
+    fields and every filtered-out row survive unchanged. Previous complete
+    outputs are archived unless ``overwrite`` is requested.
 
     Args:
         cfg: Pipeline configuration.
         test: Stop after the first full sponsor: only the first sponsor
             in phase order is matched; the match_report records that this
-            is a partial test run.  Has no effect with ``skip_match``.
+            is a partial test run. Has no effect with ``skip_match``.
         overwrite: Replace previous ``final_family``/``final_sponsor``/
             ``match_report`` outputs in place instead of archiving them
-            (§8.6).  The child pool gate (``status == "audited"``) is
-            structural and never bypassed.
-        skip_match: Reconcile the assignment columns inside the adj
-            sheets without running the matching algorithm: prior
-            assignments carry over, a non-empty
+            (§8.6). The child pool gates are structural and never bypassed.
+        skip_match: Reconcile assignment-owned fields without running the
+            matching algorithm: prior assignments carry over, a non-empty
             ``prior_assigned_angel_ids`` propagates to the sponsor's
-            ``assigned_angel_ids`` and points each prior angel's family
-            at that sponsor in ``adj_family``;
-            ``num_angels_in_family`` is recomputed from ``adj_child``;
-            duplicate angel ids across sponsors raise ``MatchError``.
-            The finals are re-projected; ``match_report`` is untouched.
+            ``assigned_angel_ids`` and points each prior angel's eligible
+            family at that sponsor; ``num_angels_in_family`` is recomputed
+            from non-ignored ``final_child`` rows; duplicate angel ids across
+            eligible sponsors raise ``MatchError``. ``match_report`` and its
+            CSV remain untouched.
 
     Raises:
-        MatchError: If the adj sheets are missing (run ``ccat audit``
-            first) or duplicate angel assignments are found.
+        MatchError: If ``final_family`` or ``final_sponsor`` has no eligible
+            rows, or duplicate angel assignments are found.
     """
-    adj_family, adj_sponsor, adj_child = _load_adj_sheets(cfg)
-    children_per_family = _children_per_family(adj_child)
+    stored_family, stored_sponsor, final_child = _load_final_stores(cfg)
+    family_pool = sorted(
+        (dict(row) for row in eligible_output_rows(stored_family, "family")),
+        key=lambda row: row["family_id"],
+    )
+    sponsor_pool = sorted(
+        (dict(row) for row in eligible_output_rows(stored_sponsor, "sponsor")),
+        key=lambda row: row["sponsor_id"],
+    )
+    if not family_pool or not sponsor_pool:
+        raise MatchError(
+            "final_family/final_sponsor sheets are missing, empty, or contain"
+            " no non-ignored rows; run `ccat screen` to seed persistent finals"
+            " and `ccat audit` to review them"
+        )
+    children_per_family = _children_per_family(final_child)
 
     if skip_match:
         if test:
             logger.warning("--test has no effect with --skip-match")
-        _reconcile_sponsor_assignments(adj_sponsor)
-        _reconcile_family_assignments(adj_family, children_per_family)
+        _reconcile_sponsor_assignments(sponsor_pool)
+        _reconcile_family_assignments(family_pool, children_per_family)
         _apply_prior_to_family_rows(
-            adj_family,
-            adj_sponsor,
-            _angel_family_map(adj_child),
-            {row["sponsor_id"] for row in adj_sponsor},
+            family_pool,
+            sponsor_pool,
+            _angel_family_map(final_child),
+            {row["sponsor_id"] for row in sponsor_pool},
         )
         _write_outputs(
-            cfg, adj_family, adj_sponsor, None, archive=not overwrite
+            cfg,
+            stored_family,
+            stored_sponsor,
+            family_pool,
+            sponsor_pool,
+            None,
+            archive=not overwrite,
         )
         logger.info(
-            "skip-match: reconciled %d adj_family rows;"
-            " reconciled %d adj_sponsor rows; matching algorithm skipped,"
-            " match_report untouched",
-            len(adj_family),
-            len(adj_sponsor),
+            "skip-match: reconciled %d eligible final_family rows;"
+            " reconciled %d eligible final_sponsor rows; matching algorithm"
+            " skipped, match_report untouched",
+            len(family_pool),
+            len(sponsor_pool),
         )
         return
 
-    children = _participating_children(adj_child)
+    linked_children = eligible_output_rows(final_child, "child")
+    children = _participating_children(linked_children)
     logger.info("participating audited children: %d", len(children))
 
-    pre_assigned, report = reconcile_pre_assignments(adj_sponsor, children)
+    pre_assigned, report = reconcile_pre_assignments(sponsor_pool, children)
     pre_assigned_angels = {
         angel_id
         for plan in pre_assigned.values()
@@ -985,7 +985,7 @@ def run(
     for child in children:
         children_by_family.setdefault(child["family_id"], []).append(child)
 
-    family_by_id = {row["family_id"]: row for row in adj_family}
+    family_by_id = {row["family_id"]: row for row in family_pool}
     pool_families = [
         PoolFamily(
             family_id=family_id,
@@ -1007,7 +1007,7 @@ def run(
             is_special_needs=row.get("age_preference") == SPECIAL_NEEDS_LABEL,
             is_pre_assigned=False,
         )
-        for row in adj_sponsor
+        for row in sponsor_pool
         if row["sponsor_id"] not in pre_assigned
     ]
     sn_weight = special_needs_weight(
@@ -1062,7 +1062,7 @@ def run(
                     "reason": reason,
                 }
             )
-    for family_row in adj_family:
+    for family_row in family_pool:
         family_id = family_row["family_id"]
         if (
             family_id not in children_by_family
@@ -1076,7 +1076,7 @@ def run(
                 }
             )
 
-    for row in adj_family:
+    for row in family_pool:
         family_id = row["family_id"]
         sponsor_id = assignments.get(family_id) or pre_family_assignments.get(
             family_id
@@ -1098,17 +1098,17 @@ def run(
     # Prior angels also point their family at the sponsor when the §8.5
     # machinery left the family unassigned (e.g. partially covered).
     _apply_prior_to_family_rows(
-        adj_family,
-        adj_sponsor,
-        _angel_family_map(adj_child),
-        {row["sponsor_id"] for row in adj_sponsor},
+        family_pool,
+        sponsor_pool,
+        _angel_family_map(final_child),
+        {row["sponsor_id"] for row in sponsor_pool},
         unassigned_only=True,
     )
     sponsor_plans = {
         plan.sponsor_id: plan
         for plan in pool_sponsors + list(pre_assigned.values())
     }
-    for row in adj_sponsor:
+    for row in sponsor_pool:
         plan = sponsor_plans.get(row["sponsor_id"])
         angel_ids = (
             sorted(plan.assigned_angel_ids, key=_angel_sort_key) if plan else []
@@ -1116,13 +1116,19 @@ def run(
         row["assigned_angel_ids"] = ",".join(angel_ids) if angel_ids else None
         row["num_angels_assigned"] = len(angel_ids)
 
-    report.extend(_duplicate_pool_warnings(adj_family, adj_sponsor))
+    report.extend(_duplicate_pool_warnings(family_pool, sponsor_pool))
     report_frame = pl.DataFrame(
         report,
         schema={"kind": pl.String, "ref": pl.String, "reason": pl.String},
     )
     _write_outputs(
-        cfg, adj_family, adj_sponsor, report_frame, archive=not overwrite
+        cfg,
+        stored_family,
+        stored_sponsor,
+        family_pool,
+        sponsor_pool,
+        report_frame,
+        archive=not overwrite,
     )
     report_frame.write_csv(cfg.match_report_csv)
     logger.info(
@@ -1135,27 +1141,44 @@ def run(
 
 def _write_outputs(
     cfg: Config,
-    adj_family: list[dict[str, Any]],
-    adj_sponsor: list[dict[str, Any]],
+    stored_family: list[dict[str, Any]],
+    stored_sponsor: list[dict[str, Any]],
+    family_updates: list[dict[str, Any]],
+    sponsor_updates: list[dict[str, Any]],
     report_frame: pl.DataFrame | None,
     archive: bool,
 ) -> None:
-    """Write adj assignments, projected finals, and the report (§7.2).
+    """Patch assignment-owned fields, archive complete outputs, and write.
 
-    Assignments land in the assignment columns of the adj sheets (all
-    other columns preserved by the dense upsert);
-    ``final_family``/``final_sponsor`` are projections of the adj sheets;
-    previous finals (and the report, when written) are archived to
-    timestamped sheets first unless ``archive`` is false.
+    The merge starts from every stored family and sponsor row. Only declared
+    match-owned fields are copied from the eligible-row updates; filtered-out
+    rows and all human, control, source, and AI fields remain untouched.
+    Existing complete outputs (and the report, when supplied) are renamed to
+    timestamped archives before replacement unless ``archive`` is false.
+    ``final_child`` is deliberately absent from the write set.
 
     Args:
         cfg: Pipeline configuration.
-        adj_family: Updated dense adj_family rows.
-        adj_sponsor: Updated dense adj_sponsor rows.
-        report_frame: The match_report frame, or None to leave the
-            sheet untouched.
-        archive: Archive previous finals in timestamped sheets.
+        stored_family: Complete current ``final_family`` rows.
+        stored_sponsor: Complete current ``final_sponsor`` rows.
+        family_updates: Updated non-ignored family match-pool rows.
+        sponsor_updates: Updated non-ignored sponsor match-pool rows.
+        report_frame: The match_report frame, or None to leave the sheet and
+            its CSV untouched.
+        archive: Archive previous complete outputs in timestamped sheets.
     """
+    final_family = merge_owned_fields(
+        stored_family,
+        family_updates,
+        "family",
+        FAMILY_ASSIGNMENT_COLUMNS,
+    )
+    final_sponsor = merge_owned_fields(
+        stored_sponsor,
+        sponsor_updates,
+        "sponsor",
+        SPONSOR_ASSIGNMENT_COLUMNS,
+    )
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     existing = set(list_sheets(cfg.excel_file))
     archivable = ("final_family", "final_sponsor", "match_report")
@@ -1181,14 +1204,8 @@ def _write_outputs(
         )
     )
     sheets: dict[str, pl.DataFrame] = {
-        "adj_family": build_adj_frame("family", adj_family),
-        "adj_sponsor": build_adj_frame("sponsor", adj_sponsor),
-        "final_family": project_final(
-            build_adj_frame("family", adj_family), FINAL_FAMILY_COLUMNS
-        ),
-        "final_sponsor": project_final(
-            build_adj_frame("sponsor", adj_sponsor), FINAL_SPONSOR_COLUMNS
-        ),
+        "final_family": build_final_frame("family", final_family),
+        "final_sponsor": build_final_frame("sponsor", final_sponsor),
     }
     if report_frame is not None:
         sheets["match_report"] = report_frame

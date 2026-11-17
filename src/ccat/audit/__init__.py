@@ -3,7 +3,7 @@
 Package layout (§9.1):
 
 - ``store`` — pure data layer (no NiceGUI imports): dense adj schemas,
-  status machine, duplicate groups, saves, projections.
+  status machine, duplicate groups, saves, output filters.
 - ``migrate`` — one-time bootstrap of the new workbook from the old one.
 - ``pages`` — NiceGUI pages + shared components.
 - ``server`` — ``run()``: seed sheets, load state, ``ui.run``.

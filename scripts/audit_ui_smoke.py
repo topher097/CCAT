@@ -21,9 +21,9 @@ import requests
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "test"))
 
-from test_audit_store import seed_raw, seed_submissions  # noqa: E402
+from test_audit_store import seed_raw  # noqa: E402
 
-from ccat.audit.store import ensure_adj_sheets, save_child  # noqa: E402
+from ccat.audit.store import ensure_final_sheets, save_child  # noqa: E402
 from ccat.config import load_config  # noqa: E402
 
 
@@ -59,9 +59,12 @@ def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="audit_smoke_"))
     cfg = build_smoke_config(tmp)
     seed_raw(cfg)
-    seed_submissions(cfg)
-    ensure_adj_sheets(cfg)
-    save_child(cfg, "c1", {"need_1": "fixed coat", "audited": True})
+    ensure_final_sheets(cfg)
+    save_child(
+        cfg,
+        "c1",
+        {"need_1": "fixed coat", "status": "audited"},
+    )
 
     # The server must be started with this config, never DEFAULT_CONFIG.
     proc = subprocess.Popen(
@@ -107,6 +110,7 @@ def main() -> None:
             "/families",
             "/families/1",
             "/families/1/children/c1",
+            "/families/1/children/c2",
             "/families/0/children/orphan1",
         ):
             page = requests.get(f"http://127.0.0.1:8799{path}", timeout=10)

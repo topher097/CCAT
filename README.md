@@ -1,7 +1,7 @@
 # CCAT — Copper Country Angel Tree pipeline
 
-Five-stage data pipeline for the CCAT gift-giving program (see
-`pipeline_architecture.md` for the full design).
+Workbook pipeline for the CCAT gift-giving program. Full behavior and writer
+ownership are documented in `pipeline_architecture.md`.
 
 ## Setup
 
@@ -10,70 +10,62 @@ direnv allow        # devbox + uv environment (.envrc)
 uv sync             # create .venv and install dependencies
 ```
 
+## Storage model
+
+One Excel workbook holds three layers:
+
+- `raw_sponsor`, `raw_family`, `raw_child`: replaceable verbatim Zite source.
+- `final_sponsor`, `final_family`, `final_child`: complete persistent,
+  editable entity stores. Ignored, orphaned, duplicate, raw-missing, and
+  pending entities remain stored.
+- Operational logs plus `match_report`: process history and match reporting.
+
+There are no active `*_submissions` or `adj_*` sheets. **Raw is source; final
+is truth; logs are history.**
+
 ## Usage
 
-Each module runs independently against one Excel workbook and config:
-
 ```sh
-ccat acquire      [--config PATH]          # 1: fetch Zite tables verbatim -> raw_* (duplicates kept)
-ccat screen       [--config PATH] [--test] [--skip-email-check] [--skip-address-check]
-                                           # 2: local pre-audit (clean, IDs, duplicate flags,
-                                           #    ZeroBounce emails, Nominatim addresses) + LLM
-                                           #    child screening -> submissions + adj_* sheets
-ccat audit        [--config PATH] [--test] # 3: human audit NiceGUI app -> adj_* + final_child
-ccat match        [--config PATH] [--test] # 4: matchmaking -> adj_* assignments + final_family/sponsor
-ccat generate     [--config PATH] [--test] # 5: child info sheet PDFs
-ccat audit-migrate --config config/ccat_2026_v2.json --from ./output/ccat_2026.xlsx
-                                           # one-time v2 workbook bootstrap
+ccat acquire       [--config PATH]  # fetch Zite tables verbatim -> raw_*
+ccat screen        [--config PATH] [--redo ID] [--test] [--overwrite]
+                   [--skip-email-check] [--skip-address-check]
+                   # prepare raw in memory, append/merge full finals,
+                   # refresh duplicate/DOB diagnostics and validation logs,
+                   # then screen only children with screened=false
+ccat audit         [--config PATH] [--test] [--restart]
+                   # NiceGUI editor for complete final stores
+ccat match         [--config PATH] [--test] [--overwrite] [--skip-match]
+                   # patch assignment fields; archive/report as configured
+ccat generate      [--config PATH] [--test] [--overwrite]
+                   [--sponsor ID] [--max-workers N]
+                   # child information PDFs, generation markers, packets
+ccat stats         [--config PATH] [--raw]
+ccat clarify       [--config PATH] [--generate] [--overwrite]
+ccat clarify-export [--config PATH] [--output PATH]
 ```
 
-Default config: `config/ccat_2026.json`. `--test` stops each module after
-its first unit of work (first family, first sponsor, first PDF).
+`--test` means the first unit of work: first family for screening, first
+sponsor for match, first PDF for generate. `--overwrite` is an explicit
+rework control, not blanket data replacement: human edits, controls, and
+module-owned fields retain their protections. Failed or interrupted AI/PDF
+work remains retryable; completed work remains complete.
 
-The AI screening prompt never carries personal data — trivial
-capitalization/format fixes stay local, and sponsors/families are never
-AI-screened. Potential duplicates are flagged (`potential_duplicate` +
-`require_clarification`, full group in `duplicate_log`), never merged;
-resolve them in the audit tool by ignoring the extras. Every new
-sponsor/family email goes through ZeroBounce and every family address
-through Nominatim during screening, with the complete verbatim API
-responses logged in `email_validation_log` / `address_validation_log`
-(`ZEROBOUNCE_API_KEY` env var required for the email check).
+Duplicates are flagged, never merged. Users resolve extras in audit.
+ZeroBounce and Nominatim reuse their logs, so reruns do not repeat successful
+external checks; complete verbatim responses remain in
+`email_validation_log` and `address_validation_log`.
 
-**v2 audit workbook** (`config/ccat_2026_v2.json` →
-`output/ccat_2026_v2.xlsx`): the multi-entity human audit (sponsors,
-families, children — dense `adj_*` sheets, derived per-row `status`,
-`final_*` projections) runs against the v2 workbook only.  The old
-workbook is never written by the v2 system (its `ccat audit` refuses a
-pre-v2 `adj_child` schema).  Bootstrap the v2 workbook once with
-`ccat audit-migrate --config config/ccat_2026_v2.json --from
-./output/ccat_2026.xlsx` (the old workbook is opened read-only), then
-run `ccat audit --config config/ccat_2026_v2.json`.
+## Migration
 
-**Cutover**: the `DEFAULT_CONFIG` environment variable (exported in
-`.envrc`) now points at `config/ccat_2026_v2.json`, so every `ccat`
-command without an explicit `--config` uses the v2 workbook.  The
-repo-side fallback in `ccat.__init__` stays `config/ccat_2026.json`
-until the switch is committed; tests pin the fallback regardless of
-the environment.
+- `ccat audit-migrate --config CONFIG --from OLD [--force]` bootstraps an
+  old v1 workbook directly into persistent finals.
+- `ccat consolidate-migrate --config CONFIG --from OLD --output NEW
+  [--force --backup BACKUP] [--report REPORT]` converts a full v2 `adj_*`
+  workbook into a separate persistent workbook. It never mutates the input,
+  refuses output replacement without force plus a readable backup, and
+  writes a JSON validation report.
 
-`--overwrite` (screen/match/generate) ignores previously generated
-output: screening re-screens every child (preserving human edits and
-controls), matchmaking replaces its outputs in place instead of
-archiving, and info sheet generation re-renders every pending audited
-PDF regardless of the `generated_info_sheet` column.  The audit tool's
-`audited` checkbox is always revocable — there are no frozen rows, and
-completed-hiding is a list filter in the UI.
-
-Module 5 renders one `<angel_id>.pdf` per pending child from
-`data/child_information_sheet_2026.ott` into `output/child_info_sheets/`,
-requires headless LibreOffice (`soffice`), and tracks progress in the
-`generated_info_sheet` flag of `adj_child` (only audited children whose
-family has an assigned sponsor and a `FALSE` flag are processed; the
-`final_child` projection refreshes in the same atomic write).  Sheets
-render and convert on a thread pool
-(`--max-workers N`, default `info_sheet.max_workers` = 4) with a `tqdm`
-progress bar; Ctrl+C cancels cleanly — finished sheets are recorded, the
-rest stay pending for the next run.  The template's sponsor section is
-filled from the child's assigned sponsor in `final_sponsor` when one
-exists, and left blank for hand-filling otherwise.
+For production cutover: back up workbook/config outside the live path, run
+conversion, inspect the report, update `excel_file` in a validated config or
+`DEFAULT_CONFIG`, and retain the old workbook read-only. Rollback restores
+the original config/workbook; never feed full finals to old projection code.

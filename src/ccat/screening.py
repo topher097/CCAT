@@ -1,53 +1,22 @@
-"""Module 2 — pre-audit screening (§6, audit_architecture.md §7.3).
+"""Module 2 — local preparation and resumable AI screening.
 
-Module 2 prepares everything module 1 (acquire, now a verbatim fetch)
-no longer does, then AI-screens the children:
+Every run cleans all verbatim ``raw_*`` rows in memory, assigns/reconciles
+stable IDs, refreshes duplicate and sibling-DOB diagnostics, and performs
+only previously unlogged ZeroBounce/Nominatim checks. Prepared submissions
+are never persisted as a second entity store.
 
-1. **Local pre-audit (never the AI).**  The verbatim ``raw_*`` records
-   are cleaned with the local trivial fixes (title-cased names,
-   lowercased emails, reformatted phones, ISO dates) and validated;
-   format/enum failures become ``require_clarification`` notes, never
-   dropped rows.  The cleaned rows -- every submission, duplicates
-   included -- are written to the ``*_submissions`` sheets with the
-   derived IDs (``sponsor_id``, ``family_id``, ``angel_id``,
-   ``age_at_xmas``).
-2. **Duplicate detection.**  Potential duplicates are only *flagged*,
-   never merged: families by ``primary_email``, children by
-   (``primary_email``, ``first_name``), sponsors by ``email``.  Every
-   member of a flagged group gets ``potential_duplicate=True`` on its
-   adj row and a ``require_clarification`` note; the full group record
-   is logged to ``duplicate_log``.  The user resolves duplicates in the
-   audit tool (by ignoring the extras).
-3. **Sibling DOB conflicts** (§6.6) are logged to ``dob_conflict_log``
-   and noted in the children's ``potential_anomoly``.
-4. **Email deliverability (ZeroBounce).**  Every new sponsor and family
-   email (primary and secondary) is checked via the ZeroBounce API; the
-   ENTIRE verbatim API response is stored in ``email_validation_log``.
-5. **Address validation (Nominatim).**  Every new family address is
-   checked against OSM Nominatim; the ENTIRE response is stored in
-   ``address_validation_log``.
-6. **AI screening (children only).**  Adjudicates each child row with
-   an LLM via the opencode python SDK and writes **dense** ``adj_child``
-   rows.  Trivial capitalization/format fixes already happened locally
-   in step 1, so the model only fixes meaning-level issues (spelling,
-   garbled phrasing, size contradictions).  No personal data is ever
-   sent: the prompt carries no names or contact details; the child's
-   ``zite_record_id`` is the sole identifier (§6.2).  Sponsors and
-   families are never AI-screened -- every one of their fields is
-   personal data, so their pre-audit is entirely local.
+The full ``final_*`` sheets are the durable truth. Genuinely new entities
+are seeded; existing rows receive only source-metadata, stable-linkage,
+machine-diagnostic, and computed-field merges. Human edits, audit controls,
+assignments, generation state, ignored/orphan rows, and raw-missing rows
+survive. New children start unscreened.
 
-The adj rows are seeded here for all three entities (one ``adj_child``
-row per child submission; one ``adj_family`` row per ``family_id``;
-one ``adj_sponsor`` row per ``sponsor_id``), so ``ccat audit`` sees
-complete rows without seeding them itself.  Human-edit protection
-(§7.3) still applies: AI corrections land only on fields the human has
-not touched, and existing rows are never re-seeded.
-
-Batch AI screening runs each child's LLM check on a
-``concurrent.futures.ThreadPoolExecutor`` -- the calls are I/O-bound, so
-threads scale them.  Each worker thread owns one opencode session, and
-the shared tqdm progress bar advances once per child.  Ctrl-C stops the
-run promptly while every row completed so far is already persisted.
+Ordinary AI work reads the final-child ``screened`` marker and skips completed
+rows. ``--redo`` and ``--overwrite`` deliberately clear only target markers
+before work, so malformed/failed/interrupted attempts remain retryable.
+Each successful result updates AI-eligible fields under the existing human-
+baseline protection and persists ``screened=True`` with the complete child
+row on the main thread. Prompts contain no names or contact information.
 """
 
 import json
@@ -68,32 +37,29 @@ from polars._typing import PolarsDataType
 from pydantic import BaseModel, ConfigDict, field_validator
 from tqdm import tqdm
 
-from ccat.acquire import (
-    DERIVED_COLUMNS,
-    PL_DTYPES,
-    _created_value,
-    _cross_check_created,
-    _parse_reported_age,
-    assign_angel_ids,
-    assign_family_ids,
-    assign_sponsor_ids,
-    clean_value,
-    dob_conflict_log_frame,
-    sibling_dob_conflicts,
-)
+from ccat.acquire import dob_conflict_log_frame
 from ccat.audit.store import (
-    ADJ_CHILD_COLUMNS,
+    FINAL_CHILD_COLUMNS,
     CHILD_EDITABLE_COLUMNS,
     CHILD_LINKAGE_COLUMNS,
     ORPHAN_NOTE,
     STATUS_NEEDS_CLARIFICATION,
     STATUS_NEW,
     as_bool,
-    build_adj_frame,
-    read_adj,
+    _computed_age,
+    build_final_frame,
+    prepare_persistent_store,
+    reconcile_preparation,
+    write_final_rows,
 )
 from ccat.config import Config
 from ccat.io import read_sheet, write_sheets
+from ccat.preparation import (
+    append_note,
+    dob_notes_by_child,
+    duplicate_log_frame,
+    duplicate_note,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,292 +161,6 @@ ADDRESS_VALIDATION_LOG_SCHEMA: dict[str, PolarsDataType] = {
     "response_json": pl.String,
     "checked_at": pl.String,
 }
-
-
-# ---------------------------------------------------------------------------
-# Local pre-audit: cleaning and validation-as-flags (§6.2).
-# ---------------------------------------------------------------------------
-
-
-def _enum_failure(
-    value: Any, table_name: str, key: str, cfg: Config
-) -> str | None:
-    """Return a note when an enum value is not a vocabulary label (§6.2).
-
-    Args:
-        value: The cleaned enum cell value.
-        table_name: One of "sponsor", "family", "child".
-        key: The config column key.
-        cfg: Pipeline configuration.
-
-    Returns:
-        The note text, or None when the value is absent or valid.
-    """
-    if value is None:
-        return None
-    spec = cfg.tables[table_name].columns[key]
-    if spec.type != "enum" or spec.values is None:
-        return None
-    allowed = cfg.enum_values(table_name, key)
-    if str(value) in allowed:
-        return None
-    return (
-        f"{key} {str(value)!r} is not one of the allowed options"
-        f" ({', '.join(allowed)})"
-    )
-
-
-def clean_rows(
-    rows: list[dict[str, Any]], table_name: str, cfg: Config
-) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
-    """Clean verbatim rows locally and collect validation notes (§6.2).
-
-    Blank strings become nulls, declared defaults fill nulls, free-text
-    reported ages are coerced, and each cell is normalized per its
-    column type (title-cased names, lowercased emails, reformatted
-    phones, ISO dates).  Failures never drop a row: every issue becomes
-    a note keyed by the record's ``zite_record_id`` and lands in the
-    seeded adj row's ``require_clarification``.
-
-    Args:
-        rows: Verbatim rows from :func:`ccat.acquire.import_table`.
-        table_name: One of "sponsor", "family", "child".
-        cfg: Pipeline configuration.
-
-    Returns:
-        A tuple of (cleaned rows, mapping of zite_record_id to the
-        list of validation notes for that record).
-    """
-    specs = cfg.tables[table_name].columns
-    cleaned: list[dict[str, Any]] = []
-    notes: dict[str, list[str]] = {}
-    for row in rows:
-        out: dict[str, Any] = {}
-        record_id = str(row.get("zite_record_id") or "")
-        row_notes: list[str] = []
-        for key, spec in specs.items():
-            value = row.get(key)
-            if isinstance(value, str) and value.strip() == "":
-                value = None
-            if value is None and spec.has_default:
-                value = spec.default
-            if table_name == "child" and key == "age_reported":
-                if value is not None:
-                    value = _parse_reported_age(value)
-            cleaned_value, reason = clean_value(value, spec)
-            if reason is not None:
-                row_notes.append(f"{key}: {reason} (value {value!r})")
-            out[key] = cleaned_value
-            enum_note = _enum_failure(cleaned_value, table_name, key, cfg)
-            if enum_note is not None:
-                row_notes.append(enum_note)
-        if record_id:
-            if row_notes:
-                notes[record_id] = row_notes
-            cleaned.append(out)
-    return cleaned, notes
-
-
-def submissions_frame(
-    rows: list[dict[str, Any]], table_name: str, cfg: Config
-) -> pl.DataFrame:
-    """Build one ``{table}_submissions`` sheet frame (§6.3).
-
-    The table's config columns plus its derived columns
-    (:data:`ccat.acquire.DERIVED_COLUMNS`) -- the cleaned, ID-assigned
-    rows every downstream module (audit, match, generate, stats) works
-    from.  Every submission is present, duplicates included.
-
-    Args:
-        rows: Cleaned, ID-assigned rows from the pre-audit.
-        table_name: "sponsor", "family", or "child".
-        cfg: Pipeline configuration.
-
-    Returns:
-        The typed frame, sorted by (created, zite_record_id) ascending.
-    """
-    specs = cfg.tables[table_name].columns
-    schema: dict[str, PolarsDataType] = {
-        key: PL_DTYPES[spec.type] for key, spec in specs.items()
-    }
-    for column in DERIVED_COLUMNS[table_name]:
-        schema[column] = (
-            pl.Int64
-            if column in {"sponsor_id", "family_id", "age_at_xmas"}
-            else pl.String
-        )
-    ordered = sorted(
-        rows,
-        key=lambda row: (
-            _created_value(row) or "",
-            row.get("zite_record_id") or "",
-        ),
-    )
-    return pl.DataFrame(
-        [{key: row.get(key) for key in schema} for row in ordered],
-        schema=schema,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Duplicate detection (§6.4): flag only, never merge.
-# ---------------------------------------------------------------------------
-
-
-def detect_duplicates(
-    rows: list[dict[str, Any]], table_name: str
-) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Detect potential duplicate submissions (§6.4).
-
-    Group keys: families by ``primary_email``, children by
-    (``primary_email``, ``first_name``), sponsors by ``email``.  Rows
-    missing their key are never grouped.  The survivor is the earliest
-    submission for families and sponsors, the most recent for children
-    (matching the old dedup semantics) -- but nothing is dropped or
-    merged: every group member stays in the prepared rows and the adj
-    rows, flagged for the user.
-
-    Args:
-        rows: Cleaned rows for one table.
-        table_name: "sponsor", "family", or "child".
-
-    Returns:
-        A tuple of (``duplicate_log`` rows, mapping of each group
-        member's zite_record_id to its survivor's row).
-    """
-    if table_name == "family":
-        key_fields: tuple[str, ...] = ("primary_email",)
-        latest_wins = False
-    elif table_name == "child":
-        key_fields = ("primary_email", "first_name")
-        latest_wins = True
-    else:
-        key_fields = ("email",)
-        latest_wins = False
-    groups: dict[tuple[str, ...], list[dict[str, Any]]] = {}
-    for row in rows:
-        values = tuple(
-            str(row.get(field)).strip() if row.get(field) is not None else ""
-            for field in key_fields
-        )
-        if any(value == "" for value in values):
-            continue  # no key: never grouped, never flagged
-        groups.setdefault(values, []).append(row)
-    log_rows: list[dict[str, Any]] = []
-    survivor_of: dict[str, dict[str, Any]] = {}
-    #: Identity/order metadata duplicate records necessarily differ on;
-    #: never counted as a conflicting field (§6.4).
-    excluded = {"zite_record_id", "created", "zite_created_at", "create"}
-    for key, group in groups.items():
-        if len(group) < 2:
-            continue
-        ordered = sorted(
-            group,
-            key=lambda row: (
-                _created_value(row) or "",
-                row.get("zite_record_id") or "",
-            ),
-            reverse=latest_wins,
-        )
-        survivor, extras = ordered[0], ordered[1:]
-        group_key = "|".join(key)
-        conflicts: list[str] = []
-        for column in survivor:
-            if column in excluded:
-                continue
-            values_seen = {
-                str(row.get(column))
-                for row in group
-                if row.get(column) is not None
-            }
-            if len(values_seen) > 1:
-                conflicts.append(column)
-        details = "; ".join(
-            f"{column}: survivor {survivor.get(column)!r} vs"
-            f" {[row.get(column) for row in extras]}"
-            for column in conflicts
-        )
-        for row in group:
-            record_id = str(row.get("zite_record_id") or "")
-            survivor_of[record_id] = survivor
-            log_rows.append(
-                {
-                    "sheet": f"{table_name}_submissions",
-                    "group_key": group_key,
-                    "zite_record_id": record_id,
-                    "created": _created_value(row),
-                    "survivor": row is survivor,
-                    "conflict_columns": ",".join(conflicts),
-                    "conflict_details": details,
-                    "record": json.dumps(row, default=str, sort_keys=True),
-                }
-            )
-        logger.warning(
-            "%s duplicate group %s: %d submission(s); survivor %s, extras %s",
-            table_name,
-            group_key,
-            len(group),
-            survivor.get("zite_record_id"),
-            [row.get("zite_record_id") for row in extras],
-        )
-    return log_rows, survivor_of
-
-
-def duplicate_log_frame(log_rows: list[dict[str, Any]]) -> pl.DataFrame:
-    """Build the ``duplicate_log`` sheet frame (§6.4).
-
-    Args:
-        log_rows: Log rows from :func:`detect_duplicates`.
-
-    Returns:
-        The typed frame (empty when nothing was flagged).
-    """
-    return pl.DataFrame(log_rows, schema=DUPLICATE_LOG_SCHEMA)
-
-
-def duplicate_note(
-    record_id: str, survivor_of: dict[str, dict[str, Any]], entity: str
-) -> str | None:
-    """Build the ``require_clarification`` note for one flagged row (§6.4).
-
-    Args:
-        record_id: The row's zite_record_id.
-        survivor_of: Mapping from :func:`detect_duplicates`.
-        entity: "sponsor", "family", or "child" (note wording).
-
-    Returns:
-        The note naming the survivor submission, or None when the row
-        is not part of a duplicate group.
-    """
-    survivor = survivor_of.get(record_id)
-    if survivor is None:
-        return None
-    return (
-        f"Potential duplicate {entity} submission; resolve against"
-        f" submission {survivor.get('zite_record_id')} in the audit"
-        " tool (see duplicate_log)"
-    )
-
-
-def append_note(existing: str | None, addition: str | None) -> str | None:
-    """Idempotently append a note to a ``require_clarification`` value.
-
-    Args:
-        existing: The current note text (may be null).
-        addition: The note to append (may be null).
-
-    Returns:
-        The merged text (unchanged when the addition is absent or
-        already present).
-    """
-    if not addition:
-        return existing
-    text = (existing or "").strip()
-    if not text:
-        return addition
-    if addition in text:
-        return text
-    return f"{text}; {addition}"
 
 
 # ---------------------------------------------------------------------------
@@ -815,7 +495,7 @@ def check_addresses(
 # ---------------------------------------------------------------------------
 
 
-#: Model-owned adj_child fields (§6.2): the columns the model may
+#: Model-owned final-child fields (§6.2): the columns the model may
 #: correct.  ``age_at_xmas`` is excluded (computed from the adjudicated
 #: dob, D13); controls and linkage are never model-owned.
 RESPONSE_COLUMNS = (
@@ -882,7 +562,7 @@ _DOB_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class AdjChildRow(BaseModel):
-    """Pydantic schema for one adjudicated adj_child row (§6.2)."""
+    """Pydantic schema for one AI screening response (§6.2)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1034,7 +714,7 @@ def screen_child(
             )
             continue
         if parsed is None:
-            return {column: None for column in ADJ_CHILD_COLUMNS} | {
+            return {column: None for column in FINAL_CHILD_COLUMNS} | {
                 "zite_record_id": child["zite_record_id"]
             }
         try:
@@ -1084,7 +764,7 @@ def screen_children(
             used by ``run`` to persist rows as they arrive.
 
     Returns:
-        The adj_child rows to persist (one per successfully screened
+        The final-child rows to persist (one per successfully screened
         child, sparse cells, §6.3).
 
     Raises:
@@ -1172,13 +852,13 @@ def _values_equal(left: Any, right: Any) -> bool:
     return str(left).strip() == str(right).strip()
 
 
-def dense_adj_row(
+def dense_final_row(
     child: dict[str, Any],
     corrections: dict[str, Any],
     cfg: Config,
     existing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build one dense adj_child row from a screening result (§7.3).
+    """Build one dense final-child row from a screening result (§7.3).
 
     The row starts from the child's cleaned values (linkage and
     adjudicable data), overlays the model's non-null corrections, and
@@ -1193,25 +873,28 @@ def dense_adj_row(
         corrections: The validated model response (sparse: non-null
             values are corrections); may be all-null ("no changes").
         cfg: Pipeline configuration.
-        existing: The child's existing dense adj row, when one exists.
+        existing: The child's existing full final row, when one exists.
 
     Returns:
-        The dense adj_child row with ``screened`` set true.
+        The dense final-child row with ``screened`` set true.
     """
-    from ccat.audit.store import _computed_age  # local: private helper
-
-    row: dict[str, Any] = {column: None for column in ADJ_CHILD_COLUMNS}
+    row: dict[str, Any] = {column: None for column in FINAL_CHILD_COLUMNS}
     for column in (*CHILD_LINKAGE_COLUMNS, *CHILD_EDITABLE_COLUMNS):
         row[column] = child.get(column)
+    if existing is not None and as_bool(existing.get("ignore")):
+        # AI never targets ignored rows; this defensive path preserves the
+        # complete skeleton and records only successful screening.
+        row = dict(existing)
+        row["screened"] = True
+        return row
     if existing is not None:
         for column in (
             *CHILD_EDITABLE_COLUMNS,
             "age_at_xmas",
             "generated_info_sheet",
             "status",
-            "audited",
             "ignore",
-            "require_clarification",
+            "clarification_notes",
             "audited_at",
             "potential_duplicate",
         ):
@@ -1230,7 +913,6 @@ def dense_adj_row(
     row["screened"] = True
     if existing is None:
         row["status"] = STATUS_NEW
-        row["audited"] = False
         row["ignore"] = False
         row["generated_info_sheet"] = False
         row["potential_duplicate"] = False
@@ -1238,48 +920,52 @@ def dense_adj_row(
     if row.get("family_id") is None:
         # Orphaned child: no matching family registration; surface it
         # for the user to fix (§8.7).
-        row["require_clarification"] = append_note(
-            row.get("require_clarification"), ORPHAN_NOTE
+        row["clarification_notes"] = append_note(
+            row.get("clarification_notes"), ORPHAN_NOTE
         )
         if row.get("status") == STATUS_NEW:
             row["status"] = STATUS_NEEDS_CLARIFICATION
     return row
 
 
-def _upsert_adj_row(
-    adj_rows: list[dict[str, Any]], row: dict[str, Any]
+def _upsert_final_row(
+    final_rows: list[dict[str, Any]], row: dict[str, Any]
 ) -> None:
-    """Insert or replace one adj row in place, keyed by zite_record_id.
+    """Insert or replace one final row in place, keyed by zite_record_id.
 
     Args:
-        adj_rows: The mutable adj_child row list.
+        final_rows: The mutable final-child row list.
         row: The row to insert (new id) or replace (existing id).
     """
-    for index, existing in enumerate(adj_rows):
+    for index, existing in enumerate(final_rows):
         if existing.get("zite_record_id") == row["zite_record_id"]:
-            adj_rows[index] = row
+            final_rows[index] = row
             return
-    adj_rows.append(row)
+    final_rows.append(row)
 
 
-def _write_adj(cfg: Config, adj_rows: list[dict[str, Any]]) -> pl.DataFrame:
-    """Atomically write the dense adj_child sheet (§7.3).
+def _write_final_children(
+    cfg: Config, final_rows: list[dict[str, Any]]
+) -> pl.DataFrame:
+    """Atomically write the complete persistent final-child store.
 
     Args:
         cfg: Pipeline configuration.
-        adj_rows: All current dense adj_child rows.
+        final_rows: Every persistent child, including raw-missing rows.
 
     Returns:
-        The written adj_child frame.
+        The validated written frame.
 
     Raises:
         ScreeningError: If the workbook cannot be written.
     """
-    frame = build_adj_frame("child", adj_rows)
+    frame = build_final_frame("child", final_rows)
     try:
-        write_sheets(cfg.excel_file, "screen", {"adj_child": frame})
+        write_final_rows(cfg, "screen", "child", final_rows)
     except Exception as error:  # noqa: BLE001 - wrap any save failure
-        raise ScreeningError(f"could not persist adj_child: {error}") from error
+        raise ScreeningError(
+            f"could not persist final_child: {error}"
+        ) from error
     return frame
 
 
@@ -1327,7 +1013,7 @@ def _screen_targets(
             :func:`screen_children` (see its docstring).
 
     Returns:
-        One adj_child row per target.
+        One final-child row per target.
 
     Raises:
         ScreeningError: If the opencode server cannot be started.
@@ -1392,7 +1078,7 @@ def _screen_targets(
 
 
 # ---------------------------------------------------------------------------
-# Adj seeding for sponsors and families (§7.3, owned by screening now).
+# Persistent final seeding for sponsors and families (shared contract).
 # ---------------------------------------------------------------------------
 
 
@@ -1401,10 +1087,10 @@ def _flagged_row(
     duplicate_note_text: str | None,
     validation_notes: list[str],
 ) -> dict[str, Any]:
-    """Apply the ``potential_duplicate`` flag and notes to one adj row.
+    """Apply the duplicate flag and notes to one persistent row.
 
     Args:
-        row: The dense adj row (mutated in place).
+        row: The full final row (mutated in place).
         duplicate_note_text: The duplicate note, when flagged.
         validation_notes: Validation-failure notes for this record.
 
@@ -1418,138 +1104,33 @@ def _flagged_row(
         )
     note = "; ".join([*validation_notes, duplicate_note_text or ""]).strip("; ")
     if note:
-        row["require_clarification"] = append_note(
-            row.get("require_clarification"), note or None
+        row["clarification_notes"] = append_note(
+            row.get("clarification_notes"), note or None
         )
     return row
 
 
-def _seed_sponsor_adj_row(
-    row: dict[str, Any],
-    duplicate_note_text: str | None,
-    validation_notes: list[str],
-) -> dict[str, Any]:
-    """Build one dense adj_sponsor row from its prepared submission (§7.3).
-
-    Args:
-        row: The cleaned, ID-assigned sponsor row.
-        duplicate_note_text: The duplicate note, when flagged.
-        validation_notes: Validation-failure notes for this record.
-
-    Returns:
-        The dense adj_sponsor row with default controls and the flag.
-    """
-    from ccat.audit.store import (
-        ADJ_SPONSOR_COLUMNS,
-        SPONSOR_EDITABLE_COLUMNS,
-        SPONSOR_LINKAGE_COLUMNS,
-        AGE_PREF_BOUNDS,
-    )
-
-    adj: dict[str, Any] = {column: None for column in ADJ_SPONSOR_COLUMNS}
-    for column in (*SPONSOR_LINKAGE_COLUMNS, *SPONSOR_EDITABLE_COLUMNS):
-        adj[column] = row.get(column)
-    adj["sponsor_id"] = row.get("sponsor_id")
-    bounds = AGE_PREF_BOUNDS.get(str(row.get("age_preference") or ""))
-    if bounds is not None:
-        adj["pref_age_min"], adj["pref_age_max"] = bounds
-    adj["status"] = STATUS_NEW
-    adj["audited"] = False
-    adj["ignore"] = False
-    adj["potential_duplicate"] = False
-    return _flagged_row(adj, duplicate_note_text, validation_notes)
-
-
-def _seed_family_adj_row(
-    row: dict[str, Any],
-    duplicate_note_text: str | None,
-    validation_notes: list[str],
-) -> dict[str, Any]:
-    """Build one dense adj_family row from its prepared submission (§7.3).
-
-    Args:
-        row: The cleaned, ID-assigned family row (the group survivor:
-            the earliest submission for a duplicated family).
-        duplicate_note_text: The duplicate note, when flagged.
-        validation_notes: Validation-failure notes for this record.
-
-    Returns:
-        The dense adj_family row with default controls and the flag.
-    """
-    from ccat.audit.store import (
-        ADJ_FAMILY_COLUMNS,
-        FAMILY_EDITABLE_COLUMNS,
-        FAMILY_LINKAGE_COLUMNS,
-    )
-
-    adj: dict[str, Any] = {column: None for column in ADJ_FAMILY_COLUMNS}
-    for column in (*FAMILY_LINKAGE_COLUMNS, *FAMILY_EDITABLE_COLUMNS):
-        adj[column] = row.get(column)
-    adj["family_id"] = row.get("family_id")
-    adj["status"] = STATUS_NEW
-    adj["audited"] = False
-    adj["ignore"] = False
-    adj["potential_duplicate"] = False
-    return _flagged_row(adj, duplicate_note_text, validation_notes)
-
-
 def _apply_flags(
-    adj: dict[str, Any],
+    final_row: dict[str, Any],
     duplicate_note_text: str | None,
     validation_notes: list[str],
 ) -> None:
-    """Update the duplicate flag and notes on an existing adj row (§6.4).
+    """Merge duplicate/validation diagnostics into one persistent row.
 
-    Existing rows are never re-seeded (human edits are protected), but a
-    newly appearing duplicate or validation issue must still surface:
-    the flag is OR-ed in and the notes are appended idempotently.
+    Existing rows are never re-seeded; a newly appearing duplicate or
+    validation issue still surfaces idempotently.
 
     Args:
-        adj: The existing dense adj row (mutated in place).
+        final_row: Existing full row, mutated in place.
         duplicate_note_text: The duplicate note, when flagged.
         validation_notes: Validation-failure notes for this record.
     """
-    _flagged_row(adj, duplicate_note_text, validation_notes)
+    _flagged_row(final_row, duplicate_note_text, validation_notes)
 
 
 # ---------------------------------------------------------------------------
 # The run (§6).
 # ---------------------------------------------------------------------------
-
-
-def _read_raw(cfg: Config, sheet: str, table_name: str) -> pl.DataFrame:
-    """Read one raw sheet, failing when a config column is missing (§6.1).
-
-    The raw sheets are written verbatim by ``ccat acquire`` and already
-    keyed by config column names, so screening reads them directly.
-
-    Args:
-        cfg: Pipeline configuration.
-        sheet: The sheet name (``raw_sponsor`` etc.).
-        table_name: The config table key ("sponsor", "family", "child").
-
-    Returns:
-        The frame.
-
-    Raises:
-        ScreeningError: If the sheet is missing or lacks a configured
-            column (run ``ccat acquire`` first).
-    """
-    frame = read_sheet(cfg.excel_file, sheet)
-    if frame is None:
-        raise ScreeningError(
-            f"{sheet} sheet is missing; run `ccat acquire` first"
-        )
-    missing = [
-        key
-        for key in cfg.tables[table_name].columns
-        if key not in frame.columns
-    ]
-    if missing:
-        raise ScreeningError(
-            f"{sheet} lacks column(s) {missing}; run `ccat acquire` first"
-        )
-    return frame
 
 
 def run(
@@ -1560,237 +1141,163 @@ def run(
     skip_email_check: bool = False,
     skip_address_check: bool = False,
 ) -> None:
-    """Run module 2 end to end (§6).
+    """Prepare persistent finals, run external checks, and resume AI work.
 
-    Order: local pre-audit (clean + validate-as-flags + IDs) for all
-    three tables -> duplicate detection and flagging -> submissions +
-    ``duplicate_log`` + ``dob_conflict_log`` written -> adj rows seeded
-    for sponsors, families, and children -> ZeroBounce email check ->
-    Nominatim address check -> AI screening of the children (each
-    completed child persisted atomically as it arrives).
+    Local preparation and global diagnostics run for every raw record. Only
+    children whose final row is unscreened enter ordinary AI work. Explicit
+    redo/overwrite runs clear the target success marker first so failures or
+    interruption remain retryable without deleting any entity state.
 
     Args:
         cfg: Pipeline configuration.
-        redo: Optional zite_record_id to re-screen, replacing its adj row
-            (explicit opt-in only, §6.3).
-        test: Stop after the first full family: only the children of the
-            first family (lowest family_id) are AI-screened.
-        overwrite: Re-screen every child regardless of the ``screened``
-            marker, applying the §7.3 protection rules to each row.
-        skip_email_check: Skip the ZeroBounce email validation.
-        skip_address_check: Skip the Nominatim address validation.
+        redo: Optional current child ``zite_record_id`` to re-screen.
+        test: Restrict AI candidates to the first stable family.
+        overwrite: Deliberately re-screen every current child.
+        skip_email_check: Skip ZeroBounce work for this run.
+        skip_address_check: Skip Nominatim work for this run.
 
     Raises:
-        ScreeningError: If the raw sheets are missing, a redo target is
-            unknown, or the opencode session cannot be created.
+        ScreeningError: If a redo key is unknown or AI setup/save fails.
     """
-    # 1. Local pre-audit of every table (§6.2): clean, validate-as-flags.
-    prepared: dict[str, list[dict[str, Any]]] = {}
-    validation_notes: dict[str, dict[str, list[str]]] = {}
-    for table_name in ("sponsor", "family", "child"):
-        frame = _read_raw(cfg, f"raw_{table_name}", table_name)
-        cleaned, notes = clean_rows(frame.to_dicts(), table_name, cfg)
-        prepared[table_name] = cleaned
-        validation_notes[table_name] = notes
-        logger.info(
-            "table %s: %d submission(s) cleaned (%d flagged)",
-            table_name,
-            len(cleaned),
-            len(notes),
+    preparation = prepare_persistent_store(cfg)
+    children = preparation.rows["child"]
+    if redo is not None and not any(
+        child.get("zite_record_id") == redo for child in children
+    ):
+        raise ScreeningError(
+            f"redo target {redo!r} not found in the prepared child rows"
         )
 
-    # 2. Derived IDs (§6.5); duplicate detection first (§6.4) -- flags
-    #    only, never merges, so every submission keeps its row.
-    duplicate_log: list[dict[str, Any]] = []
-    survivors: dict[str, dict[str, dict[str, Any]]] = {}
-    for table_name in ("sponsor", "family", "child"):
-        log_rows, survivor_of = detect_duplicates(
-            prepared[table_name], table_name
-        )
-        duplicate_log.extend(log_rows)
-        survivors[table_name] = survivor_of
-    prepared["sponsor"] = assign_sponsor_ids(prepared["sponsor"])
-    prepared["family"] = assign_family_ids(prepared["family"])
-    prepared["child"] = assign_angel_ids(
-        prepared["child"], cfg, prepared["family"]
+    stores = reconcile_preparation(
+        cfg, preparation, "screen", refresh_existing=True
     )
-    _cross_check_created(prepared["family"], "family")
-    _cross_check_created(prepared["child"], "child")
-
-    # 3. Sibling DOB conflicts (§6.6); duplicates of the same child
-    #    never form a false pair.
-    dob_log_rows = sibling_dob_conflicts(prepared["child"], cfg)
-
-    # 4. Persist the prepared layer (§6.3): submissions, duplicate log,
-    #    dob conflict log.
-    sheets: dict[str, pl.DataFrame] = {
-        f"{table_name}_submissions": submissions_frame(
-            prepared[table_name], table_name, cfg
-        )
-        for table_name in ("sponsor", "family", "child")
+    log_sheets: dict[str, pl.DataFrame] = {
+        "duplicate_log": duplicate_log_frame(preparation.duplicate_log),
+        "dob_conflict_log": dob_conflict_log_frame(preparation.dob_log),
     }
-    sheets["duplicate_log"] = duplicate_log_frame(duplicate_log)
-    sheets["dob_conflict_log"] = dob_conflict_log_frame(dob_log_rows)
-    write_sheets(cfg.excel_file, "screen", sheets)
+    write_sheets(cfg.excel_file, "screen", log_sheets)
     logger.info(
-        "wrote submissions sheets (%s) + duplicate_log (%d row(s))"
-        " + dob_conflict_log (%d row(s))",
-        ", ".join(
-            f"{name} ({sheets[name].height})"
-            for name in sheets
-            if name.endswith("_submissions")
-        ),
-        len(duplicate_log),
-        len(dob_log_rows),
+        "refreshed duplicate_log (%d) and dob_conflict_log (%d)",
+        len(preparation.duplicate_log),
+        len(preparation.dob_log),
     )
 
-    # 5. Seed the adj sheets (§7.3): sponsors and families per entity,
-    #    children per submission; flags/notes applied to existing rows.
-    _seed_adj_sponsor_family(cfg, prepared, survivors, validation_notes)
-    dob_conflict_notes = _dob_notes_by_child(dob_log_rows)
-
-    # 6. Email + address validation logs (§6.7/§6.8); non-fatal on
-    #    API errors, idempotent across runs.
-    log_sheets: dict[str, pl.DataFrame] = {}
     if skip_email_check:
         logger.info("email check: skipped (--skip-email-check)")
     elif not cfg.email_check.enabled:
         logger.info("email check: disabled (config.email_check.enabled)")
     else:
-        email_rows = check_emails(cfg, prepared)
+        email_rows = check_emails(cfg, preparation.rows)
         if email_rows:
             existing = _validation_log_rows(cfg, "email_validation_log")
-            log_sheets["email_validation_log"] = pl.DataFrame(
-                [*existing, *email_rows], schema=EMAIL_VALIDATION_LOG_SCHEMA
+            # Commit billable successes before any later phase can fail.
+            write_sheets(
+                cfg.excel_file,
+                "screen",
+                {
+                    "email_validation_log": pl.DataFrame(
+                        [*existing, *email_rows],
+                        schema=EMAIL_VALIDATION_LOG_SCHEMA,
+                    )
+                },
+            )
+            logger.info(
+                "persisted %d new email validation row(s)",
+                len(email_rows),
             )
     if skip_address_check:
         logger.info("address check: skipped (--skip-address-check)")
     elif not cfg.address_check.enabled:
         logger.info("address check: disabled (config.address_check.enabled)")
     else:
-        address_rows = check_addresses(cfg, prepared["family"])
+        address_rows = check_addresses(cfg, preparation.rows["family"])
         if address_rows:
             existing = _validation_log_rows(cfg, "address_validation_log")
-            log_sheets["address_validation_log"] = pl.DataFrame(
-                [*existing, *address_rows],
-                schema=ADDRESS_VALIDATION_LOG_SCHEMA,
+            write_sheets(
+                cfg.excel_file,
+                "screen",
+                {
+                    "address_validation_log": pl.DataFrame(
+                        [*existing, *address_rows],
+                        schema=ADDRESS_VALIDATION_LOG_SCHEMA,
+                    )
+                },
             )
-    if log_sheets:
-        write_sheets(cfg.excel_file, "screen", log_sheets)
-
-    # 7. AI screening of the children (§6.2): the only AI step; the
-    #    prompt never carries personal data.
-    children = prepared["child"]
-    adj_rows = read_adj(cfg, "child")
-    by_id = {row.get("zite_record_id"): row for row in adj_rows}
-    # Existing child rows get flag/note updates too (idempotent), so a
-    # newly appearing duplicate or validation issue surfaces without a
-    # re-screen.  Orphans get the orphan note the same way.
-    for adj in adj_rows:
-        record_id = str(adj.get("zite_record_id") or "")
-        note = duplicate_note(record_id, survivors["child"], "child")
-        child_notes = validation_notes["child"].get(record_id, [])
-        if adj.get("family_id") is None:
-            adj["require_clarification"] = append_note(
-                adj.get("require_clarification"), ORPHAN_NOTE
+            logger.info(
+                "persisted %d new address validation row(s)",
+                len(address_rows),
             )
-            if adj.get("status") == STATUS_NEW:
-                adj["status"] = STATUS_NEEDS_CLARIFICATION
-        if note is not None or child_notes:
-            _apply_flags(adj, note, child_notes)
 
+    final_rows = stores["child"]
+    by_id = {str(row.get("zite_record_id") or ""): row for row in final_rows}
     if redo is not None:
-        targets = [
-            child for child in children if child["zite_record_id"] == redo
-        ]
-        if not targets:
+        if as_bool(by_id[redo].get("ignore")):
             raise ScreeningError(
-                f"redo target {redo!r} not found in the prepared child rows"
+                f"redo target {redo!r} is ignored; un-ignore it first"
             )
+        targets = [
+            child for child in children if child.get("zite_record_id") == redo
+        ]
+    elif overwrite:
+        targets = [
+            child
+            for child in children
+            if not as_bool(
+                by_id[str(child.get("zite_record_id") or "")].get("ignore")
+            )
+        ]
     else:
-        if overwrite:
-            targets = children
-            logger.info(
-                "overwrite: re-screening all %d children (existing human"
-                " edits and controls are preserved, §7.3)",
-                len(targets),
+        targets = [
+            child
+            for child in children
+            if not as_bool(
+                by_id[str(child.get("zite_record_id") or "")].get("screened")
             )
-        else:
-            targets = [
-                child
-                for child in children
-                if child["zite_record_id"] not in by_id
-                or not as_bool(by_id[child["zite_record_id"]].get("screened"))
-            ]
-        if test:
-            allowed = {
-                child["zite_record_id"]
-                for child in first_family_children(children)
-            }
-            pending = len(targets)
-            targets = [
-                child for child in targets if child["zite_record_id"] in allowed
-            ]
-            logger.info(
-                "test mode: screening first family only (%d of %d pending"
-                " children)",
-                len(targets),
-                pending,
+            and not as_bool(
+                by_id[str(child.get("zite_record_id") or "")].get("ignore")
             )
+        ]
+    if test and redo is None:
+        allowed = {
+            child.get("zite_record_id")
+            for child in first_family_children(children)
+        }
+        targets = [
+            child for child in targets if child.get("zite_record_id") in allowed
+        ]
     logger.info("children to AI-screen: %d", len(targets))
 
-    # A redo target's old row is removed up front; the upsert below then
-    # replaces rows in place as results arrive.
-    if redo is not None:
-        adj_rows = [
-            row for row in adj_rows if row.get("zite_record_id") != redo
-        ]
+    if (redo is not None or overwrite) and targets:
+        for target in targets:
+            existing = by_id[str(target.get("zite_record_id") or "")]
+            existing["screened"] = False
+        _write_final_children(cfg, final_rows)
 
-    new_rows: list[dict[str, Any]] = []
+    conflict_notes = dob_notes_by_child(preparation.dob_log)
 
-    def persist(row: dict[str, Any]) -> None:
-        """Upsert one screened row and save adj_child immediately.
-
-        Runs in the completion loop (main thread), so workbook writes
-        never race each other; ``io.write_sheets`` is atomic, so an
-        interrupted save never leaves a half-written workbook.
-        """
-        record_id = row["zite_record_id"]
+    def persist(corrections: dict[str, Any]) -> None:
+        """Persist one completed child on the main completion thread."""
+        record_id = str(corrections["zite_record_id"])
         child = next(
-            (
-                child
-                for child in children
-                if child["zite_record_id"] == record_id
-            ),
-            None,
+            current
+            for current in children
+            if current.get("zite_record_id") == record_id
         )
-        if child is None:  # pragma: no cover - targets come from children
-            return
-        dense = dense_adj_row(child, row, cfg, by_id.get(record_id))
-        dense["potential_duplicate"] = bool(
-            dense.get("potential_duplicate")
-            or child["zite_record_id"] in survivors["child"]
-        )
-        dense["require_clarification"] = append_note(
-            dense.get("require_clarification"),
-            duplicate_note(record_id, survivors["child"], "child"),
+        dense = dense_final_row(child, corrections, cfg, by_id.get(record_id))
+        _apply_flags(
+            dense,
+            duplicate_note(record_id, preparation.survivors["child"], "child"),
+            preparation.validation_notes["child"].get(record_id, []),
         )
         dense["potential_anomoly"] = _merge_anomoly(
-            dense.get("potential_anomoly"), dob_conflict_notes.get(record_id)
+            dense.get("potential_anomoly"), conflict_notes.get(record_id)
         )
-        dense["require_clarification"] = append_note(
-            dense.get("require_clarification"),
-            "; ".join(validation_notes["child"].get(record_id, [])) or None,
-        )
-        _upsert_adj_row(adj_rows, dense)
-        _write_adj(cfg, adj_rows)
-        new_rows.append(dense)
-        logger.debug(
-            "persisted adj_child row for %s (%d rows in sheet)",
-            record_id,
-            len(adj_rows),
-        )
+        _upsert_final_row(final_rows, dense)
+        by_id[record_id] = dense
+        _write_final_children(cfg, final_rows)
+        logger.debug("persisted final_child row for %s", record_id)
 
+    completed: list[dict[str, Any]] = []
     if targets:
         _require_opencode_v2()
         if cfg.ai_screening.model == "TODO":
@@ -1798,28 +1305,12 @@ def run(
                 "config.ai_screening.model is still TODO; fill in the model id"
                 " first (§12 item 1)"
             )
-        new_rows = _screen_targets(targets, cfg, on_result=persist)
-
-    frame = _write_adj(cfg, adj_rows)
-    logger.info("wrote %d adj_child rows (%d new)", frame.height, len(new_rows))
-
-
-def _dob_notes_by_child(
-    dob_log_rows: list[dict[str, Any]],
-) -> dict[str, str]:
-    """Collect one DOB-conflict note string per affected child (§6.6)."""
-    from ccat.audit.store import dob_conflict_notes
-
-    notes: dict[str, str] = {}
-    for row in dob_log_rows:
-        for side in ("a", "b"):
-            record_id = row.get(f"child_{side}_zite_record_id")
-            if record_id is None:
-                continue
-            note = dob_conflict_notes(dob_log_rows, str(record_id))
-            if note is not None:
-                notes[str(record_id)] = note
-    return notes
+        completed = _screen_targets(targets, cfg, on_result=persist)
+    logger.info(
+        "final_child holds %d row(s); %d AI result(s) completed this run",
+        len(final_rows),
+        len(completed),
+    )
 
 
 def _merge_anomoly(existing: str | None, note: str | None) -> str | None:
@@ -1832,120 +1323,3 @@ def _merge_anomoly(existing: str | None, note: str | None) -> str | None:
     if note in text:
         return text
     return f"{text}; {note}"
-
-
-def _seed_adj_sponsor_family(
-    cfg: Config,
-    prepared: dict[str, list[dict[str, Any]]],
-    survivors: dict[str, dict[str, dict[str, Any]]],
-    validation_notes: dict[str, dict[str, list[str]]],
-) -> None:
-    """Seed/refresh adj_sponsor and adj_family (§7.3, idempotent).
-
-    Missing rows are seeded from the entity's survivor submission (for
-    duplicated entities: the earliest, except child duplicates where
-    the latest wins -- children are handled per submission instead).
-    Existing rows only get flag/note updates, never data overwrites.
-
-    Args:
-        cfg: Pipeline configuration.
-        prepared: Table name -> prepared rows.
-        survivors: Table name -> record-id -> survivor row.
-        validation_notes: Table name -> record-id -> validation notes.
-    """
-    # Sponsors: one adj row per prepared submission (sponsor_id is
-    # per-submission), keyed by zite_record_id.
-    sponsor_by_record = {
-        str(row.get("zite_record_id") or ""): row for row in prepared["sponsor"]
-    }
-    adj_sponsors = read_adj(cfg, "sponsor")
-    adj_by_record = {
-        str(row.get("zite_record_id") or ""): row for row in adj_sponsors
-    }
-    seeded = 0
-    for record_id, row in sponsor_by_record.items():
-        existing = adj_by_record.get(record_id)
-        if existing is None:
-            adj_sponsors.append(
-                _seed_sponsor_adj_row(
-                    row,
-                    duplicate_note(record_id, survivors["sponsor"], "sponsor"),
-                    validation_notes["sponsor"].get(record_id, []),
-                )
-            )
-            seeded += 1
-        else:
-            _apply_flags(
-                existing,
-                duplicate_note(record_id, survivors["sponsor"], "sponsor"),
-                validation_notes["sponsor"].get(record_id, []),
-            )
-    logger.info("adj_sponsor: %d seeded, %d total", seeded, len(adj_sponsors))
-
-    # Families: one adj row per family_id, seeded from the group's
-    # survivor submission (the earliest).
-    family_adj = read_adj(cfg, "family")
-    known_family_ids = {row.get("family_id") for row in family_adj}
-    survivor_family_row: dict[int, dict[str, Any]] = {}
-    family_record_ids: dict[int, list[str]] = {}
-    for row in prepared["family"]:
-        family_id = row.get("family_id")
-        if family_id is None:
-            continue
-        record_id = str(row.get("zite_record_id") or "")
-        family_record_ids.setdefault(family_id, []).append(record_id)
-        current = survivor_family_row.get(family_id)
-        if current is None or (_created_value(row) or "") < (
-            _created_value(current) or ""
-        ):
-            survivor_family_row[family_id] = row
-    seeded = 0
-    for family_id, row in survivor_family_row.items():
-        if family_id in known_family_ids:
-            continue
-        family_adj.append(
-            _seed_family_adj_row(
-                row,
-                duplicate_note(
-                    str(row.get("zite_record_id") or ""),
-                    survivors["family"],
-                    "family",
-                ),
-                [
-                    note
-                    for record_id in family_record_ids.get(family_id, [])
-                    for note in validation_notes["family"].get(record_id, [])
-                ],
-            )
-        )
-        seeded += 1
-    for family_id, record_ids in family_record_ids.items():
-        for adj in family_adj:
-            if adj.get("family_id") != family_id:
-                continue
-            _apply_flags(
-                adj,
-                duplicate_note(record_ids[0], survivors["family"], "family")
-                if len(record_ids) > 1
-                else None,
-                [
-                    note
-                    for record_id in record_ids
-                    for note in validation_notes["family"].get(record_id, [])
-                ],
-            )
-    logger.info("adj_family: %d seeded, %d total", seeded, len(family_adj))
-
-    try:
-        write_sheets(
-            cfg.excel_file,
-            "screen",
-            {
-                "adj_sponsor": build_adj_frame("sponsor", adj_sponsors),
-                "adj_family": build_adj_frame("family", family_adj),
-            },
-        )
-    except Exception as error:  # noqa: BLE001 - wrap any save failure
-        raise ScreeningError(
-            f"could not persist adj_sponsor/adj_family: {error}"
-        ) from error

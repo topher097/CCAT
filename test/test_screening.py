@@ -1,17 +1,19 @@
 """Tests for module 2 — pre-audit screening (§6)."""
 
 import json
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 
 import polars as pl
 import pytest
 
+import ccat.audit.store as store
+import ccat.preparation as preparation
 import ccat.screening as screening
+from ccat.audit.store import FINAL_CHILD_COLUMNS, build_final_frame, read_final
 from ccat.config import Config
-from ccat.io import read_sheet, write_sheets
+from ccat.io import list_sheets, read_sheet, write_sheets
 from ccat.screening import (
-    ADJ_CHILD_COLUMNS,
     RESPONSE_COLUMNS,
     AdjChildRow,
     build_prompt,
@@ -249,7 +251,7 @@ def test_validate_adj_response_checks_record_id(screen_cfg: Config) -> None:
 
 
 def test_screen_child_returns_adjudicated_row(screen_cfg: Config) -> None:
-    """A valid response becomes an adj row with sparse cells (§6.3)."""
+    """A valid response becomes sparse, validated corrections (§6.3)."""
     send = lambda prompt: json.dumps(full_response())  # noqa: E731
     row = screen_child(child(), screen_cfg, send)
     assert row is not None
@@ -267,23 +269,23 @@ def test_screen_child_literal_null_writes_all_null_row(
     assert row["zite_record_id"] == "rec_c1"
     assert all(
         row[column] is None
-        for column in ADJ_CHILD_COLUMNS
+        for column in FINAL_CHILD_COLUMNS
         if column != "zite_record_id"
     )
 
 
 def test_screen_child_null_response_has_no_age_key(screen_cfg: Config) -> None:
-    """The model's null response carries no age_at_xmas (§5.5, §6.2)."""
+    """The model response leaves final age computation to dense_final_row."""
     row = screen_child(child(), screen_cfg, lambda prompt: "null")
     assert row is not None
     assert "age_at_xmas" in row  # sheet column exists
     assert row["age_at_xmas"] is None  # filled by run(), not the model
 
 
-def test_run_writes_dense_rows_equal_to_raw(
-    screen_cfg: Config, monkeypatch
+def test_run_initial_ai_success_marks_full_final_rows_screened(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Screening writes dense rows: cleaned values, screened true (§7.3)."""
+    """Initial AI success densifies final rows and sets screened=True."""
     _seed_workbook(
         screen_cfg,
         children=[
@@ -295,102 +297,104 @@ def test_run_writes_dense_rows_equal_to_raw(
         "f1c1": "null",
         "f1c2": json.dumps(full_response("f1c2")),
     }
-    import opencode
+    _use_keyed_opencode(monkeypatch)
 
-    monkeypatch.setattr(opencode, "Opencode", KeyedFakeOpencode)
     run(screen_cfg)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None and adj.height == 2
-    by_id = {row["zite_record_id"]: row for row in adj.to_dicts()}
-    # no-change child: dense row equals the cleaned row (plus defaults)
+
+    final = read_sheet(screen_cfg.excel_file, "final_child")
+    assert final is not None and final.height == 2
+    assert final.columns == list(FINAL_CHILD_COLUMNS)
+    by_id = _by_id(final)
     assert by_id["f1c1"]["need_1"] == "winter coat taht fits"
     assert by_id["f1c1"]["screened"] is True
     assert by_id["f1c1"]["status"] == "new"
     assert by_id["f1c1"]["age_at_xmas"] == 8
-    # corrected child: the correction overlays the cleaned value
+    assert by_id["f1c1"]["generated_info_sheet"] is False
     assert by_id["f1c2"]["need_1"] == "winter coat that fits"
     assert by_id["f1c2"]["screened"] is True
+    assert sorted(KeyedFakeOpencode.calls) == ["f1c1", "f1c2"]
 
 
-def test_run_targets_absent_or_unscreened_rows(
-    screen_cfg: Config, monkeypatch
+def test_run_immediate_rerun_refreshes_global_logs_without_ai(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Target selection uses the screened marker, not row presence (§7.3)."""
+    """An immediate rerun makes no AI calls but replaces global diagnostics."""
     _seed_workbook(screen_cfg)
-    # f1c1 has a dense row but was never screened (audit seeded it);
-    # f1c2-style screened row below blocks re-screening.
-    from ccat.audit.store import build_adj_frame
-
-    seeded = {
-        "zite_record_id": "f1c1",
-        "first_name": "Kiddo",
-        "screened": False,
-        "potential_duplicate": False,
-    }
-    screened = {
-        "zite_record_id": "f1c2",
-        "first_name": "Two",
-        "screened": True,
-        "potential_duplicate": False,
-    }
-    write_sheets(
-        screen_cfg.excel_file,
-        "audit",
-        {"adj_child": build_adj_frame("child", [seeded, screened])},
-    )
-    FakeOpencode.responses = ["null"]
-    import opencode
-
-    monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
+    KeyedFakeOpencode.responses = {"rec_c1": "null", "rec_c2": "null"}
+    _use_keyed_opencode(monkeypatch)
     run(screen_cfg)
-    assert FakeOpencode.instances[-1].session  # one session used
-    # only the unscreened-but-present row was re-screened
-    assert len(FakeOpencode.responses) == 0
+    before = _rows(screen_cfg, "final_child")
+    calls_before = list(KeyedFakeOpencode.calls)
+    _poison_global_logs(screen_cfg)
+
+    run(screen_cfg)
+
+    assert KeyedFakeOpencode.calls == calls_before
+    assert _rows(screen_cfg, "final_child") == before
+    duplicate_log = read_sheet(screen_cfg.excel_file, "duplicate_log")
+    dob_log = read_sheet(screen_cfg.excel_file, "dob_conflict_log")
+    assert duplicate_log is not None and duplicate_log.height == 0
+    assert dob_log is not None and dob_log.height == 1
+
+
+def test_run_targets_only_final_children_with_screened_false(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stored presence never suppresses AI; final_child.screened controls it."""
+    _seed_workbook(
+        screen_cfg,
+        final_children=[
+            final_child_row(screened=False),
+            final_child_row(
+                child(zite_record_id="rec_c2", first_name="Two"),
+                need_1="human already finished",
+                screened=True,
+            ),
+        ],
+    )
+    KeyedFakeOpencode.responses = {"rec_c1": "null"}
+    _use_keyed_opencode(monkeypatch)
+
+    run(screen_cfg)
+
+    by_id = _by_id(read_sheet(screen_cfg.excel_file, "final_child"))
+    assert KeyedFakeOpencode.calls == ["rec_c1"]
+    assert set(by_id) == {"rec_c1", "rec_c2"}
+    assert by_id["rec_c1"]["screened"] is True
+    assert by_id["rec_c2"]["screened"] is True
+    assert by_id["rec_c2"]["need_1"] == "human already finished"
 
 
 def test_run_preserves_human_edits_and_controls(
-    screen_cfg: Config, monkeypatch
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Corrections never clobber human edits or controls (§7.3)."""
+    """AI overlays untouched fields only and preserves final human controls."""
     _seed_workbook(
-        screen_cfg, children=[child(zite_record_id="f1c1", angel_id="1A")]
-    )
-    from ccat.audit.store import build_adj_frame
-
-    # a human (audit) already fixed need_1 and left a note; the rest of
-    # the row is the dense baseline audit seeded from raw
-    seeded = {
-        **child(zite_record_id="f1c1"),
-        "need_1": "human-fixed coat",
-        "require_clarification": "call the family",
-        "screened": False,
-        "potential_duplicate": False,
-    }
-    write_sheets(
-        screen_cfg.excel_file,
-        "audit",
-        {"adj_child": build_adj_frame("child", [seeded])},
+        screen_cfg,
+        children=[child(zite_record_id="f1c1", angel_id="1A")],
+        final_children=[
+            final_child_row(
+                child(zite_record_id="f1c1"),
+                need_1="human-fixed coat",
+                clarification_notes="call the family",
+                screened=False,
+            )
+        ],
     )
     KeyedFakeOpencode.responses = {
-        # the model proposes a different need_1 AND a desire_1 fix
         "f1c1": json.dumps(
             full_response("f1c1")
             | {"need_1": "model coat", "desire_1": "LEGO set"}
         )
     }
-    import opencode
+    _use_keyed_opencode(monkeypatch)
 
-    monkeypatch.setattr(opencode, "Opencode", KeyedFakeOpencode)
     run(screen_cfg)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None
-    row = adj.to_dicts()[0]
-    # need_1: the human changed it (differs from raw) -> correction skipped
+
+    row = _rows(screen_cfg, "final_child")[0]
     assert row["need_1"] == "human-fixed coat"
-    # desire_1: untouched by the human -> correction applied
     assert row["desire_1"] == "LEGO set"
-    # controls preserved, marker set
-    assert row["require_clarification"] == "call the family"
+    assert row["clarification_notes"] == "call the family"
     assert row["screened"] is True
 
 
@@ -418,7 +422,7 @@ class FakeOpencode:
     """Minimal stand-in for the opencode client used by screening.run."""
 
     instances: list["FakeOpencode"] = []
-    responses: list[str] = []
+    responses: list[str | BaseException] = []
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Record the fake session resource."""
@@ -429,8 +433,11 @@ class FakeOpencode:
         FakeOpencode.instances.append(self)
 
     def _generate(self, session_id: str, prompt: str) -> SimpleNamespace:
-        """Return the next canned response text."""
-        return SimpleNamespace(text=FakeOpencode.responses.pop(0))
+        """Return the next canned response or raise a canned interruption."""
+        response = FakeOpencode.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return SimpleNamespace(text=response)
 
     def __enter__(self) -> "FakeOpencode":
         """Return self as the context manager target."""
@@ -441,77 +448,371 @@ class FakeOpencode:
         return None
 
 
+def final_child_row(
+    source: dict[str, Any] | None = None, **overrides: Any
+) -> dict[str, Any]:
+    """Build one full persistent child fixture with initialized controls."""
+    row = child() | {
+        "potential_anomoly": None,
+        "age_at_xmas": 8,
+        "generated_info_sheet": False,
+        "screened": False,
+        "potential_duplicate": False,
+        "status": "new",
+        "ignore": False,
+        "clarification_notes": None,
+        "audited_at": None,
+    }
+    row.update(source or {})
+    row.update(overrides)
+    return row
+
+
+def final_family_row(
+    source: dict[str, Any] | None = None, **overrides: Any
+) -> dict[str, Any]:
+    """Build one full persistent family fixture with initialized controls."""
+    row = family_row() | {
+        "family_id": 1,
+        "potential_duplicate": False,
+        "assigned_sponsor_id": None,
+        "assigned_angel_ids": None,
+        "num_angels_in_family": None,
+        "status": "new",
+        "ignore": False,
+        "clarification_notes": None,
+        "audited_at": None,
+    }
+    row.update(source or {})
+    row.update(overrides)
+    return row
+
+
+def final_sponsor_row(
+    source: dict[str, Any] | None = None, **overrides: Any
+) -> dict[str, Any]:
+    """Build one full persistent sponsor fixture with initialized controls."""
+    row = sponsor_row() | {
+        "sponsor_id": 1,
+        "potential_duplicate": False,
+        "pref_age_min": None,
+        "pref_age_max": None,
+        "assigned_angel_ids": None,
+        "num_angels_assigned": None,
+        "status": "new",
+        "ignore": False,
+        "clarification_notes": None,
+        "audited_at": None,
+    }
+    row.update(source or {})
+    row.update(overrides)
+    return row
+
+
 def _seed_workbook(
     cfg: Config,
     children: list[dict[str, Any]] | None = None,
     families: list[dict[str, Any]] | None = None,
     sponsors: list[dict[str, Any]] | None = None,
+    final_children: list[dict[str, Any]] | None = None,
+    final_families: list[dict[str, Any]] | None = None,
+    final_sponsors: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Write raw_sponsor/raw_family/raw_child sheets (all config columns)."""
-    if children is None:
-        children = [
+    """Seed full raw and persistent-final sheets through migration ownership."""
+    children = (
+        [
             child(),
             child(zite_record_id="rec_c2", first_name="Two", angel_id="1B"),
         ]
+        if children is None
+        else children
+    )
+    families = [family_row()] if families is None else families
+    sponsors = [sponsor_row()] if sponsors is None else sponsors
+    sheets = {
+        "raw_sponsor": pl.DataFrame(
+            sponsors,
+            schema={key: _raw_dtype(key) for key in sponsor_row()},
+        ),
+        "raw_family": pl.DataFrame(
+            families,
+            schema={key: _raw_dtype(key) for key in family_row()},
+        ),
+        "raw_child": pl.DataFrame(
+            children,
+            schema={key: _raw_dtype(key) for key in child()},
+        ),
+    }
+    for entity, rows in (
+        ("child", final_children),
+        ("family", final_families),
+        ("sponsor", final_sponsors),
+    ):
+        if rows is not None:
+            sheets[f"final_{entity}"] = build_final_frame(entity, rows)
     write_sheets(
         cfg.excel_file,
-        "acquire",
-        {
-            "raw_sponsor": pl.DataFrame(
-                sponsors or [sponsor_row()],
-                schema={key: _raw_dtype(key) for key in sponsor_row()},
-            ),
-            "raw_family": pl.DataFrame(
-                families or [family_row()],
-                schema={key: _raw_dtype(key) for key in family_row()},
-            ),
-            "raw_child": pl.DataFrame(
-                children,
-                schema={key: _raw_dtype(key) for key in child()},
-            ),
-        },
+        "migrate",
+        sheets,
+        xmas=cfg.xmas if final_children is not None else None,
     )
 
 
 def _raw_dtype(key: str) -> Any:
-    """Sheet dtype for one raw fixture key (ints are Int64)."""
-    return pl.Int64 if key in {"num_children", "age_reported"} else pl.String
+    """Return a stable worksheet dtype for one raw fixture field."""
+    if key in {
+        "num_children",
+        "age_reported",
+        "family_id",
+        "sponsor_id",
+        "age_at_xmas",
+    }:
+        return pl.Int64
+    if key == "accepts_disclaimer":
+        return pl.Boolean
+    return pl.String
 
 
-def test_run_appends_rows_only_for_new_children(
-    screen_cfg: Config, monkeypatch
+def _rows(cfg: Config, sheet: str) -> list[dict[str, Any]]:
+    """Read a required fixture sheet as dictionaries."""
+    frame = read_sheet(cfg.excel_file, sheet)
+    assert frame is not None
+    return frame.to_dicts()
+
+
+def _by_id(frame: pl.DataFrame | None) -> dict[str, dict[str, Any]]:
+    """Index one required child frame by zite_record_id."""
+    assert frame is not None
+    return {str(row["zite_record_id"]): row for row in frame.to_dicts()}
+
+
+def _use_keyed_opencode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install the deterministic offline opencode fake."""
+    import opencode
+
+    KeyedFakeOpencode.calls.clear()
+    monkeypatch.setattr(opencode, "Opencode", KeyedFakeOpencode)
+
+
+def _replace_final_rows(
+    cfg: Config, entity: str, rows: list[dict[str, Any]]
 ) -> None:
-    """Only zite_record_ids absent from adj_child are screened (§6.3)."""
+    """Replace one full final fixture without legacy projected writes."""
+    write_sheets(
+        cfg.excel_file,
+        "migrate",
+        {f"final_{entity}": build_final_frame(entity, rows)},
+        xmas=cfg.xmas if entity == "child" else None,
+    )
+
+
+def _poison_global_logs(cfg: Config) -> None:
+    """Put stale content into logs that every screen run must refresh."""
+    write_sheets(
+        cfg.excel_file,
+        "screen",
+        {
+            "duplicate_log": pl.DataFrame({"stale": ["duplicate"]}),
+            "dob_conflict_log": pl.DataFrame({"stale": ["dob"]}),
+        },
+    )
+
+
+def _assert_no_legacy_sheets(cfg: Config) -> None:
+    """Assert that run never creates submissions or adj persistence sheets."""
+    present = set(list_sheets(cfg.excel_file))
+    assert present.isdisjoint(
+        {
+            "child_submissions",
+            "family_submissions",
+            "sponsor_submissions",
+            "adj_child",
+            "adj_family",
+            "adj_sponsor",
+        }
+    )
+
+
+def test_run_no_change_preserves_edits_assignments_and_generated(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A no-change rerun leaves every entity's human/module state untouched."""
+    _seed_workbook(screen_cfg, children=[child()])
+    KeyedFakeOpencode.responses = {"rec_c1": "null"}
+    _use_keyed_opencode(monkeypatch)
+    run(screen_cfg)
+
+    child_rows = _rows(screen_cfg, "final_child")
+    child_rows[0].update(
+        need_1="human edit", generated_info_sheet=True, audited=True
+    )
+    _replace_final_rows(screen_cfg, "child", child_rows)
+    family_rows = _rows(screen_cfg, "final_family")
+    family_rows[0].update(
+        first_name="Human Family",
+        assigned_sponsor_id=42,
+        assigned_angel_ids="1A",
+        num_angels_in_family=1,
+    )
+    _replace_final_rows(screen_cfg, "family", family_rows)
+    sponsor_rows = _rows(screen_cfg, "final_sponsor")
+    sponsor_rows[0].update(
+        phone="human phone", assigned_angel_ids="1A", num_angels_assigned=1
+    )
+    _replace_final_rows(screen_cfg, "sponsor", sponsor_rows)
+    before = {
+        entity: _rows(screen_cfg, f"final_{entity}")
+        for entity in ("child", "family", "sponsor")
+    }
+    calls = list(KeyedFakeOpencode.calls)
+
+    run(screen_cfg)
+
+    assert KeyedFakeOpencode.calls == calls
+    assert {
+        entity: _rows(screen_cfg, f"final_{entity}")
+        for entity in ("child", "family", "sponsor")
+    } == before
+
+
+def test_run_later_entities_append_without_renumbering(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Later child/family/sponsor records append with fresh stable IDs only."""
+    _seed_workbook(screen_cfg, children=[child()])
+    KeyedFakeOpencode.responses = {"rec_c1": "null"}
+    _use_keyed_opencode(monkeypatch)
+    run(screen_cfg)
+    original = {
+        entity: _rows(screen_cfg, f"final_{entity}")
+        for entity in ("child", "family", "sponsor")
+    }
+
+    _seed_workbook(
+        screen_cfg,
+        children=[
+            child(),
+            child(
+                zite_record_id="rec_c3",
+                first_name="Third",
+                primary_email="fam2@example.com",
+                family_id=2,
+                angel_id="2A",
+            ),
+        ],
+        families=[
+            family_row(),
+            family_row(
+                zite_record_id="rec_f2",
+                primary_email="fam2@example.com",
+                created="2026-01-06T10:00:00+00:00",
+                zite_created_at="2026-01-06T10:00:00+00:00",
+            ),
+        ],
+        sponsors=[
+            sponsor_row(),
+            sponsor_row(
+                zite_record_id="rec_s2",
+                email="sponsor2@example.com",
+                create="2026-01-02T10:00:00+00:00",
+            ),
+        ],
+    )
+    KeyedFakeOpencode.responses = {"rec_c3": "null"}
+
+    run(screen_cfg)
+
+    children = _rows(screen_cfg, "final_child")
+    families = _rows(screen_cfg, "final_family")
+    sponsors = _rows(screen_cfg, "final_sponsor")
+    assert [row["zite_record_id"] for row in children] == ["rec_c1", "rec_c3"]
+    assert children[0] == original["child"][0]
+    new_child = _by_id(read_sheet(screen_cfg.excel_file, "final_child"))[
+        "rec_c3"
+    ]
+    assert (new_child["family_id"], new_child["angel_id"]) == (2, "2A")
+    assert new_child["screened"] is True
+    assert [row["family_id"] for row in families] == [1, 2]
+    assert families[0] == original["family"][0]
+    assert [row["sponsor_id"] for row in sponsors] == [1, 2]
+    assert sponsors[0] == original["sponsor"][0]
+    assert KeyedFakeOpencode.calls == ["rec_c1", "rec_c3"]
+
+
+def test_run_new_duplicate_never_steals_existing_angel(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later duplicate gets no angel already owned by its existing group."""
+    _seed_workbook(screen_cfg, children=[child()])
+    KeyedFakeOpencode.responses = {"rec_c1": "null"}
+    _use_keyed_opencode(monkeypatch)
+    run(screen_cfg)
+
+    _seed_workbook(
+        screen_cfg,
+        children=[
+            child(),
+            child(
+                zite_record_id="rec_c2",
+                created="2026-02-02T09:00:00+00:00",
+                zite_created_at="2026-02-02T09:00:00+00:00",
+            ),
+        ],
+    )
+    KeyedFakeOpencode.responses = {"rec_c2": "null"}
+    run(screen_cfg)
+
+    by_id = _by_id(read_sheet(screen_cfg.excel_file, "final_child"))
+    assert by_id["rec_c1"]["angel_id"] == "1A"
+    assert by_id["rec_c2"]["angel_id"] is None
+    assert by_id["rec_c1"]["potential_duplicate"] is True
+    assert by_id["rec_c2"]["potential_duplicate"] is True
+    assert KeyedFakeOpencode.calls == ["rec_c1", "rec_c2"]
+
+
+@pytest.mark.parametrize("mode", ["redo", "overwrite"])
+def test_run_redo_and_overwrite_protect_human_state(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Explicit re-screening preserves edits, controls, and row identity."""
     _seed_workbook(screen_cfg)
-    FakeOpencode.responses = [json.dumps(full_response()), "null"]
-    import opencode
-
-    monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
+    KeyedFakeOpencode.responses = {"rec_c1": "null", "rec_c2": "null"}
+    _use_keyed_opencode(monkeypatch)
     run(screen_cfg)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None and adj.height == 2
-    # second run: both ids present, nothing new screened
-    FakeOpencode.responses = []
-    run(screen_cfg)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None and adj.height == 2
-    assert FakeOpencode.instances[-1].session  # one session per run
+    rows = _rows(screen_cfg, "final_child")
+    rows[0].update(
+        need_1="human-fixed coat",
+        clarification_notes="call the family",
+        generated_info_sheet=True,
+    )
+    rows[1].update(clarification_notes="second child human note")
+    _replace_final_rows(screen_cfg, "child", rows)
+    KeyedFakeOpencode.responses = {
+        "rec_c1": json.dumps(
+            full_response("rec_c1")
+            | {"need_1": "model coat", "desire_1": "LEGO set"}
+        ),
+        "rec_c2": "null",
+    }
+    calls_before = len(KeyedFakeOpencode.calls)
 
+    if mode == "redo":
+        run(screen_cfg, redo="rec_c1")
+        expected_calls = calls_before + 1
+    else:
+        run(screen_cfg, overwrite=True)
+        expected_calls = calls_before + 2
 
-def test_run_redo_replaces_one_row(screen_cfg: Config, monkeypatch) -> None:
-    """--redo re-screens exactly one child and replaces its row (§6.3)."""
-    _seed_workbook(screen_cfg)
-    FakeOpencode.responses = ["null", "null"]
-    import opencode
-
-    monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
-    run(screen_cfg)
-    FakeOpencode.responses = [json.dumps(full_response())]
-    run(screen_cfg, redo="rec_c1")
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None and adj.height == 2
-    row = adj.filter(pl.col("zite_record_id") == "rec_c1").to_dicts()[0]
-    assert row["need_1"] == "winter coat that fits"
+    by_id = _by_id(read_sheet(screen_cfg.excel_file, "final_child"))
+    assert len(by_id) == 2
+    assert len(KeyedFakeOpencode.calls) == expected_calls
+    assert by_id["rec_c1"]["need_1"] == "human-fixed coat"
+    assert by_id["rec_c1"]["desire_1"] == "LEGO set"
+    assert by_id["rec_c1"]["clarification_notes"] == "call the family"
+    assert by_id["rec_c1"]["generated_info_sheet"] is True
+    assert by_id["rec_c1"]["screened"] is True
+    assert by_id["rec_c2"]["clarification_notes"] == "second child human note"
+    assert by_id["rec_c2"]["screened"] is True
 
 
 def test_run_redo_unknown_child_fails(screen_cfg: Config, monkeypatch) -> None:
@@ -524,49 +825,89 @@ def test_run_redo_unknown_child_fails(screen_cfg: Config, monkeypatch) -> None:
         run(screen_cfg, redo="nope")
 
 
-def test_run_overwrite_replaces_all_rows(
-    screen_cfg: Config, monkeypatch
+def test_run_failed_redo_keeps_row_and_ordinary_run_retries(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--overwrite re-screens every child, replacing all adj rows (§6.3)."""
-    _seed_workbook(screen_cfg)
-    FakeOpencode.responses = ["null", "null"]
-    import opencode
-
-    monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
+    """Failed redo persists screened=False without deleting human work."""
+    _seed_workbook(screen_cfg, children=[child()])
+    KeyedFakeOpencode.responses = {"rec_c1": "null"}
+    _use_keyed_opencode(monkeypatch)
     run(screen_cfg)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None and adj.height == 2
-    FakeOpencode.responses = [json.dumps(full_response()), "null"]
+    rows = _rows(screen_cfg, "final_child")
+    rows[0].update(need_1="human-fixed coat", clarification_notes="keep me")
+    _replace_final_rows(screen_cfg, "child", rows)
+
+    KeyedFakeOpencode.responses = {"rec_c1": "garbage"}
+    run(screen_cfg, redo="rec_c1")
+
+    failed = _rows(screen_cfg, "final_child")
+    assert len(failed) == 1
+    assert failed[0]["zite_record_id"] == "rec_c1"
+    assert failed[0]["screened"] is False
+    assert failed[0]["need_1"] == "human-fixed coat"
+    assert failed[0]["clarification_notes"] == "keep me"
+
+    KeyedFakeOpencode.responses = {
+        "rec_c1": json.dumps(
+            full_response("rec_c1")
+            | {"need_1": "model coat", "desire_1": "LEGO set"}
+        )
+    }
+    run(screen_cfg)
+    retried = _rows(screen_cfg, "final_child")[0]
+    assert retried["screened"] is True
+    assert retried["need_1"] == "human-fixed coat"
+    assert retried["desire_1"] == "LEGO set"
+    assert retried["clarification_notes"] == "keep me"
+
+
+def test_run_never_creates_submissions_or_adj_sheets(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Persistent-final runs never recreate retired submissions/adj sheets."""
+    _seed_workbook(screen_cfg)
+    KeyedFakeOpencode.responses = {"rec_c1": "null", "rec_c2": "null"}
+    _use_keyed_opencode(monkeypatch)
+    run(screen_cfg)
+    _assert_no_legacy_sheets(screen_cfg)
+
+    run(screen_cfg)
+    KeyedFakeOpencode.responses = {"rec_c1": "null", "rec_c2": "null"}
     run(screen_cfg, overwrite=True)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None and adj.height == 2
-    row = adj.filter(pl.col("zite_record_id") == "rec_c1").to_dicts()[0]
-    assert row["need_1"] == "winter coat that fits"
+    _assert_no_legacy_sheets(screen_cfg)
 
 
-def test_run_overwrite_test_mode_limits_to_first_family(
-    screen_cfg: Config, monkeypatch
+def test_write_final_children_passes_xmas_to_full_store_writer(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--overwrite --test re-screens only the first family's children."""
-    _seed_workbook(screen_cfg)
-    FakeOpencode.responses = ["null", "null"]
-    import opencode
+    """The final-child helper writes the full schema with formula context."""
+    seen_xmas: list[Any] = []
+    real_write = store.write_sheets
 
-    monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
-    run(screen_cfg)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None and adj.height == 2
-    FakeOpencode.responses = [json.dumps(full_response()), "null"]
-    run(screen_cfg, overwrite=True, test=True)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None and adj.height == 2
-    row = adj.filter(pl.col("zite_record_id") == "rec_c1").to_dicts()[0]
-    assert row["need_1"] == "winter coat that fits"
+    def checking_write(
+        path: str,
+        module: str,
+        sheets: dict[str, pl.DataFrame],
+        renames: dict[str, str] | None = None,
+        xmas: Any = None,
+    ) -> None:
+        if "final_child" in sheets:
+            seen_xmas.append(xmas)
+        real_write(path, module, sheets, renames, xmas)
+
+    monkeypatch.setattr(store, "write_sheets", checking_write)
+    frame = screening._write_final_children(
+        screen_cfg, [final_child_row(screened=True)]
+    )
+    assert frame.columns == list(FINAL_CHILD_COLUMNS)
+    assert seen_xmas == [screen_cfg.xmas]
 
 
 def test_run_requires_raw_child(screen_cfg: Config) -> None:
     """Missing raw_child fails with an actionable error."""
-    with pytest.raises(screening.ScreeningError, match="acquire"):
+    from ccat.preparation import PreparationError
+
+    with pytest.raises(PreparationError, match="acquire"):
         run(screen_cfg)
 
 
@@ -678,9 +1019,12 @@ def test_run_test_mode_screens_only_first_family(
 
     monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
     run(screen_cfg, test=True)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None
-    assert set(adj["zite_record_id"].to_list()) == {"f1c1", "f1c2"}
+    final = read_sheet(screen_cfg.excel_file, "final_child")
+    by_id = _by_id(final)
+    assert set(by_id) == {"f1c1", "f1c2", "f2c1"}
+    assert by_id["f1c1"]["screened"] is True
+    assert by_id["f1c2"]["screened"] is True
+    assert by_id["f2c1"]["screened"] is False
 
 
 def test_run_test_mode_orphans_fallback_first_child(
@@ -709,9 +1053,10 @@ def test_run_test_mode_orphans_fallback_first_child(
 
     monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
     run(screen_cfg, test=True)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None
-    assert adj["zite_record_id"].to_list() == ["o1"]
+    by_id = _by_id(read_sheet(screen_cfg.excel_file, "final_child"))
+    assert set(by_id) == {"o1", "o2"}
+    assert by_id["o1"]["screened"] is True
+    assert by_id["o2"]["screened"] is False
 
 
 def test_run_test_mode_skips_already_screened_first_family(
@@ -737,28 +1082,25 @@ def test_run_test_mode_skips_already_screened_first_family(
                 angel_id="2A",
             ),
         ],
-    )
-    from ccat.audit.store import build_adj_frame
-
-    screened = {
-        "zite_record_id": "f1c1",
-        "first_name": "Kiddo",
-        "screened": True,
-        "potential_duplicate": False,
-    }
-    write_sheets(
-        screen_cfg.excel_file,
-        "audit",
-        {"adj_child": build_adj_frame("child", [screened])},
+        final_children=[
+            final_child_row(
+                child(zite_record_id="f1c1", angel_id="1A"), screened=True
+            )
+        ],
     )
     import opencode
 
     monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
     FakeOpencode.responses = []
     run(screen_cfg, test=True)
-    after = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert after is not None
-    assert after["zite_record_id"].to_list() == ["f1c1"]  # untouched
+    after = _rows(screen_cfg, "final_child")
+    assert {row["zite_record_id"] for row in after} == {"f1c1", "f2c1"}
+    assert (
+        next(row for row in after if row["zite_record_id"] == "f1c1")[
+            "screened"
+        ]
+        is True
+    )
 
 
 def test_screen_children_screens_every_child_concurrently(
@@ -820,14 +1162,14 @@ def test_screen_children_reports_each_result(screen_cfg: Config) -> None:
     assert len(reported) == len(children)
 
 
-def test_upsert_adj_row_replaces_and_appends() -> None:
-    """Rows upsert by zite_record_id: append new, replace in place."""
+def test_upsert_final_row_replaces_and_appends() -> None:
+    """Full final rows upsert by zite_record_id without renumbering others."""
     rows: list[dict[str, Any]] = [{"zite_record_id": "a"}]
-    screening._upsert_adj_row(rows, {"zite_record_id": "b"})
+    screening._upsert_final_row(rows, {"zite_record_id": "b"})
     assert [row["zite_record_id"] for row in rows] == ["a", "b"]
-    screening._upsert_adj_row(rows, {"zite_record_id": "a"})
+    screening._upsert_final_row(rows, {"zite_record_id": "a"})
     assert [row["zite_record_id"] for row in rows] == ["a", "b"]
-    assert rows[0] == {"zite_record_id": "a"}  # the replacement row
+    assert rows[0] == {"zite_record_id": "a"}
 
 
 class KeyedFakeOpencode:
@@ -838,6 +1180,7 @@ class KeyedFakeOpencode:
     """
 
     responses: dict[str, str] = {}
+    calls: list[str] = []
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Record the fake session resource."""
@@ -853,6 +1196,7 @@ class KeyedFakeOpencode:
         match = re.search(r'"zite_record_id": "([^"]+)"', prompt)
         assert match is not None
         record_id = match.group(1)
+        KeyedFakeOpencode.calls.append(record_id)
         return SimpleNamespace(text=KeyedFakeOpencode.responses[record_id])
 
     def __enter__(self) -> "KeyedFakeOpencode":
@@ -888,7 +1232,7 @@ def test_screen_children_stops_on_interrupt(screen_cfg: Config) -> None:
 def test_run_persists_rows_as_results_arrive(
     screen_cfg: Config, monkeypatch
 ) -> None:
-    """Each screened child is written to adj_child before the next ends."""
+    """Each screened child is persisted before the next result ends."""
     _seed_workbook(screen_cfg)
     KeyedFakeOpencode.responses = {
         "rec_c1": "null",
@@ -896,23 +1240,24 @@ def test_run_persists_rows_as_results_arrive(
     }
     import opencode
 
+    KeyedFakeOpencode.calls.clear()
     monkeypatch.setattr(opencode, "Opencode", KeyedFakeOpencode)
     save_calls: list[str] = []
-    real_write = screening.write_sheets
+    real_write = screening.write_final_rows
 
     def counting_write(
-        path: str,
+        cfg: Config,
         module: str,
-        sheets: dict[str, pl.DataFrame],
-        renames: dict[str, str] | None = None,
+        entity: str,
+        rows: list[dict[str, Any]],
     ) -> None:
         save_calls.append(module)
-        real_write(path, module, sheets, renames)
+        real_write(cfg, module, entity, rows)
 
-    monkeypatch.setattr(screening, "write_sheets", counting_write)
+    monkeypatch.setattr(screening, "write_final_rows", counting_write)
     run(screen_cfg)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None and adj.height == 2
+    final = read_sheet(screen_cfg.excel_file, "final_child")
+    assert final is not None and final.height == 2
     # final reconcile write plus one save per completed child
     assert save_calls.count("screen") >= 2
 
@@ -924,11 +1269,11 @@ def test_run_persists_rows_as_results_arrive(
 
 def test_clean_rows_keeps_rows_and_collects_notes(screen_cfg: Config) -> None:
     """Cleaning never drops rows; failures become notes (§6.2)."""
-    from ccat.screening import clean_rows
+    from ccat.preparation import clean_rows
 
     rows = [
         sponsor_row(email="broken", num_children="2", sponsor_type="Weird"),
-        sponsor_row(),
+        sponsor_row(zite_record_id="rec_s2"),
     ]
     cleaned, notes = clean_rows(rows, "sponsor", screen_cfg)
     assert len(cleaned) == 2
@@ -945,7 +1290,7 @@ def test_clean_rows_keeps_rows_and_collects_notes(screen_cfg: Config) -> None:
 
 def test_clean_rows_age_reported_coercion(screen_cfg: Config) -> None:
     """Free-text reported ages coerce to int or null (§6.2)."""
-    from ccat.screening import clean_rows
+    from ccat.preparation import clean_rows
 
     rows = [
         child(zite_record_id="c1", age_reported="4 turning 5"),
@@ -967,7 +1312,7 @@ def test_detect_duplicates_families_flag_not_merge() -> None:
         ),
         family_row(zite_record_id="f3", primary_email="other@x.com"),
     ]
-    log_rows, survivor_of = screening.detect_duplicates(rows, "family")
+    log_rows, survivor_of = preparation.detect_duplicates(rows, "family")
     assert set(survivor_of) == {"f1", "f2"}
     assert survivor_of["f1"]["zite_record_id"] == "f1"  # earliest = survivor
     assert len(log_rows) == 2
@@ -988,7 +1333,7 @@ def test_detect_duplicates_children_latest_survives() -> None:
             need_1="winter coat, mittens",
         ),
     ]
-    log_rows, survivor_of = screening.detect_duplicates(rows, "child")
+    log_rows, survivor_of = preparation.detect_duplicates(rows, "child")
     assert survivor_of["c1"]["zite_record_id"] == "c2"  # latest survives
     assert survivor_of["c2"]["zite_record_id"] == "c2"
     assert len(log_rows) == 2
@@ -1001,15 +1346,15 @@ def test_detect_duplicates_sponsors_by_email() -> None:
         sponsor_row(zite_record_id="s2"),
         sponsor_row(zite_record_id="s3", email=None),
     ]
-    log_rows, survivor_of = screening.detect_duplicates(rows, "sponsor")
+    log_rows, survivor_of = preparation.detect_duplicates(rows, "sponsor")
     assert set(survivor_of) == {"s1", "s2"}
     assert len(log_rows) == 2
 
 
-def test_run_writes_submissions_and_duplicate_log(
+def test_run_appends_full_finals_and_duplicate_log(
     screen_cfg: Config, monkeypatch
 ) -> None:
-    """run() writes every submission + duplicate flags (§6.3/§6.4)."""
+    """run() appends every entity and refreshes duplicate flags/logs."""
     _seed_workbook(
         screen_cfg,
         families=[
@@ -1043,11 +1388,9 @@ def test_run_writes_submissions_and_duplicate_log(
 
     monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
     run(screen_cfg)
-    # every submission landed in the submissions sheets, cleaned + IDs
-    family_submissions = read_sheet(screen_cfg.excel_file, "family_submissions")
-    assert family_submissions is not None and family_submissions.height == 2
-    assert "family_id" in family_submissions.columns
-    assert family_submissions["family_id"].to_list() == [1, 1]
+    family_final = read_final(screen_cfg, "family")
+    assert len(family_final) == 1
+    assert family_final[0]["family_id"] == 1
     # duplicate log: one row per flagged group member
     duplicate_log = read_sheet(screen_cfg.excel_file, "duplicate_log")
     assert duplicate_log is not None
@@ -1063,28 +1406,18 @@ def test_run_writes_submissions_and_duplicate_log(
     assert log_by_id["rec_f1"]["survivor"] is True
     assert log_by_id["rec_f2"]["survivor"] is False
     # child duplicates: the LATEST keeps the angel letter
-    child_submissions = read_sheet(screen_cfg.excel_file, "child_submissions")
-    assert child_submissions is not None
-    child_ids = {
-        row["zite_record_id"]: row for row in child_submissions.to_dicts()
-    }
+    child_rows = read_final(screen_cfg, "child")
+    child_ids = {row["zite_record_id"]: row for row in child_rows}
     assert child_ids["rec_c2"]["angel_id"] == "1A"
     assert child_ids["rec_c1"]["angel_id"] is None
-    # adj rows carry the flag + note
-    adj_family = read_sheet(screen_cfg.excel_file, "adj_family")
-    assert adj_family is not None and adj_family.height == 1
-    family_row_dict = adj_family.to_dicts()[0]
-    assert family_row_dict["potential_duplicate"] is True
+    # final rows carry the flag + note
+    assert family_final[0]["potential_duplicate"] is True
     assert "Potential duplicate family submission" in (
-        family_row_dict["require_clarification"] or ""
+        family_final[0]["clarification_notes"] or ""
     )
-    adj_child = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj_child is not None
-    adj_by_id = {row["zite_record_id"]: row for row in adj_child.to_dicts()}
-    assert adj_by_id["rec_c1"]["potential_duplicate"] is True
-    assert adj_by_id["rec_c2"]["potential_duplicate"] is True
-    # validation notes propagated (sponsor has none here)
-    assert adj_by_id["rec_c1"]["screened"] is True
+    assert child_ids["rec_c1"]["potential_duplicate"] is True
+    assert child_ids["rec_c2"]["potential_duplicate"] is True
+    assert child_ids["rec_c1"]["screened"] is True
 
 
 def test_check_emails_logs_full_response(
@@ -1354,18 +1687,18 @@ def test_run_orphans_get_the_orphan_note(
 
     monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
     run(screen_cfg)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None
-    row = adj.to_dicts()[0]
-    assert ORPHAN_NOTE in (row["require_clarification"] or "")
+    final = read_sheet(screen_cfg.excel_file, "final_child")
+    assert final is not None
+    row = final.to_dicts()[0]
+    assert ORPHAN_NOTE in (row["clarification_notes"] or "")
     assert row["status"] == "needs_clarification"
 
 
 def test_run_existing_orphan_row_gets_the_note(
     screen_cfg: Config, monkeypatch
 ) -> None:
-    """An already-seeded orphan adj row picks up the note idempotently."""
-    from ccat.audit.store import ORPHAN_NOTE, build_adj_frame
+    """An already-seeded orphan final row picks up the note idempotently."""
+    from ccat.audit.store import ORPHAN_NOTE
 
     _seed_workbook(
         screen_cfg,
@@ -1377,25 +1710,24 @@ def test_run_existing_orphan_row_gets_the_note(
                 angel_id=None,
             ),
         ],
-    )
-    seeded = {
-        "zite_record_id": "o1",
-        "first_name": "Kiddo",
-        "family_id": None,
-        "screened": True,
-        "potential_duplicate": False,
-    }
-    write_sheets(
-        screen_cfg.excel_file,
-        "audit",
-        {"adj_child": build_adj_frame("child", [seeded])},
+        final_children=[
+            final_child_row(
+                child(
+                    zite_record_id="o1",
+                    primary_email="missing@x.com",
+                    family_id=None,
+                    angel_id=None,
+                ),
+                screened=True,
+            )
+        ],
     )
     FakeOpencode.responses = []
     import opencode
 
     monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
     run(screen_cfg)
-    adj = read_sheet(screen_cfg.excel_file, "adj_child")
-    assert adj is not None
-    row = adj.to_dicts()[0]
-    assert ORPHAN_NOTE in (row["require_clarification"] or "")
+    final = read_sheet(screen_cfg.excel_file, "final_child")
+    assert final is not None
+    row = final.to_dicts()[0]
+    assert ORPHAN_NOTE in (row["clarification_notes"] or "")
