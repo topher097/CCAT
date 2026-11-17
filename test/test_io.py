@@ -234,8 +234,25 @@ class TestOwnershipMatrix:
         """Every v2 module writes exactly its owned sheets."""
         from ccat.io import WRITABLE_SHEETS
 
-        assert "family_submissions" in WRITABLE_SHEETS["acquire"]
-        assert "child_submissions" in WRITABLE_SHEETS["acquire"]
+        # acquire only fetches: raw sheets and nothing else (§5)
+        assert WRITABLE_SHEETS["acquire"] == frozenset(
+            {"raw_sponsor", "raw_family", "raw_child"}
+        )
+        # screen prepares the whole downstream layer (§6)
+        assert WRITABLE_SHEETS["screen"] == frozenset(
+            {
+                "sponsor_submissions",
+                "family_submissions",
+                "child_submissions",
+                "adj_child",
+                "adj_family",
+                "adj_sponsor",
+                "duplicate_log",
+                "dob_conflict_log",
+                "email_validation_log",
+                "address_validation_log",
+            }
+        )
         assert WRITABLE_SHEETS["audit"] == frozenset(
             {"adj_child", "adj_family", "adj_sponsor", "final_child"}
         )
@@ -243,7 +260,6 @@ class TestOwnershipMatrix:
         assert "adj_sponsor" in WRITABLE_SHEETS["match"]
         assert "adj_child" in WRITABLE_SHEETS["generate"]
         assert "adj_sponsor" in WRITABLE_SHEETS["migrate"]
-        assert "adj_sponsor" not in WRITABLE_SHEETS["screen"]
         assert "adj_child" not in WRITABLE_SHEETS["acquire"]
 
     def test_audit_writes_adj_sheets(self, cfg: Config) -> None:
@@ -269,14 +285,14 @@ class TestOwnershipMatrix:
         )
         assert "adj_sponsor" in list_sheets(cfg.excel_file)
 
-    def test_screen_cannot_write_adj_family(self, cfg: Config) -> None:
-        """Screening still owns only adj_child."""
-        from ccat.io import SheetOwnershipError
-
-        with pytest.raises(SheetOwnershipError):
-            write_sheets(
-                cfg.excel_file, "screen", {"adj_family": pl.DataFrame()}
-            )
+    def test_screen_writes_adj_family(self, cfg: Config) -> None:
+        """Screening owns all three adj sheets now (§6)."""
+        write_sheets(
+            cfg.excel_file,
+            "screen",
+            {"adj_family": pl.DataFrame(), "adj_sponsor": pl.DataFrame()},
+        )
+        assert "adj_family" in list_sheets(cfg.excel_file)
 
     def test_migrate_writer_bootstraps_fresh_workbook(
         self, cfg: Config
@@ -287,7 +303,12 @@ class TestOwnershipMatrix:
         sheets = {
             name: pl.DataFrame()
             for name in SHEETS
-            if name not in {"match_report"}
+            if name
+            not in {
+                "match_report",
+                "email_validation_log",
+                "address_validation_log",
+            }
         }
         write_sheets(cfg.excel_file, "migrate", sheets, xmas=cfg.xmas)
         names = set(list_sheets(cfg.excel_file))

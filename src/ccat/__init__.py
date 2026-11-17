@@ -6,7 +6,7 @@ modules runnable independently, each taking an optional ``--config`` path
 
     ccat acquire  [--config PATH]
     ccat screen   [--config PATH] [--redo ZITE_RECORD_ID] [--test]
-                  [--overwrite]
+                  [--overwrite] [--skip-email-check] [--skip-address-check]
     ccat audit    [--config PATH] [--test] [--restart]
     ccat match    [--config PATH] [--test] [--overwrite] [--skip-match]
     ccat generate [--config PATH] [--test] [--overwrite] [--sponsor ID]
@@ -15,6 +15,20 @@ modules runnable independently, each taking an optional ``--config`` path
     ccat clarify  [--config PATH] [--generate] [--overwrite]
     ccat clarify-export [--config PATH] [--output PATH]
     ccat audit-migrate [--config PATH] --from PATH [--force]
+
+``ccat acquire`` only fetches: it pulls the sponsor/family/child tables
+from Zite and writes them verbatim to the ``raw_*`` sheets -- no
+cleaning, no validation, no deduplication.  ``ccat screen`` prepares
+everything downstream needs from those verbatim records: it cleans the
+trivial formatting locally (capitalization, phone/email/date formats --
+never the AI), flags format/enum problems instead of dropping rows,
+assigns the stable IDs, writes the cleaned ``*_submissions`` rows,
+**flags potential duplicates** (families by primary email, children by
+email + first name, sponsors by email -- never merged; the user resolves
+them in the audit tool), logs sibling DOB conflicts, validates every new
+sponsor/family email with ZeroBounce and every family address with
+Nominatim (both full API responses logged), and then AI-screens the
+children only (the prompt carries no personal data).
 
 The ``--test`` flag (screen/audit/match/generate) stops the run after the
 first full family (screening: only the first family's children are
@@ -169,16 +183,21 @@ def _screen_cmd(
     redo: str | None = None,
     test: bool = False,
     overwrite: bool = False,
+    skip_email_check: bool = False,
+    skip_address_check: bool = False,
 ) -> None:
-    """Run module 2: AI screening (§6).
+    """Run module 2: pre-audit screening (§6).
 
     Args:
         config: Path to the JSON configuration file.
         redo: Optional zite_record_id to re-screen, replacing its adj row.
         test: Stop after the first full family (first family's children
-            only).
+            only are AI-screened).
         overwrite: Re-screen every child, replacing all existing
             adj_child rows.
+        skip_email_check: Skip the ZeroBounce email deliverability
+            validation.
+        skip_address_check: Skip the Nominatim family-address validation.
     """
     _dispatch(
         "screen",
@@ -187,6 +206,8 @@ def _screen_cmd(
         redo=redo,
         test=test,
         overwrite=overwrite,
+        skip_email_check=skip_email_check,
+        skip_address_check=skip_address_check,
     )
 
 

@@ -58,6 +58,7 @@ SHEETS = (
     "raw_sponsor",
     "raw_family",
     "raw_child",
+    "sponsor_submissions",
     "family_submissions",
     "child_submissions",
     "adj_sponsor",
@@ -67,8 +68,10 @@ SHEETS = (
     "final_family",
     "final_sponsor",
     "match_report",
-    "dedup_log",
+    "duplicate_log",
     "dob_conflict_log",
+    "email_validation_log",
+    "address_validation_log",
 )
 
 #: Ownership matrix (§9 as amended by the audit architecture §4.4): module
@@ -76,19 +79,34 @@ SHEETS = (
 #: (match writes assignment columns only, audit never touches them,
 #: generate writes ``generated_info_sheet`` only) is enforced by the
 #: modules through the shared store helpers and by tests.
+#:
+#: Module 1 (acquire) only fetches: it writes the verbatim ``raw_*``
+#: sheets and nothing else.  Module 2 (screen) prepares every downstream
+#: layer: the cleaned ``*_submissions`` rows, all three dense ``adj_*``
+#: sheets, the duplicate detection log, and the email/address validation
+#: logs.
 WRITABLE_SHEETS: dict[str, frozenset[str]] = {
     "acquire": frozenset(
         {
             "raw_sponsor",
             "raw_family",
             "raw_child",
-            "family_submissions",
-            "child_submissions",
-            "dedup_log",
-            "dob_conflict_log",
         }
     ),
-    "screen": frozenset({"adj_child"}),
+    "screen": frozenset(
+        {
+            "sponsor_submissions",
+            "family_submissions",
+            "child_submissions",
+            "adj_child",
+            "adj_family",
+            "adj_sponsor",
+            "duplicate_log",
+            "dob_conflict_log",
+            "email_validation_log",
+            "address_validation_log",
+        }
+    ),
     "audit": frozenset(
         {"adj_child", "adj_family", "adj_sponsor", "final_child"}
     ),
@@ -108,9 +126,10 @@ WRITABLE_SHEETS: dict[str, frozenset[str]] = {
             "raw_sponsor",
             "raw_family",
             "raw_child",
+            "sponsor_submissions",
             "family_submissions",
             "child_submissions",
-            "dedup_log",
+            "duplicate_log",
             "dob_conflict_log",
             "adj_child",
             "adj_family",
@@ -125,12 +144,24 @@ WRITABLE_SHEETS: dict[str, frozenset[str]] = {
 #: Read access matrix (§9); listed for documentation, all modules may read.
 READABLE_SHEETS: dict[str, frozenset[str]] = {
     "acquire": frozenset(),
-    "screen": frozenset({"raw_child", "adj_child"}),
+    "screen": frozenset(
+        {
+            "raw_sponsor",
+            "raw_family",
+            "raw_child",
+            "adj_child",
+            "adj_family",
+            "adj_sponsor",
+            "email_validation_log",
+            "address_validation_log",
+        }
+    ),
     "audit": frozenset(
         {
             "raw_sponsor",
             "raw_family",
             "raw_child",
+            "sponsor_submissions",
             "family_submissions",
             "child_submissions",
             "adj_child",
@@ -138,6 +169,9 @@ READABLE_SHEETS: dict[str, frozenset[str]] = {
             "adj_sponsor",
             "final_child",
             "dob_conflict_log",
+            "duplicate_log",
+            "email_validation_log",
+            "address_validation_log",
         }
     ),
     "match": frozenset(

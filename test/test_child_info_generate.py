@@ -600,10 +600,24 @@ class TestLoadEnriched:
     def test_null_family_id(
         self, gen_cfg: Config, two_children: list[dict[str, Any]]
     ) -> None:
-        """A child without family_id raises a typed error."""
+        """A child without family_id is ignored (orphaned), not an error."""
         two_children[0]["family_id"] = None
         _seed(gen_cfg, two_children, _family())
-        with pytest.raises(InfoSheetError, match="without family_id"):
+        base, enriched, _added = gen._load_enriched_rows(gen_cfg)
+        assert base.height == 1  # the orphaned row is dropped
+        assert enriched["family_id"].to_list() == [1]
+        assert base["zite_record_id"].to_list() == [
+            two_children[1]["zite_record_id"]
+        ]
+
+    def test_all_null_family_id(
+        self, gen_cfg: Config, two_children: list[dict[str, Any]]
+    ) -> None:
+        """Every child orphaned -> typed error with nothing to generate."""
+        two_children[0]["family_id"] = None
+        two_children[1]["family_id"] = None
+        _seed(gen_cfg, two_children, _family())
+        with pytest.raises(InfoSheetError, match="lacks a family_id"):
             gen._load_enriched_rows(gen_cfg)
 
     def test_final_family_missing_join_column(

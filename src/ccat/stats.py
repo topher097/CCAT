@@ -2,7 +2,7 @@
 
 Reads the post-match state (``final_child`` joined with ``final_family``
 and ``final_sponsor``) from the pipeline workbook -- or the raw
-``raw_child``/``raw_family`` sheets with ``--raw`` -- and renders a dated
+``{entity}_submissions`` sheets with ``--raw`` -- and renders a dated
 report as both HTML and PDF into ``report.output_dir``:
 
 1. A stacked bar chart of children (angels) added per day per pickup
@@ -217,9 +217,10 @@ def _load_enriched(
 
     Args:
         cfg: The pipeline configuration.
-        raw: Read the ``raw_child``/``raw_family`` sheets instead of the
-            final sheets.  ``raw_family`` has no ``assigned_sponsor_id``,
-            so sponsor counts are zero in this mode.
+        raw: Read the ``{entity}_submissions`` sheets (cleaned, written
+            by ``ccat screen``) instead of the final sheets.  They have
+            no ``assigned_sponsor_id``, so sponsor counts are zero in
+            this mode.
 
     Returns:
         A tuple of (enriched child frame -- child sheet plus
@@ -232,9 +233,9 @@ def _load_enriched(
         StatsError: If the child/family sheet is missing or empty, or
             lacks the required columns.
     """
-    child_sheet = "raw_child" if raw else "final_child"
-    family_sheet = "raw_family" if raw else "final_family"
-    sponsor_sheet = "raw_sponsor" if raw else "final_sponsor"
+    child_sheet = "child_submissions" if raw else "final_child"
+    family_sheet = "family_submissions" if raw else "final_family"
+    sponsor_sheet = "sponsor_submissions" if raw else "final_sponsor"
     child = read_sheet(cfg.excel_file, child_sheet)
     if child is None or child.is_empty():
         raise StatsError(
@@ -268,7 +269,7 @@ def _load_enriched(
             " `ccat acquire` first"
         )
     if "assigned_sponsor_id" not in family.columns:
-        # raw_family has no sponsor assignment yet (§9 ownership matrix).
+        # submissions sheets have no sponsor assignment yet (§9).
         family = family.with_columns(
             pl.lit(None, dtype=pl.Int64).alias("assigned_sponsor_id")
         )
@@ -324,7 +325,7 @@ def _load_sponsor(cfg: Config, sponsor_sheet: str) -> pl.DataFrame:
 
     Args:
         cfg: The pipeline configuration.
-        sponsor_sheet: ``raw_sponsor`` (raw mode) or ``final_sponsor``.
+        sponsor_sheet: ``sponsor_submissions`` (raw mode) or ``final_sponsor``.
 
     Returns:
         The sponsor frame, or an empty frame with the expected schema
@@ -444,7 +445,7 @@ def _location_table(
     Args:
         enriched: The enriched child frame.
         family: The family frame (normalized location).
-        sponsor: The sponsor frame (``raw_sponsor`` or
+        sponsor: The sponsor frame (``sponsor_submissions`` or
             ``final_sponsor``), or an empty stand-in.
         locations: Ordered location labels.
         gender_keys: Ordered lowercase gender keys for the columns.
@@ -798,9 +799,9 @@ def run(cfg: Config, raw: bool = False) -> None:
 
     Args:
         cfg: The pipeline configuration.
-        raw: Build the report from ``raw_child``/``raw_family`` instead
+        raw: Build the report from the ``{entity}_submissions`` sheets instead
             of the final sheets; sponsor counts are zero because
-            ``raw_family`` has no ``assigned_sponsor_id``.
+            They have no ``assigned_sponsor_id``.
 
     Raises:
         StatsError: If the sheets are unusable or rendering fails.

@@ -6,6 +6,9 @@ LibreOffice template ``info_sheet.template_file`` with the child's data
 via py3o and converts the result to a PDF named
 ``AT<season>_<angel_id>.pdf`` in ``info_sheet.output_dir``.  Children
 without an assigned sponsor are skipped (run `ccat match` first).
+Orphaned children (``family_id`` null — no matching family
+registration) are ignored and logged: they need fixing later, and they
+can never carry a sponsor assignment.
 Successfully generated
 rows flip their flag to ``True`` so reruns only process pending children
 (§13).  Failed rows keep ``False`` and are reported as one typed error
@@ -68,10 +71,9 @@ from tqdm import tqdm
 
 from ccat import sponsor_packets
 from ccat.audit.store import (
-    FINAL_CHILD_COLUMNS,
     STATUS_AUDITED,
     build_adj_frame,
-    project_final,
+    project_final_child,
     read_adj,
 )
 from ccat.config import Config
@@ -208,9 +210,10 @@ def _load_enriched_rows(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame, bool]:
     Raises:
         InfoSheetError: If ``final_child`` is missing or empty, if
             ``final_family``/``final_sponsor`` is missing or lacks the
-            join columns, if ``family_id``/``sponsor_id`` is duplicated
-            or missing on the family/sponsor side, or if a child row has
-            no ``family_id``.
+            join columns, or if ``family_id``/``sponsor_id`` is
+            duplicated or missing on the family/sponsor side.  Child
+            rows without a ``family_id`` are ignored (orphaned children
+            cannot be generated; they are logged and skipped).
     """
     frame = read_sheet(cfg.excel_file, "final_child")
     if frame is None or frame.is_empty():
@@ -224,11 +227,21 @@ def _load_enriched_rows(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame, bool]:
         )
     orphaned = frame.filter(pl.col("family_id").is_null())
     if not orphaned.is_empty():
-        ids = orphaned["zite_record_id"].to_list()
-        raise InfoSheetError(
-            "final_child rows without family_id (run `ccat match` first):"
-            f" {ids}"
+        # Orphaned children (no matching family registration) cannot be
+        # generated; ignore them for the user to fix later.
+        logger.warning(
+            "ignoring %d final_child row(s) without family_id"
+            " (orphaned; run `ccat screen`/`ccat audit` once the family"
+            " registration exists): %s",
+            orphaned.height,
+            orphaned["zite_record_id"].to_list(),
         )
+        frame = frame.filter(pl.col("family_id").is_not_null())
+        if frame.is_empty():
+            raise InfoSheetError(
+                "every final_child row lacks a family_id (orphaned);"
+                " nothing to generate"
+            )
     family_frame = read_sheet(cfg.excel_file, "final_family")
     if family_frame is None or family_frame.is_empty():
         raise InfoSheetError(
@@ -618,7 +631,8 @@ def _commit_generated_flags(cfg: Config, generated: list[Any]) -> None:
         "generate",
         {
             "adj_child": frame,
-            "final_child": project_final(frame, FINAL_CHILD_COLUMNS),
+            # Orphaned children (family_id null) never reach final_child.
+            "final_child": project_final_child(frame),
         },
         xmas=cfg.xmas,
     )

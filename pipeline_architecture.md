@@ -215,11 +215,30 @@ Structure:
     "temperature": 0.0
   },
 
-  // Acquisition (module 1). Sibling DOB check: same-family children born
-  // at most this many days apart are recorded in dob_conflict_log (§5.6).
-  "acquire": {
+  // Screening pre-audit (module 2). Same-family children born at most
+  // this many days apart are recorded in dob_conflict_log (§6.6).
+  "screening": {
     "sibling_dob_max_gap_days": 274
   },
+
+  // ZeroBounce email deliverability check (module 2, §6.7).
+  "email_check": {
+    "enabled": true,
+    "delay": 0.25,
+    "api_key_env": "ZEROBOUNCE_API_KEY"
+  },
+
+  // Nominatim family-address validation (module 2, §6.8).
+  "address_check": {
+    "enabled": true,
+    "base_url": "https://nominatim.openstreetmap.org",
+    "delay": 1.1,
+    "user_agent": "ccat-angel-tree/1.0 (family address validation)",
+    "timeout": 30.0
+  },
+
+  // Deprecated (module 1 only fetches now); kept so old configs load.
+  "acquire": {},
 
   // Human audit tool (module 3).
   "audit": {
@@ -320,32 +339,34 @@ Rules:
 
 One workbook (`excel_file` from config). Sheets:
 
-Sheets (audit_architecture.md §4 supersedes the adj/final rows for the
-v2 audit system):
-
 | Sheet           | Contents                                                        | Written by |
 |-----------------|-----------------------------------------------------------------|------------|
-| `raw_sponsor`   | Cleaned, deduplicated, ID-assigned sponsor rows                 | module 1   |
-| `raw_family`    | Cleaned, deduplicated (by primary email), ID-assigned families | module 1   |
-| `raw_child`     | Cleaned, deduplicated (same family + name keeps latest) child rows with `age_at_xmas` and `angel_id` | module 1   |
-| `family_submissions` | Every cleaned family row **pre-dedup**, pre-pandera (audit arch §4.2) | module 1 |
-| `child_submissions` | Every cleaned child row **pre-dedup**, pre-pandera (audit arch §4.2) | module 1 |
-| `dedup_log`     | One row per merged duplicate family or child record (§5.4)      | module 1   |
-| `dob_conflict_log` | One row per same-family pair born <=9 months apart (§5.6)    | module 1   |
-| `adj_child`     | **Dense** adjudicated child record + controls (audit arch §4.3); screening pre-fills | modules 2, 3, 5 |
-| `adj_family`    | **Dense** adjudicated family record + controls + assignment columns | modules 3, 4 |
-| `adj_sponsor`   | **Dense** adjudicated sponsor record + controls + assignment columns | modules 3, 4 |
-| `final_child`   | Projection of `adj_child` (audit arch §7.1)                     | modules 3, 5 |
+| `raw_sponsor`   | **Verbatim** Zite sponsor records (config columns, no cleaning)  | module 1   |
+| `raw_family`    | **Verbatim** Zite family records (every submission, duplicates included) | module 1   |
+| `raw_child`     | **Verbatim** Zite child records (every submission, duplicates included) | module 1   |
+| `sponsor_submissions` | Cleaned, ID-assigned sponsor rows (§6.3), one per submission | module 2 |
+| `family_submissions` | Cleaned, ID-assigned family rows (§6.3), duplicates included | module 2 |
+| `child_submissions` | Cleaned, ID-assigned child rows (§6.3) with `family_id`, `angel_id`, `age_at_xmas` | module 2 |
+| `duplicate_log` | One row per flagged duplicate submission — nothing merged (§6.4) | module 2   |
+| `dob_conflict_log` | One row per same-family pair born <=9 months apart (§6.6)    | module 2   |
+| `email_validation_log` | One row per (record, field) email checked via ZeroBounce, **full verbatim API response** in `response_json` (§6.7) | module 2 |
+| `address_validation_log` | One row per family address checked via Nominatim, **full verbatim response** in `response_json` (§6.8) | module 2 |
+| `adj_child`     | **Dense** adjudicated child record + controls + `potential_duplicate` (audit arch §4.3); screening pre-fills | modules 2, 3, 5 |
+| `adj_family`    | **Dense** adjudicated family record + controls + `potential_duplicate` + assignment columns | modules 2, 3, 4 |
+| `adj_sponsor`   | **Dense** adjudicated sponsor record + controls + `potential_duplicate` + assignment columns | modules 2, 3, 4 |
+| `final_child`   | Projection of `adj_child` (audit arch §7.1): ignores dropped; **orphaned children (family_id null) excluded** | modules 3, 5 |
 | `final_family`  | Projection of `adj_family`                                      | module 4   |
 | `final_sponsor` | Projection of `adj_sponsor`                                     | module 4   |
-| `match_report`  | Unmatched families/sponsors and reasons                         | module 4   |
+| `match_report`  | Unmatched families/sponsors, unresolved duplicates, and reasons | module 4   |
 
 The `adj_*` sheets are dense — each data column holds the adjudicated
 value that flows downstream; a null cell means the value is genuinely
 absent, never "same as raw".  The `final_*` sheets are pure projections
 of the `adj_*` sheets: drop ignored rows, drop the pure control columns
 (`audited`, `ignore`, `screened`), keep everything else (including
-`status`, notes, and `audited_at`).  Nothing builds finals from raw.
+`status`, notes, and `audited_at`).  `final_child` additionally drops
+orphaned children (rows whose `family_id` is null — they stay in
+`adj_child` for the audit tool to fix).  Nothing builds finals from raw.
 
 I/O implementation lives in `src/ccat/io.py`: thin polars-based
 read/write helpers over the workbook. Writes are atomic (write temp file,
@@ -363,101 +384,123 @@ the configured Christmas date (`xmas=cfg.xmas`) and re-derives the ages;
 calls that write other sheets restore the existing cached values, so the
 formulas and their caches survive every pipeline run.
 
-## 5. Module 1 — Data Acquisition and Validation
+## 5. Module 1 — Verbatim Data Acquisition
 
 Entry point: `src/ccat/acquire.py`, CLI `ccat acquire [--config PATH]`.
 
-### 5.1 Pull
+Module 1 **only fetches**. It pulls the three Zite tables and writes
+them verbatim to the `raw_*` sheets: no cleaning, no validation, no
+deduplication, no ID assignment, no duplicate removal. Every downstream
+preparation belongs to module 2 (`ccat screen`, §6).
+
+### 5.1 Pull and import
 
 - Call `ccat.zite.get_table_data()` for each of the three table references in
   `config.zite`.
 - Import columns per `config.tables.*.columns`; apply `rename` first, then
-  cast to snake_case keys.
+  cast to snake_case keys. Values are copied verbatim.
 - Zite system columns map to `zite_record_id` and `zite_created_at`; the
   system `updatedAt` is not imported (sponsor's user "Updated time" column
   provides `updated`).
 - User-facing "Created time" (family) and "Creation Time" (child) map to
   `created`. The sponsor table has no user-created column, so its `created`
   is the Zite system `zite_created_at` (confirmed correct for ID ordering).
-- Where both a user `created` and `zite_created_at` exist, they are
-  cross-checked; divergence is logged (not fatal).
 - Columns not listed in the config are dropped (explicit allow-list).
 
-### 5.2 Validate (pandera + polars)
+### 5.2 Persistence and re-run semantics
 
-Each table gets a pandera schema built from config:
+- `raw_sponsor`, `raw_family`, `raw_child` are fully rebuilt on every run,
+  verbatim (sheet dtypes follow the declared column types; values are not
+  transformed).
+- Duplicates survive: nothing is merged, coalesced, or dropped.
+- `*_submissions`, `adj_*`, `final_*`, and the log sheets are never touched
+  by this module.
+- Validation: after write, read back and confirm the `final_*` sheets are
+  byte-identical to before the run (guard against accidental corruption).
 
-- Per-column type check from the declared `type`.
-- `null` handling: nulls are replaced by the `default` when one is declared;
-  nulls in columns without a default are validation failures for that cell.
+## 6. Module 2 — Pre-audit Screening
 
-### 5.3 Clean
+Entry point: `src/ccat/screening.py`, CLI
+`ccat screen [--config PATH] [--redo ZITE_RECORD_ID] [--test]
+[--overwrite] [--skip-email-check] [--skip-address-check]`.
 
-Automatic, deterministic fixes applied before validation where possible:
+Module 2 prepares everything module 1 no longer does, then AI-screens
+the children.  Order:
+
+1. **Local pre-audit (§6.2)** of all three tables — never the AI.
+2. **Derived IDs** (§6.5) on the cleaned rows.
+3. **Duplicate detection (§6.4)** — flag only, never merge.
+4. **Sibling DOB conflicts (§6.6)**.
+5. **Submissions sheets + logs written** (§6.3).
+6. **Adj seeding** for sponsors, families, children (§6.9).
+7. **ZeroBounce email check (§6.7)** and **Nominatim address check
+   (§6.8)**.
+8. **AI screening of the children only (§6.10)**.
+
+### 6.2 Local pre-audit: clean and validate-as-flags
+
+The verbatim `raw_*` records are cleaned with the local trivial fixes
+(these never go near the AI):
 
 - **Names** (`type: name`): title case, preserving apostrophes/hyphens
   (e.g. `o'brien` -> `O'Brien`, `smith-jones` -> `Smith-Jones`).
 - **Emails** (`type: email`): lowercased; must match an RFC 5322 subset regex.
-  Invalid emails are validation failures.
 - **US phones** (`type: phone_us`): strip non-digits; accept 10 digits, or 11
-  digits starting with `1`; normalize to `(XXX) XXX-XXXX`. Anything else is a
-  validation failure. Non-US values are not supported by this type.
+  digits starting with `1`; normalize to `(XXX) XXX-XXXX`.
 - **Dates** (`type: date`): accept `MM/DD/YYYY` and ISO `YYYY-MM-DD`, normalize
   to ISO. **Datetime** (`type: datetime`): ISO 8601 with timezone.
-- **Enum** (`type: enum`): value must be in the declared `values` — either an
-  inline list or a `config.vocabularies` entry (Appendix A). Values are kept
-  exactly as Zite stores them (labels, case-sensitive); a value outside the
-  vocabulary is a validation failure for that cell.
+- **Enums**: value must be in the declared `values` (inline list or
+  `config.vocabularies` entry, Appendix A).
+- Blank strings become nulls; declared defaults fill nulls; free-text
+  `age_reported` ("4 turning 5", "2.5") coerces to an int or null.
 
-Failure handling:
+Failure handling changed: **rows are never dropped**. Every cleaning or
+enum failure becomes a note (`<column>: <reason> (<value>)`) keyed by
+`zite_record_id`; the notes land in the seeded adj row's
+`require_clarification`, so the row shows as `needs_clarification` in
+the audit tool instead of silently disappearing.
 
-- Structural failures (missing/extra columns, unparseable table) abort the
-  run.
-- Cell-level failures after cleaning exclude that row from the raw sheets and
-  append it to the log (`log_file`) with table, column, value, and reason.
-  Run summary (rows pulled / kept / rejected) is also logged.
+### 6.3 Prepared submissions sheets
 
-### 5.4 Family dedup
+The cleaned, ID-assigned rows are written to
+`sponsor_submissions` / `family_submissions` / `child_submissions` —
+config columns plus derived columns (`sponsor_id` + age bounds,
+`family_id`, child `family_id`/`angel_id`/`age_at_xmas`), sorted by
+(`created`, `zite_record_id`). Every submission is present, duplicates
+included. These sheets are what the audit tool, match, generate, and
+stats (`--raw`) read as their working data.
 
-The `family` table may contain multiple rows per `primary_email`:
+### 6.4 Duplicate detection — flag only, never merge
 
-- Group by normalized `primary_email`.
-- Coalesce: for each column, take the first non-null value across the group's
-  rows (rows ordered by `created` ascending).
-- If two rows have conflicting non-null values for the same column, keep the
-  value from the earliest `created` row and log the conflict for review.
-- The surviving row keeps the earliest `created` timestamp of the group.
-- Every merged duplicate is recorded in the `dedup_log` sheet — one row per
-  dropped duplicate record — with: `sheet` ("family"), `primary_email`,
-  `kept_zite_record_id`/`kept_created`, `duplicate_zite_record_id`/
-  `duplicate_created`, `conflict_columns` and `conflict_details` (columns
-  where the duplicate's non-null value differs from the surviving value;
-  identity/ordering metadata `zite_record_id`, `created`, and
-  `zite_created_at` are excluded), and `kept_record`/`duplicate_record`
-  (the full recorded contents of both rows as JSON). Rows without an
-  email are never merged and never logged.
+Group keys: families by `primary_email`, children by
+(`primary_email`, `first_name`), sponsors by `email` (sponsors were
+never deduplicated before). Rows missing their key are never grouped.
+The survivor is the earliest submission for families and sponsors, the
+most recent for children (matching the old dedup semantics) — but
+nothing is dropped or merged:
 
-### 5.4b Child dedup
+- Every group member keeps its prepared row (and its adj row).
+- Every member's adj row gets `potential_duplicate = true` and a
+  `require_clarification` note naming the survivor submission.
+- One `duplicate_log` row per group member records: `sheet`,
+  `group_key`, `zite_record_id`, `created`, `survivor` (bool),
+  `conflict_columns` (columns where group members' non-null values
+  disagree; identity metadata excluded), `conflict_details`, and the
+  full record JSON.
 
-The `child` table may contain multiple submissions for the same child in
-the same family:
+The user resolves duplicates in the audit tool by **ignoring** the
+extras (match pools exclude ignored rows; §8). Match additionally
+reports unresolved duplicate families/sponsors still sharing an email
+in the pool (§8.7).
 
-- Group by (`primary_email`, `first_name`) on cleaned rows before
-  validation.
-- Keep the most recent submission (latest `created`, ties broken by
-  `zite_record_id`) as-is — no coalescing, unlike families.
-- Every dropped duplicate submission is recorded in the `dedup_log`
-  sheet exactly like the family rows, with `sheet` set to `"child"`.
-- Rows without an email or without a first name are never merged and
-  never logged.
+### 6.5 Derived columns and IDs
 
-### 5.5 Derived columns and IDs
-
-- `age_at_xmas` (child): integer years between `dob` and `xmas_date` from
-  config. If the source `age_reported` differs from the computed value, the
-  mismatch is logged and passed as an input to AI screening (§6.2).
+- `age_at_xmas` (child): integer years between `dob` and `xmas_date`;
+  an unparsable dob leaves null (the row is flagged instead of
+  dropped). An `age_reported` mismatch is logged and passed to AI
+  screening.
 - `pref_age_min` / `pref_age_max` (sponsor): exact mapping from the
-  `age_preference` vocabulary (no free-text parsing needed):
+  `age_preference` vocabulary:
 
   | `age_preference` label                   | min | max |
   |------------------------------------------|-----|-----|
@@ -469,131 +512,117 @@ the same family:
   | Special Needs (any age)                  | 0   | 18  |
 
   "Special Needs (any age)" additionally marks the sponsor as a
-  special-needs sponsor: matching against children flagged `special_needs`
-  (set in the human audit tool, §7) is that sponsor's highest preference
-  (§8.3).
-- `family_id` (family): sequential integers starting at 1, ordered by earliest
-  `created` then `primary_email` (tie-break for stability).
-- `sponsor_id` (sponsor): sequential integers starting at 1, ordered by
-  earliest `created` then `email` (tie-break for stability).
-- `angel_id` (child): `<family_id><letter>` (e.g. `1A`, `12C`). Children are
-  linked to families via `primary_email`. Within a family, letters start at
-  `A` and are assigned by descending `age_at_xmas` (oldest child gets `A`);
-  tie-break by earliest `created` then `dob`. Letters exceed `Z` as `AA`,
-  `AB`, ... (practically unreachable).
-- **Orphaned children**: children whose `primary_email` matches no family
-  row have no `family_id` and `angel_id = null`. They are **kept in
-  `raw_child`** (not dropped) and logged. The audit tool flags them for
-  clarification automatically (§7.2); they never receive an `angel_id`
-  until a matching family registration exists, and therefore never
-  participate in matchmaking (§8.1).
+  special-needs sponsor (§8.3).
+- `family_id`: one id per `primary_email` group — duplicate family
+  submissions **share** the family's id; groups ordered by earliest
+  `created` then email. Email-less rows are singleton groups.
+- `sponsor_id`: sequential per sponsor submission, ordered by earliest
+  `created` then `email`.
+- `angel_id` (child): `<family_id><letter>`. Children link via
+  `primary_email`. Within a family, letters go to the **survivor of
+  each duplicate-child group only** (extras stay letterless and
+  flagged), ordered by descending `age_at_xmas` (oldest gets `A`),
+  tie-break earliest `created` then `dob`.
+- **Orphaned children** (email matches no family): `family_id` and
+  `angel_id` null, row kept and logged; the audit tool flags them for
+  clarification automatically.
 
-### 5.6 Sibling DOB proximity check
+### 6.6 Sibling DOB proximity check
 
-After family linking and angel-id assignment, every pair of children
-sharing a `family_id` whose birth dates are at most
-`acquire.sibling_dob_max_gap_days` days apart (default 274, ~9 months;
-twins included) is recorded for human review in the
-`dob_conflict_log` sheet — one row per conflicting pair, with:
+Every pair of children sharing a `family_id` whose birth dates are at
+most `screening.sibling_dob_max_gap_days` days apart (default 274, ~9
+months; twins included) is recorded in `dob_conflict_log` — one row per
+pair (`family_id`, `primary_email`, `child_a_*` earlier birth,
+`child_b_*`, `gap_months`, `gap_days`). Duplicate submissions of the
+same child (same email + name) never form a pair. Orphans and
+null-dob children are skipped. Notes are merged into the affected
+children's `potential_anomoly`.
 
-- `family_id`, `primary_email`.
-- `child_a_zite_record_id`, `child_a_angel_id`, `child_a_first_name`,
-  `child_a_dob` (earlier birth) and the same `child_b_*` columns.
-- `gap_months` (completed calendar months, day-of-month aware; twins
-  record 0) and `gap_days` (absolute day difference).
+### 6.7 Email deliverability — ZeroBounce
 
-Children without a `family_id` (orphans) or without a `dob` are skipped.
-Each conflict is also logged as a warning.  The check is informational:
-it never rejects rows and never blocks the run.
+Every new email from sponsors (`email`) and families
+(`primary_email`, `secondary_email`) is checked via the ZeroBounce API
+(engine: `scripts/zerobounce_email_check.py`, reused in-process).
+Targets are deduplicated by normalized address; emails already recorded
+in `email_validation_log` are skipped, so re-runs never burn credits
+twice. Each (record, field) occurrence gets one log row:
+`source_sheet`, `zite_record_id`, `field`, `email`, `status`,
+`sub_status`, `did_you_mean`, **`response_json` (the ENTIRE verbatim
+API response, every field)**, `checked_at`. API failures are
+non-fatal — the affected emails stay unchecked for the next run. The
+key comes from the `ZEROBOUNCE_API_KEY` env var (`email_check.api_key_env`).
 
-### 5.7 Persistence and re-run semantics
+### 6.8 Address validation — Nominatim
 
-- `raw_sponsor`, `raw_family`, `raw_child` are fully rebuilt on every run.
-- ID assignment is deterministic (ordering rules above), so re-runs produce
-  stable IDs for existing rows; genuinely new Zite records receive new IDs.
-- `adj_child`, `final_child`, `final_family`, `final_sponsor`, `match_report`
-  are never touched by this module.
-- Validation: after write, read back and confirm the `final_*` sheets are
-  byte-identical to before the run (guard against accidental corruption).
+Every family address (street / apt / city / state / ZIP) is checked
+against OSM Nominatim (engine: `scripts/nominatim_address_check.py`;
+no API key, `address_check.base_url` configurable). Targets are
+deduplicated by normalized query text; queries already recorded in
+`address_validation_log` are skipped. Each log row:
+`source_sheet`, `zite_record_id`, `query`, `status` (`found` /
+`ambiguous` / `not_found` / `error`), `display_name`, `lat`, `lon`,
+**`response_json` (the ENTIRE verbatim Nominatim response)**,
+`checked_at`. The OSM usage policy (1 request/second, identifying
+User-Agent) is honored via `address_check.delay` and
+`address_check.user_agent`. Failures are non-fatal.
 
-## 6. Module 2 — AI Screening
+### 6.9 Adj seeding
 
-Entry point: `src/ccat/screening.py`, CLI `ccat screen [--config PATH]`.
+Screening seeds all three adj sheets itself (audit's
+`ensure_adj_sheets` remains as an idempotent backstop):
 
-### 6.1 Input
+- `adj_sponsor`: one dense row per sponsor submission.
+- `adj_family`: one dense row per `family_id`, seeded from the group's
+  survivor submission.
+- `adj_child`: one dense row per child submission.
 
-Reads `raw_child` (all children). Reads `adj_child` (existing
-zite_record_ids, to skip). Reads `final_child` only to log how many children
-are already audited (no writes).
+Seeded rows get default controls, the `potential_duplicate` flag, and
+the validation/duplicate notes. **Existing adj rows are never
+re-seeded** (human edits are protected); they only receive idempotent
+flag/note updates, so a newly appearing duplicate still surfaces.
 
-### 6.2 Screening logic (LLM-assisted, via opencode python SDK)
+### 6.10 AI screening (children only)
 
-For each child row not already present in `adj_child`:
+For each child row not already present in `adj_child` (or with
+`screened != true`):
 
 - Build a prompt from `config.ai_screening.system_prompt` (full text in
   Appendix B) populated with the child's `zite_record_id`, `dob`, computed
   `age_at_xmas`, reported `age_reported`, `gender`, every size field with its
-  type (`shoe_size`/`shoe_size_type`, `pant_waist_size`, `pant_inseam`,
-  `pant_size_letter`/`pant_size_type`, `jean_size`,
-  `shirt_size_letter`/`shirt_size_type`), and the needs/desires (`need_1`,
-  `need_2`, `desire_1`, `desire_2`).
-- **Privacy: the child's name is never passed to the LLM.** The prompt
-  contains only the pseudonymous `zite_record_id` and the screening-relevant
-  fields — no `first_name`, no contact details, no family information.
-  `zite_record_id` is the sole identifier in the prompt so the response can
-  be joined back to the row. Orphaned children (no family, §5.5) are
-  screened like any other — screening does not depend on `angel_id`.
+  type, and the needs/desires.
+- **Privacy: no personal data is ever sent.** The prompt contains only
+  the pseudonymous `zite_record_id` and the screening-relevant fields —
+  no `first_name`, no contact details, no family information.
+  **Sponsors and families are never AI-screened**: every one of their
+  fields is personal data, so their pre-audit is entirely local (§6.2).
+- Trivial capitalization/format fixes already happened locally (§6.2),
+  so the model only fixes meaning-level issues.
 - The model must adjudicate (rules and infant threshold encoded in the
   prompt, Appendix B):
   1. **DOB sanity**: cross-check computed `age_at_xmas` against
-     `age_reported` and against the size values/types — e.g. non-infant
-     sizes on a child younger than 2, or adult sizes on a toddler, mean the
-     reported `dob` may be wrong.
-  2. **Needs/desires clarity**: spellcheck and reword unclear text in
-     `need_1`, `need_2`, `desire_1`, `desire_2`.
-- **Output contract**: the model returns a single JSON object that is
-  directly usable as one `adj_child` row — exactly the keys
-  `zite_record_id`, `dob`, `need_1`, `need_2`, `desire_1`, `desire_2`,
-  `shoe_size`, `shoe_size_type`, `pant_waist_size`, `pant_inseam`,
-  `pant_size_letter`, `pant_size_type`, `jean_size`, `shirt_size_letter`,
-  `shirt_size_type`, `potential_anomoly`:
-  - a key is null when the adjudicated value equals the raw value (no
-    change),
-  - `potential_anomoly` is null when no age/size discrepancy was found,
-  - if every key is null, the model returns `null` for the whole row —
-    the pipeline then writes the `adj_child` row anyway with all-null
-    adjudication cells, so the row's screening status is recorded (see
-    §6.3),
-  - size values must use the exact Zite vocabulary labels (Appendix A).
-- The response is validated against a pydantic schema (exact key set, enum
-  vocabularies, dob date format) before it is accepted.
-- One SDK session per run; one request per child; a malformed response is
-  retried once, then the child is logged as unscreened (its row is simply not
-  written to `adj_child`; it will be picked up on the next run).
-
-### 6.3 Output — `adj_child` sheet
-
-- Dense rows (audit arch §7.3): every child screened gets one complete
-  `adj_child` row — the raw values overlaid with the model's
-  corrections (only the model-owned fields in `RESPONSE_COLUMNS`),
-  with `screened = true` and default controls (`status` "new",
-  `audited`/`ignore` false, no note).  For a child whose model output
-  is "no changes", the dense row simply equals the raw row.
-- **Target selection**: children whose adj row is absent **or** has
-  `screened != true` — the explicit marker replaces the old
-  row-presence invariant, because audit also seeds rows (audit arch
-  §7.3).
-- **Human-edit protection**: if audit has already seeded a row (a human
-  worked ahead of screening), screening applies a correction to a
-  model-owned field only when that field still equals the baseline
-  (untouched by the human); fields the human already changed are left
-  alone.  Controls are always preserved.
-- Regeneration: `ccat screen --redo ZITE_RECORD_ID` re-screens one child
-  and replaces its adj row (explicit opt-in only).  `ccat screen
-  --overwrite` re-screens every child under the same protection rules.
-- `zite_record_id` is the join key between `raw_child`, `adj_child`,
-  and `final_child`.  It is stable even when `angel_id` cannot be
-  assigned (orphaned children, §5.5).
+     `age_reported` and against the size values/types.
+  2. **Needs/desires clarity**: spellcheck and reword unclear text.
+  3. **Clothing sizes**: only touch a size field on an obvious
+     contradiction; corrections must use exact Zite vocabulary labels.
+- **Output contract**: one JSON object keyed exactly by
+  `RESPONSE_COLUMNS` (a key is null when there is no change;
+  `potential_anomoly` describes discrepancies; all-null means the model
+  returned the literal `null`, which still records the screening).
+  Validated against a pydantic schema (exact key set, vocabularies, dob
+  format) before acceptance; one retry on a malformed response, then
+  the child is left unscreened (picked up next run).
+- **Dense output** (§6.9): the cleaned values overlaid with the
+  model's non-null corrections, `screened = true`, default controls.
+- **Human-edit protection**: a correction lands on a model-owned field
+  only when that field still equals the cleaned baseline; fields the
+  human already changed are left alone; controls and module-owned
+  columns are always preserved.
+- Regeneration: `--redo ZITE_RECORD_ID` re-screens one child;
+  `--overwrite` re-screens every child under the same protection rules;
+  `--test` screens only the first family's children.
+- Batch runs use a thread pool (one opencode session per worker
+  thread); every completed child is persisted atomically as it
+  arrives, so Ctrl-C keeps completed rows.
 
 ## 7. Module 3 — Human Audit Tool (v2 — NiceGUI)
 
@@ -803,10 +832,13 @@ the `audit-migrate` bootstrap of a fresh workbook and never writes the
 
 | Sheet             | acquire | screen | write (data+controls) | match | generate | migrate |
 |-------------------|---------|--------|-------|-------|----------|---------|
-| `raw_*`, submissions, logs | write | - | read | - | - | write (bootstrap copy) |
-| `adj_child`       | -       | write (data cells + `screened`) | write (data + controls) | read | write (`generated_info_sheet` only) | write (bootstrap) |
-| `adj_sponsor`     | -       | -      | write (data + controls) | write (assignment columns only) + read | read | write (bootstrap) |
-| `adj_family`      | -       | -      | write (data + controls) | write (assignment columns only) + read | read | write (bootstrap) |
+| `raw_*`           | write (verbatim) | read | read | - | - | write (bootstrap copy) |
+| `*_submissions`   | -       | write (cleaned + IDs) | read | - | - | write (bootstrap copy) |
+| `duplicate_log`, `dob_conflict_log` | - | write | read | - | - | write (bootstrap) |
+| `email_validation_log`, `address_validation_log` | - | write | read | - | - | - |
+| `adj_child`       | -       | write (data cells + `screened` + flags) | write (data + controls) | read | write (`generated_info_sheet` only) | write (bootstrap) |
+| `adj_sponsor`     | -       | write (seed + flags) | write (data + controls) | write (assignment columns only) + read | read | write (bootstrap) |
+| `adj_family`      | -       | write (seed + flags) | write (data + controls) | write (assignment columns only) + read | read | write (bootstrap) |
 | `final_child`     | -       | -      | write (projection) | read | write (projection refresh) | write (bootstrap) |
 | `final_family`    | -       | -      | -     | write (projection) | read | write (bootstrap) |
 | `final_sponsor`   | -       | -      | -     | write (projection) | read | write (bootstrap) |
@@ -834,8 +866,8 @@ src/ccat/
   io.py                # Excel + logging helpers
   zite.py              # existing Zite REST client (unchanged)
   gdrive.py            # existing Google Drive client (unchanged)
-  acquire.py           # module 1
-  screening.py         # module 2
+  acquire.py           # module 1: verbatim Zite fetch (raw_* sheets only)
+  screening.py         # module 2: pre-audit (clean, IDs, dup flags, email/address checks) + AI child screening
   match.py             # module 4
   child_info_generate.py  # module 5
   sponsor_packets.py   # module 5b: sponsor email draft + combined packet PDF
@@ -848,8 +880,8 @@ src/ccat/
     server.py          # run(): seed sheets, load state, ui.run (+ --restart helpers)
 test/
   test_config.py
-  test_acquire.py      # validation, cleaning, dedup, IDs, angel_id rules, orphans, dedup_log, dob_conflict_log, submission sheets
-  test_screening.py     # prompt build (name excluded), dense writes, screened marker, human-edit protection
+  test_acquire.py      # verbatim fetch, import mapping, IDs, angel rules, sibling DOB conflicts
+  test_screening.py     # local pre-audit, duplicate flagging, ZeroBounce/Nominatim log wiring, prompt build (no personal data), dense writes, human-edit protection
   test_audit_store.py   # status machine, seeding, groups, dense saves, ignore, projections, formula integration
   test_audit_migrate.py # v2 workbook bootstrap
   test_audit_server.py  # process discovery, restart, run() wiring
@@ -918,6 +950,10 @@ running GUI cannot block conversion).
 ### 13.1 Input
 
 - `final_child` (module 5 reads; also owns `generated_info_sheet`).
+  Rows without a `family_id` (orphaned children — no matching family
+  registration) are **ignored and logged**, never an error; they need
+  fixing later and can never carry a sponsor assignment.  When every
+  row is orphaned, the run fails with "nothing to generate".
 - `final_family` (read-only), joined by `family_id` for
   `gift_pickup_location` and `assigned_sponsor_id`.
 - `final_sponsor` (read-only), joined by `assigned_sponsor_id ==

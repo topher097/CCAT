@@ -332,7 +332,9 @@ def test_migrate_builds_dense_adj_and_projects(
         STATUS_NEEDS_CLARIFICATION,
     ]
     submissions = read_sheet(cfg.excel_file, "family_submissions")
-    assert submissions is not None and submissions.height == 0
+    # The old raw rows (already cleaned + ID-assigned) feed the prepared
+    # submissions layer directly (§11.2).
+    assert submissions is not None and submissions.height == 1
 
     # The raw layer was copied verbatim.
     old_raw = read_sheet(old_workbook, "raw_child")

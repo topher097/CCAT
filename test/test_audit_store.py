@@ -172,13 +172,19 @@ def test_reduce_ignored_keeps_only_skeleton(entity: str) -> None:
     row["status"] = STATUS_IGNORED
     reduced = reduce_ignored(row, entity)
     retained = {
-        "child": {"zite_record_id", "first_name", "primary_email"},
+        "child": {
+            "zite_record_id",
+            "first_name",
+            "primary_email",
+            "potential_duplicate",
+        },
         "family": {
             "family_id",
             "zite_record_id",
             "first_name",
             "last_name",
             "primary_email",
+            "potential_duplicate",
         },
         "sponsor": {
             "sponsor_id",
@@ -186,6 +192,7 @@ def test_reduce_ignored_keeps_only_skeleton(entity: str) -> None:
             "first_name",
             "last_name",
             "email",
+            "potential_duplicate",
         },
     }[entity]
     for column in ENTITY_SPECS[entity]["columns"]:
@@ -382,10 +389,16 @@ def seed_raw(
 
 
 def seed_submissions(cfg: Config) -> None:
-    """Write submission sheets: two family submissions, a child group."""
+    """Write prepared submission sheets: two family submissions, a child group.
+
+    Mirrors what ``ccat screen`` now writes: cleaned rows with the
+    derived IDs (family_id/angel_id/age_at_xmas), one row per
+    submission.
+    """
     family_submissions = pl.DataFrame(
         [
             {
+                "family_id": 1,
                 "zite_record_id": "rec_f1",
                 "zite_created_at": "2026-01-05T10:00:00Z",
                 "created": "2026-01-05T10:00:00Z",
@@ -394,6 +407,7 @@ def seed_submissions(cfg: Config) -> None:
                 "last_name": "Doe",
             },
             {
+                "family_id": 1,
                 "zite_record_id": "rec_f2",
                 "zite_created_at": "2026-01-20T10:00:00Z",
                 "created": "2026-01-20T10:00:00Z",
@@ -404,6 +418,7 @@ def seed_submissions(cfg: Config) -> None:
             },
         ],
         schema={
+            "family_id": pl.Int64,
             "zite_record_id": pl.String,
             "zite_created_at": pl.String,
             "created": pl.String,
@@ -416,6 +431,8 @@ def seed_submissions(cfg: Config) -> None:
     child_submissions = pl.DataFrame(
         [
             {
+                "family_id": 1,
+                "angel_id": "1B",
                 "zite_record_id": "c2",
                 "zite_created_at": "2026-02-01T09:00:00Z",
                 "created": "2026-02-01T09:00:00Z",
@@ -426,6 +443,8 @@ def seed_submissions(cfg: Config) -> None:
                 "desire_1": "blocks",
             },
             {
+                "family_id": 1,
+                "angel_id": "1A",
                 "zite_record_id": "c1",
                 "zite_created_at": "2026-02-10T09:00:00Z",
                 "created": "2026-02-10T09:00:00Z",
@@ -437,6 +456,8 @@ def seed_submissions(cfg: Config) -> None:
             },
         ],
         schema={
+            "family_id": pl.Int64,
+            "angel_id": pl.String,
             "zite_record_id": pl.String,
             "zite_created_at": pl.String,
             "created": pl.String,
@@ -449,7 +470,7 @@ def seed_submissions(cfg: Config) -> None:
     )
     write_sheets(
         cfg.excel_file,
-        "acquire",
+        "screen",
         {
             "family_submissions": family_submissions,
             "child_submissions": child_submissions,
@@ -517,9 +538,11 @@ def test_ensure_adj_sheets_projects_final_child(cfg: Config) -> None:
     ensure_adj_sheets(cfg)
     final = read_sheet(cfg.excel_file, "final_child")
     assert final is not None
-    assert final.height == 3
-    assert final["zite_record_id"].to_list() == ["c1", "c2", "orphan1"]
-    assert final["status"].to_list() == [STATUS_NEW] * 3
+    # Orphaned children (family_id null) never reach final_child.
+    assert final.height == 2
+    assert "orphan1" not in final["zite_record_id"].to_list()
+    assert final["zite_record_id"].to_list() == ["c1", "c2"]
+    assert final["status"].to_list() == [STATUS_NEW] * 2
     caches = _final_child_formula_caches(Path(cfg.excel_file))
     assert caches  # age cells are formulas with cached values
 
@@ -724,7 +747,7 @@ def test_save_child_merges_dob_conflict_note_idempotently(
     ensure_adj_sheets(cfg)
     write_sheets(
         cfg.excel_file,
-        "acquire",
+        "screen",
         {
             "dob_conflict_log": pl.DataFrame(
                 [

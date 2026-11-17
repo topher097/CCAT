@@ -89,23 +89,26 @@ What is removed:
 ## 3. Target Architecture Overview
 
 ```
-Zite ──> (1) acquire ──> raw_sponsor / raw_family / raw_child
-                        family_submissions / child_submissions   [NEW]
-                        dedup_log / dob_conflict_log
+Zite ──> (1) acquire ──> raw_sponsor / raw_family / raw_child  (VERBATIM —
+                        every submission, duplicates included; no IDs)
               │
               v
-        (2) screen ─────> adj_child   (dense rows: raw ⊕ LLM corrections,
-                                       screened marker set)
+        (2) screen ─────> sponsor/family/child_submissions  (cleaned + IDs)
+                        duplicate_log / dob_conflict_log
+                        email_validation_log / address_validation_log
+                        adj_sponsor / adj_family / adj_child (dense rows,
+                        potential_duplicate flags, notes; children get
+                        LLM corrections — no personal data in the prompt)
               │
               v
-        (3) audit ──────> adj_sponsor [NEW] / adj_family [NEW] / adj_child
+        (3) audit ──────> adj_sponsor / adj_family / adj_child
                         (dense, complete, audit-controlled)
                         final_child  = projection of adj_child
               │
               v
         (4) match ──────> adj_family / adj_sponsor   (assignment columns)
                         final_family / final_sponsor = projections
-                        match_report
+                        match_report (incl. unresolved duplicates)
               │
               v
         (5) generate ───> adj_child.generated_info_sheet
@@ -135,48 +138,50 @@ Core invariants:
 
 | Sheet                 | Contents                                                        | Written by      |
 |-----------------------|-----------------------------------------------------------------|-----------------|
-| `family_submissions`  | [NEW] Every cleaned family row **pre-dedup**, pre-pandera       | module 1        |
-| `child_submissions`   | [NEW] Every cleaned child row **pre-dedup**, pre-pandera        | module 1        |
-| `adj_sponsor`         | [NEW] Dense: complete adjudicated sponsor record + controls + assignment columns | module 3 (data/controls), module 4 (assignments) |
-| `adj_family`          | [NEW] Dense: complete adjudicated family record + controls + assignment columns | module 3 (data/controls), module 4 (assignments) |
-| `adj_child`           | [REMADE] Dense: complete adjudicated child record + controls; screening pre-fills | modules 2, 3, 5 |
-| `final_child`         | Projection of `adj_child` (schema change, §7.1)                 | modules 3, 5    |
+| `raw_*`               | [CHANGED] Verbatim Zite records (module 1 only fetches; no cleaning, IDs, or dedup) | module 1 |
+| `sponsor_submissions` | [NEW] Cleaned, ID-assigned sponsor rows, one per submission      | module 2        |
+| `family_submissions`  | [CHANGED] Cleaned, ID-assigned family rows, duplicates included  | module 2        |
+| `child_submissions`   | [CHANGED] Cleaned, ID-assigned child rows with `family_id`/`angel_id`/`age_at_xmas` | module 2 |
+| `duplicate_log`       | [NEW] One row per flagged duplicate submission — nothing merged  | module 2        |
+| `email_validation_log`| [NEW] One row per ZeroBounce email check (full verbatim response in `response_json`) | module 2 |
+| `address_validation_log` | [NEW] One row per Nominatim address check (full verbatim response in `response_json`) | module 2 |
+| `adj_sponsor`         | [NEW] Dense: complete adjudicated sponsor record + controls + `potential_duplicate` + assignment columns | module 2 (seed/flags), module 3 (data/controls), module 4 (assignments) |
+| `adj_family`          | [NEW] Dense: complete adjudicated family record + controls + `potential_duplicate` + assignment columns | module 2 (seed/flags), module 3 (data/controls), module 4 (assignments) |
+| `adj_child`           | [REMADE] Dense: complete adjudicated child record + controls + `potential_duplicate`; screening pre-fills | modules 2, 3, 5 |
+| `final_child`         | Projection of `adj_child` (schema change, §7.1): **orphaned children (family_id null) excluded** | modules 3, 5    |
 | `final_family`        | Projection of `adj_family` (schema change, §7.1)                | module 4        |
 | `final_sponsor`       | Projection of `adj_sponsor` (schema change, §7.1)               | module 4        |
 
-`raw_*`, `dedup_log`, `dob_conflict_log`, `match_report` are unchanged.
-`ccat.io.SHEETS` gains all new sheet names.
+`dob_conflict_log` (now module 2) and `match_report` carry over.
+`dedup_log` is gone: duplicates are flagged in `duplicate_log`, never
+merged. `ccat.io.SHEETS` lists the full contract.
 
-### 4.2 Submission sheets (module 1 addition)
+### 4.2 Submission sheets (module 2 addition)
 
-Written by acquire inside `process_table` at the point where cleaned
-rows exist but before `dedup_families`/`dedup_children` run:
+Written by `ccat screen` from the verbatim `raw_*` rows: cleaned
+locally (trivial capitalization/format fixes — never the AI), validated
+with failures becoming `require_clarification` notes (rows are never
+dropped), and ID-assigned:
 
-- `family_submissions`: exactly the family config columns
-  (`zite_record_id`, `zite_created_at`, `created`, `primary_email`,
-  `accepts_disclaimer`, `first_name`, `last_name`, `phone`,
-  `street_address`, `apt_floor`, `city`, `zip_code`, `state`,
-  `secondary_first_name`, `secondary_last_name`, `secondary_email`,
-  `secondary_phone`, `gift_pickup_location`, `source`) — no `family_id`
-  (not yet assigned). Sorted by (`created`, `zite_record_id`) ascending —
-  the same order dedup uses.
-- `child_submissions`: exactly the child config columns
-  (`zite_record_id`, `zite_created_at`, `created`, `first_name`,
-  `primary_email`, `dob`, `age_reported`, `gender`, `need_1`, `need_2`,
-  `desire_1`, `desire_2`, `shoe_size`, `shoe_size_type`,
-  `pant_waist_size`, `pant_inseam`, `pant_size_letter`, `pant_size_type`,
-  `jean_size`, `shirt_size_letter`, `shirt_size_type`, `favorite_colors`,
-  `interests`, `other_notes`, `source`) — no `family_id`/`angel_id`/
-  `age_at_xmas` (post-link derived; audit recomputes `age_at_xmas` for
-  display). Sorted by (`created`, `zite_record_id`) ascending.
+- `sponsor_submissions`: sponsor config columns plus `sponsor_id`,
+  `pref_age_min`, `pref_age_max`.
+- `family_submissions`: family config columns plus `family_id`
+  (duplicate submissions share the family's id).
+- `child_submissions`: child config columns plus `family_id`,
+  `angel_id`, `age_at_xmas` (duplicate submissions of the same child
+  share the family id; only the group's survivor keeps an `angel_id`).
+
+All three are sorted by (`created`, `zite_record_id`) ascending.
+Rebuilt fully on every screen run.
 
 Notes:
 
-- Rows that later fail pandera validation appear in the submission
-  sheets (they are real submissions; the auditor should see them) but not
-  in the raw sheets. Rows that fail *cleaning* (e.g. malformed email)
-  are rejected before this point and are not captured.
-- Rebuilt fully on every acquire run, like the other raw sheets.
+- Every submission is present, duplicates included — the audit UI's
+  duplicate-group view reads these sheets.
+- The verbatim `raw_*` sheets remain the untouched Zite record; the
+  audit store prefers the submissions rows and falls back to raw rows
+  for legacy workbooks (prepared rows missing from a partial
+  submissions sheet are appended from raw).
 
 ### 4.3 Dense adj sheet schemas
 
@@ -297,10 +302,14 @@ finals.
 
 ### 5.2 Baselines (initialization and diff reference)
 
-- **Sponsor**: the `raw_sponsor` row.
-- **Family**: the coalesced survivor — which *is* the `raw_family` row
-  (acquire's dedup already wrote the coalesced result there). The UI
-  pre-fills adjudicated cells with the coalesced values (§6.1).
+Baselines come from the prepared submissions rows (§4.2; legacy
+workbooks fall back to their raw rows):
+
+- **Sponsor**: the sponsor's prepared submission row.
+- **Family**: the group's survivor submission (earliest `created`) —
+  duplicates share one `family_id`, so the survivor seeds the adj row;
+  the group's other submissions appear side by side in the UI (§6.1)
+  and the whole group is flagged `potential_duplicate` (§6.4).
 - **Child**: the combined duplicate-group values (§6.2) — the kept
   (latest) submission with nulls filled from earlier submissions.
 
@@ -456,13 +465,18 @@ children. A dense adj row that exactly equals its baseline is "new"
 For each entity, `final_X = project(adj_X)`:
 
 1. Drop every row with `ignore == true`.
-2. Drop the pure control columns: `audited`, `ignore`, `screened`
+2. **`final_child` only:** drop orphaned children — rows with a null
+   `family_id` (no matching family registration). They stay in
+   `adj_child` for the audit tool to fix and never reach
+   `final_child` (so downstream modules — match joins, generate, stats
+   `--raw`, clarify — never see them).
+3. Drop the pure control columns: `audited`, `ignore`, `screened`
    (child only).
-3. Keep everything else — all data columns, computed columns,
+4. Keep everything else — all data columns, computed columns,
    assignment columns, `special_needs`/`potential_anomoly`/
    `generated_info_sheet` (child), `require_clarification`, `status`,
    and `audited_at`.
-4. Column order = the documented final-sheet order.
+5. Column order = the documented final-sheet order.
 
 `final_child` therefore gains `status` and loses the `audited` Boolean;
 `special_needs` is the joined String in both adj and final (see D4,
@@ -538,14 +552,16 @@ Two io-layer rules bind every projection writer (pipeline doc §4):
 
 ### 7.4 Audit seeding (`ensure_adj_sheets`)
 
-On audit startup (idempotent, before serving): every raw entity without
-an adj row gets one — dense data columns seeded from the baseline
-(§5.2/§6), computed columns filled (`age_at_xmas`, `pref_*`),
-assignment/generated columns null/false, controls defaulted (`status`
-"new", `audited`/`ignore` false, `screened` false, no note). Then
-`final_child` is re-projected. This also covers fresh seasons
-(acquire → screen → audit) where screening has already written most
-rows.
+`ccat screen` seeds all three adj sheets itself now (pipeline arch
+§6.9): dense rows seeded from the prepared submissions (§5.2/§6),
+computed columns filled, `potential_duplicate` flags and
+validation/duplicate notes applied.  On audit startup the store runs an
+idempotent backstop: every prepared entity still missing an adj row
+(e.g. a legacy workbook never re-screened) gets one — dense data
+columns seeded from the baseline, computed columns filled
+(`age_at_xmas`, `pref_*`), assignment/generated columns null/false,
+controls defaulted (`status` "new", `audited`/`ignore` false,
+`screened` false, no note). Then `final_child` is re-projected.
 
 ### 7.5 Downstream modules
 
@@ -554,6 +570,9 @@ rows.
   (exclude `ignore == true`; all sponsor/family data — `num_children`,
   `age_preference`, `prior_assigned_angel_ids`, location — comes from
   the dense adj rows, so the v1 raw⊕adj overlay logic disappears).
+  Unresolved duplicates (same email, both non-ignored) that reach the
+  pools are reported in `match_report` (kind `duplicate`) — screening
+  flags them (§6.4); the user resolves them by ignoring the extras.
   Special-needs sponsor matching: a child counts as special-needs iff
   its `special_needs` string is non-empty. Writes assignments +
   `num_angels_in_family` (count of the family's non-ignored `adj_child`

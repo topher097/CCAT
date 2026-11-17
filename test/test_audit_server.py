@@ -131,7 +131,9 @@ class TestRun:
         children = read_adj(seeded_cfg, "child")
         assert len(children) == 3
         final_child = read_sheet(seeded_cfg.excel_file, "final_child")
-        assert final_child is not None and final_child.height == 3
+        assert final_child is not None and final_child.height == 2
+        # The orphaned child stays in adj_child but never in final_child.
+        assert "orphan1" not in final_child["zite_record_id"].to_list()
 
     def test_run_restart_stops_stale_server_first(
         self,

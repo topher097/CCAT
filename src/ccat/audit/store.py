@@ -113,6 +113,7 @@ ADJ_CHILD_COLUMNS: tuple[str, ...] = (
     "age_at_xmas",
     "generated_info_sheet",
     "screened",
+    "potential_duplicate",
     *CONTROL_COLUMNS,
 )
 
@@ -149,6 +150,7 @@ ADJ_CHILD_SCHEMA: dict[str, PolarsDataType] = {
     "age_at_xmas": pl.Int64,
     "generated_info_sheet": pl.Boolean,
     "screened": pl.Boolean,
+    "potential_duplicate": pl.Boolean,
     "status": pl.String,
     "audited": pl.Boolean,
     "ignore": pl.Boolean,
@@ -222,6 +224,7 @@ ADJ_FAMILY_COLUMNS: tuple[str, ...] = (
     "secondary_phone",
     "gift_pickup_location",
     "source",
+    "potential_duplicate",
     "accepts_disclaimer",
     "assigned_sponsor_id",
     "assigned_angel_ids",
@@ -249,6 +252,7 @@ ADJ_FAMILY_SCHEMA: dict[str, PolarsDataType] = {
     "secondary_phone": pl.String,
     "gift_pickup_location": pl.String,
     "source": pl.String,
+    "potential_duplicate": pl.Boolean,
     "accepts_disclaimer": pl.Boolean,
     "assigned_sponsor_id": pl.Int64,
     "assigned_angel_ids": pl.String,
@@ -311,6 +315,7 @@ ADJ_SPONSOR_COLUMNS: tuple[str, ...] = (
     "gender_preference",
     "dropoff_location",
     "source",
+    "potential_duplicate",
     "accepts_disclaimer",
     "pref_age_min",
     "pref_age_max",
@@ -335,6 +340,7 @@ ADJ_SPONSOR_SCHEMA: dict[str, PolarsDataType] = {
     "gender_preference": pl.String,
     "dropoff_location": pl.String,
     "source": pl.String,
+    "potential_duplicate": pl.Boolean,
     "accepts_disclaimer": pl.Boolean,
     "pref_age_min": pl.Int64,
     "pref_age_max": pl.Int64,
@@ -725,7 +731,9 @@ def group_submissions(
 
 #: Columns an ignored row keeps, per entity, beyond the controls (§5.5).
 _IGNORE_RETAINED: dict[str, frozenset[str]] = {
-    "child": frozenset({"zite_record_id", "first_name", "primary_email"}),
+    "child": frozenset(
+        {"zite_record_id", "first_name", "primary_email", "potential_duplicate"}
+    ),
     "family": frozenset(
         {
             "family_id",
@@ -733,10 +741,18 @@ _IGNORE_RETAINED: dict[str, frozenset[str]] = {
             "first_name",
             "last_name",
             "primary_email",
+            "potential_duplicate",
         }
     ),
     "sponsor": frozenset(
-        {"sponsor_id", "zite_record_id", "first_name", "last_name", "email"}
+        {
+            "sponsor_id",
+            "zite_record_id",
+            "first_name",
+            "last_name",
+            "email",
+            "potential_duplicate",
+        }
     ),
 }
 
@@ -831,6 +847,27 @@ def project_final(
     """
     kept = adj_frame.filter(~pl.col("ignore"))
     return kept.select(list(final_columns))
+
+
+def project_final_child(adj_frame: pl.DataFrame) -> pl.DataFrame:
+    """Project ``adj_child`` into ``final_child`` (§7.1, plus orphan rule).
+
+    Like :func:`project_final` (drop ignored rows, documented column
+    order) and additionally drops orphaned children — ``adj_child`` rows
+    with a null ``family_id`` (no matching family registration) never
+    reach ``final_child``; they stay in ``adj_child`` for the audit tool
+    to fix.
+
+    Args:
+        adj_frame: The typed adj_child frame.
+
+    Returns:
+        The projection frame.
+    """
+    kept = adj_frame.filter(
+        ~pl.col("ignore") & pl.col("family_id").is_not_null()
+    )
+    return kept.select(list(FINAL_CHILD_COLUMNS))
 
 
 def read_adj(cfg: Config, entity: str) -> list[dict[str, Any]]:
@@ -942,6 +979,7 @@ def _default_row(entity: str, key_value: Any) -> dict[str, Any]:
     row["status"] = STATUS_NEW
     row["audited"] = False
     row["ignore"] = False
+    row["potential_duplicate"] = False
     if entity == "child":
         row["screened"] = False
         row["generated_info_sheet"] = False
@@ -976,6 +1014,13 @@ def _raw_columns(entity: str) -> tuple[str, ...]:
 def load_audit_data(cfg: Config) -> AuditData:
     """Load all entities, groups, orphans, and stats in one read (§9.2).
 
+    Works from the prepared ``{entity}_submissions`` rows (cleaned,
+    ID-assigned, written by ``ccat screen``); legacy workbooks whose
+    submissions sheets predate that stage fall back to their ``raw_*``
+    sheets.  Duplicate-group baselines always come from the
+    ``child_submissions`` sheet alone (legacy raw rows are never
+    regrouped).
+
     Args:
         cfg: Pipeline configuration.
 
@@ -983,28 +1028,29 @@ def load_audit_data(cfg: Config) -> AuditData:
         The aggregate :class:`AuditData`.
 
     Raises:
-        AuditError: If any raw sheet is missing (run ``ccat acquire``).
+        AuditError: If no prepared/raw rows exist (run ``ccat acquire``
+            and ``ccat screen``).
     """
-    raw_sponsor = read_sheet(cfg.excel_file, "raw_sponsor")
-    raw_family = read_sheet(cfg.excel_file, "raw_family")
-    raw_child = read_sheet(cfg.excel_file, "raw_child")
-    if raw_sponsor is None or raw_family is None or raw_child is None:
+    sponsors = _entity_rows(cfg, "sponsor")
+    families = _entity_rows(cfg, "family")
+    children = _entity_rows(cfg, "child")
+    if not sponsors and not families and not children:
         raise AuditError(
-            "raw_sponsor/raw_family/raw_child sheet(s) missing or empty;"
-            " run `ccat acquire` first"
+            "no prepared sponsor/family/child rows;"
+            " run `ccat acquire` and `ccat screen` first"
         )
-    raw_sponsors = raw_sponsor.to_dicts()
-    raw_families = raw_family.to_dicts()
-    raw_children = raw_child.to_dicts()
     adj_sponsors = {row["sponsor_id"]: row for row in read_adj(cfg, "sponsor")}
     adj_families = {row["family_id"]: row for row in read_adj(cfg, "family")}
     adj_children = {
         row["zite_record_id"]: row for row in read_adj(cfg, "child")
     }
-    family_submissions = _submissions(cfg, "family")
-    child_submissions = _submissions(cfg, "child")
+    family_submission_frame = read_sheet(cfg.excel_file, "family_submissions")
     email_to_submissions: dict[str, list[dict[str, Any]]] = {}
-    for row in family_submissions:
+    for row in (
+        family_submission_frame.to_dicts()
+        if family_submission_frame is not None
+        else []
+    ):
         email = _as_text(row.get("primary_email"))
         if email is not None:
             email_to_submissions.setdefault(email, []).append(row)
@@ -1012,12 +1058,14 @@ def load_audit_data(cfg: Config) -> AuditData:
     log_rows = dob_log.to_dicts() if dob_log is not None else []
 
     data = AuditData()
-    for raw in raw_sponsors:
-        sponsor_id = _as_int(raw.get("sponsor_id"))
-        if sponsor_id is None:
+    seen_sponsor_ids: set[int] = set()
+    for prepared in sponsors:
+        sponsor_id = _as_int(prepared.get("sponsor_id"))
+        if sponsor_id is None or sponsor_id in seen_sponsor_ids:
             continue
+        seen_sponsor_ids.add(sponsor_id)
         baseline = {
-            column: raw.get(column) for column in _raw_columns("sponsor")
+            column: prepared.get(column) for column in _raw_columns("sponsor")
         }
         adj = adj_sponsors.get(sponsor_id) or _default_row(
             "sponsor", sponsor_id
@@ -1030,15 +1078,17 @@ def load_audit_data(cfg: Config) -> AuditData:
                 status=str(adj.get("status") or STATUS_NEW),
             )
         )
-    for raw in raw_families:
-        family_id = _as_int(raw.get("family_id"))
-        if family_id is None:
-            continue
+    seen_family_ids: set[int] = set()
+    for prepared in families:
+        family_id = _as_int(prepared.get("family_id"))
+        if family_id is None or family_id in seen_family_ids:
+            continue  # duplicate submissions share one family entity
+        seen_family_ids.add(family_id)
         baseline = {
-            column: raw.get(column) for column in _raw_columns("family")
+            column: prepared.get(column) for column in _raw_columns("family")
         }
         adj = adj_families.get(family_id) or _default_row("family", family_id)
-        email = _as_text(raw.get("primary_email"))
+        email = _as_text(prepared.get("primary_email"))
         submissions = email_to_submissions.get(email, [])
         data.families.append(
             FamilyEntry(
@@ -1049,29 +1099,29 @@ def load_audit_data(cfg: Config) -> AuditData:
                 status=str(adj.get("status") or STATUS_NEW),
             )
         )
-    child_groups = group_submissions(child_submissions, "child")
+    child_groups = _child_groups(cfg)
     keyed_child_groups: dict[
         tuple[str | None, str | None], list[dict[str, Any]]
     ] = {}
     for values, rows in child_groups.items():
         if len(values) == 2:
             keyed_child_groups[(values[0], values[1])] = rows
-    for raw in raw_children:
-        record_id = _as_text(raw.get("zite_record_id"))
+    for prepared in children:
+        record_id = _as_text(prepared.get("zite_record_id"))
         if record_id is None:
             continue
         group = keyed_child_groups.get(
             (
-                _as_text(raw.get("primary_email")),
-                _as_text(raw.get("first_name")),
+                _as_text(prepared.get("primary_email")),
+                _as_text(prepared.get("first_name")),
             )
         )
-        baseline = _child_baseline(raw, group or [])
+        baseline = _child_baseline(prepared, group or [])
         adj = adj_children.get(record_id) or _default_row("child", record_id)
         entry = ChildEntry(
             zite_record_id=record_id,
-            family_id=_as_int(raw.get("family_id")),
-            angel_id=_as_text(raw.get("angel_id")),
+            family_id=_as_int(prepared.get("family_id")),
+            angel_id=_as_text(prepared.get("angel_id")),
             adj=adj,
             baseline=baseline,
             submissions=group or [],
@@ -1093,10 +1143,58 @@ def load_audit_data(cfg: Config) -> AuditData:
     return data
 
 
-def _submissions(cfg: Config, entity: str) -> list[dict[str, Any]]:
-    """Read one submissions sheet (absent until the first v2 acquire)."""
-    frame = read_sheet(cfg.excel_file, f"{entity}_submissions")
-    return frame.to_dicts() if frame is not None else []
+def _entity_rows(cfg: Config, entity: str) -> list[dict[str, Any]]:
+    """Read one entity's prepared rows (raw rows fill any gaps).
+
+    The ``{entity}_submissions`` rows are the cleaned, ID-assigned
+    submissions written by ``ccat screen``.  Legacy workbooks (written
+    before that stage prepared submissions) have no such sheet; their
+    ``raw_{entity}`` rows -- which carried the same columns under the
+    old pipeline -- are used instead.  Rows present only in the raw
+    sheet (e.g. a legacy row missing from partial submissions) are
+    appended after the prepared rows.
+
+    Args:
+        cfg: Pipeline configuration.
+        entity: "sponsor", "family", or "child".
+
+    Returns:
+        The prepared rows plus any raw-only rows.
+    """
+    prepared_frame = read_sheet(cfg.excel_file, f"{entity}_submissions")
+    raw_frame = read_sheet(cfg.excel_file, f"raw_{entity}")
+    prepared = prepared_frame.to_dicts() if prepared_frame is not None else []
+    if raw_frame is None:
+        return prepared
+    known = {
+        str(row.get("zite_record_id") or "")
+        for row in prepared
+        if row.get("zite_record_id") is not None
+    }
+    extra = [
+        row
+        for row in raw_frame.to_dicts()
+        if str(row.get("zite_record_id") or "") not in known
+    ]
+    return [*prepared, *extra]
+
+
+def _child_groups(
+    cfg: Config,
+) -> dict[tuple[str | None, str | None], list[dict[str, Any]]]:
+    """Duplicate-child groups from the ``child_submissions`` sheet (§6).
+
+    Legacy workbooks without that sheet group nothing: their raw rows
+    already carry one adjudicated row per child.
+    """
+    frame = read_sheet(cfg.excel_file, "child_submissions")
+    if frame is None:
+        return {}
+    return {
+        values: rows
+        for values, rows in group_submissions(frame.to_dicts(), "child").items()
+        if len(values) == 2
+    }
 
 
 def _stats(statuses: list[str], child_statuses: list[str]) -> AuditStats:
@@ -1126,11 +1224,18 @@ def _stats(statuses: list[str], child_statuses: list[str]) -> AuditStats:
 def _seed_child_row(
     raw: dict[str, Any], baseline: dict[str, Any], cfg: Config
 ) -> dict[str, Any]:
-    """Build one seeded adj_child row from its baseline (§7.4)."""
+    """Build one seeded adj_child row from its baseline (§7.4).
+
+    Orphaned children (``family_id`` null — no matching family
+    registration) get the ``ORPHAN_NOTE`` clarification note, so they
+    show as ``needs_clarification`` in the audit tool immediately.
+    """
     row = _default_row("child", raw.get("zite_record_id"))
     for column in (*CHILD_LINKAGE_COLUMNS, *CHILD_EDITABLE_COLUMNS):
         row[column] = baseline.get(column, raw.get(column))
     row["age_at_xmas"] = _computed_age(row.get("dob"), cfg)
+    if row.get("family_id") is None:
+        row["require_clarification"] = ORPHAN_NOTE
     return row
 
 
@@ -1173,17 +1278,20 @@ def _computed_age(dob: Any, cfg: Config) -> int | None:
 
 
 def ensure_adj_sheets(cfg: Config) -> None:
-    """Seed adj rows for every raw entity missing one (§7.4, idempotent).
+    """Seed adj rows for every prepared entity missing one (§7.4, idempotent).
 
-    Every raw entity without an adj row gets a dense row seeded from its
-    baseline (§5.2/§6), computed columns filled, controls defaulted.
+    ``ccat screen`` seeds the adj sheets itself now (§7.3); this
+    backstop only fills rows missing from the workbook -- e.g. legacy
+    workbooks that were never re-screened.  Every prepared entity
+    without an adj row gets a dense row seeded from its prepared row
+    (§5.2/§6), computed columns filled, controls defaulted.
     ``final_child`` is re-projected afterwards (with ``xmas``, §7.2).
 
     Args:
         cfg: Pipeline configuration.
 
     Raises:
-        AuditError: If the raw sheets are missing, or the workbook's
+        AuditError: If no prepared rows exist, or the workbook's
             ``adj_child`` still has the pre-v2 sparse schema (a legacy
             workbook the v2 audit tool must never write; bootstrap the
             v2 workbook with ``ccat audit-migrate`` instead, §10.1/§11).
@@ -1199,13 +1307,17 @@ def ensure_adj_sheets(cfg: Config) -> None:
                 " config/ccat_2026_v2.json --from <old workbook>`"
                 " (audit_architecture.md §10.1)"
             )
-        raw_sponsor = read_sheet(cfg.excel_file, "raw_sponsor")
-        raw_family = read_sheet(cfg.excel_file, "raw_family")
-        raw_child = read_sheet(cfg.excel_file, "raw_child")
-        if raw_sponsor is None or raw_family is None or raw_child is None:
+        prepared_sponsors = _entity_rows(cfg, "sponsor")
+        prepared_families = _entity_rows(cfg, "family")
+        prepared_children = _entity_rows(cfg, "child")
+        if (
+            not prepared_sponsors
+            and not prepared_families
+            and not prepared_children
+        ):
             raise AuditError(
-                "raw_sponsor/raw_family/raw_child sheet(s) missing or empty;"
-                " run `ccat acquire` first"
+                "no prepared sponsor/family/child rows;"
+                " run `ccat acquire` and `ccat screen` first"
             )
         adj_children = read_adj(cfg, "child")
         adj_families = read_adj(cfg, "family")
@@ -1214,41 +1326,36 @@ def ensure_adj_sheets(cfg: Config) -> None:
         known_families = {row["family_id"] for row in adj_families}
         known_sponsors = {row["sponsor_id"] for row in adj_sponsors}
 
-        child_submissions = _submissions(cfg, "child")
-        groups = {
-            values: rows
-            for values, rows in group_submissions(
-                child_submissions, "child"
-            ).items()
-            if len(values) == 2
-        }
+        child_groups = _child_groups(cfg)
         added_children = 0
-        for raw in raw_child.to_dicts():
-            record_id = _as_text(raw.get("zite_record_id"))
+        for prepared in prepared_children:
+            record_id = _as_text(prepared.get("zite_record_id"))
             if record_id is None or record_id in known_children:
                 continue
-            group = groups.get(
+            group = child_groups.get(
                 (
-                    _as_text(raw.get("primary_email")),
-                    _as_text(raw.get("first_name")),
+                    _as_text(prepared.get("primary_email")),
+                    _as_text(prepared.get("first_name")),
                 )
             )
-            baseline = _child_baseline(raw, group or [])
-            adj_children.append(_seed_child_row(raw, baseline, cfg))
+            baseline = _child_baseline(prepared, group or [])
+            adj_children.append(_seed_child_row(prepared, baseline, cfg))
             added_children += 1
         added_families = 0
-        for raw in raw_family.to_dicts():
-            family_id = _as_int(raw.get("family_id"))
+        for prepared in prepared_families:
+            family_id = _as_int(prepared.get("family_id"))
             if family_id is None or family_id in known_families:
                 continue
-            adj_families.append(_seed_family_row(raw))
+            adj_families.append(_seed_family_row(prepared))
+            known_families.add(family_id)
             added_families += 1
         added_sponsors = 0
-        for raw in raw_sponsor.to_dicts():
-            sponsor_id = _as_int(raw.get("sponsor_id"))
+        for prepared in prepared_sponsors:
+            sponsor_id = _as_int(prepared.get("sponsor_id"))
             if sponsor_id is None or sponsor_id in known_sponsors:
                 continue
-            adj_sponsors.append(_seed_sponsor_row(raw))
+            adj_sponsors.append(_seed_sponsor_row(prepared))
+            known_sponsors.add(sponsor_id)
             added_sponsors += 1
 
         sheets: dict[str, pl.DataFrame] = {}
@@ -1267,17 +1374,16 @@ def ensure_adj_sheets(cfg: Config) -> None:
             )
         # final_child is always re-projected at startup (§7.4), with the
         # adj sheets in the same atomic write when any were seeded.
-        sheets["final_child"] = project_final(
-            build_adj_frame("child", adj_children), FINAL_CHILD_COLUMNS
+        # Orphaned children (family_id null) never reach final_child.
+        sheets["final_child"] = project_final_child(
+            build_adj_frame("child", adj_children)
         )
         write_sheets(cfg.excel_file, "audit", sheets, xmas=cfg.xmas)
 
 
 def _project_final_child(cfg: Config, adj_rows: list[dict[str, Any]]) -> None:
     """Re-project ``final_child`` from adj rows (§7.2, with ``xmas``)."""
-    frame = project_final(
-        build_adj_frame("child", adj_rows), FINAL_CHILD_COLUMNS
-    )
+    frame = project_final_child(build_adj_frame("child", adj_rows))
     write_sheets(cfg.excel_file, "audit", {"final_child": frame}, xmas=cfg.xmas)
 
 
@@ -1376,8 +1482,8 @@ def _save_row(
             spec["sheet"]: build_adj_frame(entity, rows)
         }
         if entity == "child":
-            sheets["final_child"] = project_final(
-                build_adj_frame("child", rows), FINAL_CHILD_COLUMNS
+            sheets["final_child"] = project_final_child(
+                build_adj_frame("child", rows)
             )
         write_sheets(
             cfg.excel_file,
@@ -1400,10 +1506,10 @@ def _linkage_columns(entity: str) -> tuple[str, ...]:
 def _module_owned_columns(entity: str) -> tuple[str, ...]:
     """Columns owned by other modules and preserved on every save (§4.4)."""
     if entity == "child":
-        return (*CHILD_MODULE_COLUMNS, "screened")
+        return (*CHILD_MODULE_COLUMNS, "screened", "potential_duplicate")
     if entity == "family":
-        return FAMILY_ASSIGNMENT_COLUMNS
-    return SPONSOR_ASSIGNMENT_COLUMNS
+        return (*FAMILY_ASSIGNMENT_COLUMNS, "potential_duplicate")
+    return (*SPONSOR_ASSIGNMENT_COLUMNS, "potential_duplicate")
 
 
 def _seed_row_from_baseline(
@@ -1425,17 +1531,10 @@ def _seed_row_from_baseline(
 def _entity_baseline(
     cfg: Config, entity: str, raw: dict[str, Any]
 ) -> dict[str, Any]:
-    """Return the entity's baseline (§5.2): raw row, or combined child group."""
+    """Return the entity's baseline (§5.2): prepared row, or combined child group."""
     if entity != "child":
         return {column: raw.get(column) for column in _raw_columns(entity)}
-    groups = {
-        values: rows
-        for values, rows in group_submissions(
-            _submissions(cfg, "child"), "child"
-        ).items()
-        if len(values) == 2
-    }
-    group = groups.get(
+    group = _child_groups(cfg).get(
         (_as_text(raw.get("primary_email")), _as_text(raw.get("first_name")))
     )
     return _child_baseline(raw, group or [])
@@ -1444,17 +1543,15 @@ def _entity_baseline(
 def _find_raw_row(
     cfg: Config, entity: str, key_value: Any
 ) -> dict[str, Any] | None:
-    """Find one entity's raw row by key."""
-    sheet = {
-        "child": "raw_child",
-        "family": "raw_family",
-        "sponsor": "raw_sponsor",
-    }[entity]
+    """Find one entity's prepared row by key.
+
+    Searches the prepared ``{entity}_submissions`` rows (legacy
+    workbooks fall back to their ``raw_{entity}`` sheet), keeping the
+    first matching submission (the survivor: prepared rows are sorted
+    by created ascending).
+    """
     key = ENTITY_SPECS[entity]["key"]
-    frame = read_sheet(cfg.excel_file, sheet)
-    if frame is None:
-        return None
-    for row in frame.to_dicts():
+    for row in _entity_rows(cfg, entity):
         if str(row.get(key)) == str(key_value):
             return row
     return None

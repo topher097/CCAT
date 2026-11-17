@@ -1,14 +1,16 @@
-"""Module 1 — data acquisition and validation (§5).
+"""Module 1 — data acquisition (§5).
 
-Pulls the sponsor/family/child tables from Zite, validates and cleans them
-    against the config schema, deduplicates families and children, assigns
-    stable IDs
-(``family_id``, ``sponsor_id``, ``angel_id``) and derived columns
-(``age_at_xmas``, ``pref_age_min``/``pref_age_max``), and persists the
-``raw_*`` sheets plus the ``dedup_log`` sheet recording every merged
-duplicate (§5.4) and the ``dob_conflict_log`` sheet recording same-family
-children born too close together (§5.6).  Never touches any other sheet
-(§5.7).
+Pulls the sponsor/family/child tables from Zite and writes them to the
+``raw_*`` sheets **verbatim** (§5.1): the config allow-list, renames, and
+system-column mappings are applied so every sheet has a stable schema,
+but values are never cleaned, validated, deduplicated, or enriched.
+Every submission survives, duplicates included -- duplicate detection
+and flagging is module 2's job (§6).
+
+This module also hosts the shared column helpers (``clean_value``, ID
+assignment, sibling DOB conflicts) that module 2 (screening) applies on
+top of the verbatim records; the acquire **stage** itself never calls
+them.  Never touches any other sheet (§5.7).
 """
 
 import json
@@ -18,10 +20,7 @@ from datetime import date, datetime, UTC
 from difflib import get_close_matches as _get_close_matches
 from typing import Any
 
-import pandera.polars as pap
 import polars as pl
-from pandera import Check
-from pandera.errors import SchemaErrors
 from polars._typing import PolarsDataType
 
 from ccat import zite
@@ -33,13 +32,6 @@ logger = logging.getLogger(__name__)
 
 class AcquisitionError(Exception):
     """Raised when acquisition cannot complete (structural failure)."""
-
-
-#: Columns excluded from dedup conflict detection (§5.4): identity and
-#: ordering metadata that duplicate records necessarily differ on.
-DEDUP_CONFLICT_EXCLUDED = frozenset(
-    {"zite_record_id", "created", "zite_created_at"}
-)
 
 
 #: Exact mapping from the `age_preference` vocabulary to age bounds (§5.5).
@@ -78,14 +70,14 @@ PL_DTYPES: dict[str, PolarsDataType] = {
     "enum": pl.String,
 }
 
-#: RFC 5322 subset used for email validation (§5.3).
+#: RFC 5322 subset used for email validation (§6.2, applied by screening).
 EMAIL_RE = re.compile(
     r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+"
     r"@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?"
     r"(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$"
 )
 
-#: Derived columns appended to each raw sheet, in sheet column order.
+#: Derived columns appended to each prepared ({table}_submissions) sheet.
 DERIVED_COLUMNS = {
     "sponsor": ["sponsor_id", "pref_age_min", "pref_age_max"],
     "family": ["family_id"],
@@ -158,6 +150,8 @@ def import_table(
 ) -> list[dict[str, Any]]:
     """Apply the config allow-list, renames, and system mappings (§5.1).
 
+    Values are copied verbatim; no cleaning or validation happens here.
+
     Args:
         frame: Raw records from ``zite.get_table_data``.
         table_name: One of "sponsor", "family", "child".
@@ -205,7 +199,11 @@ def import_table(
 
 
 def clean_value(value: Any, spec: ColumnSpec) -> tuple[Any, str | None]:
-    """Clean one cell value per its declared type (§5.3).
+    """Clean one cell value per its declared type (§6.2, applied by screen).
+
+    Local, trivial normalization only: names title-cased, emails
+    lowercased, US phones reformatted, dates ISO.  These fixes never go
+    near the AI screening prompt.
 
     Args:
         value: Raw value (may be None).
@@ -217,6 +215,10 @@ def clean_value(value: Any, spec: ColumnSpec) -> tuple[Any, str | None]:
     if value is None or (isinstance(value, str) and value.strip() == ""):
         return None, None
     if spec.type == "string":
+        if isinstance(value, dict):
+            return json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ), None
         return str(value).strip(), None
     if spec.type == "name":
         return str(value).strip().title(), None
@@ -271,7 +273,7 @@ def clean_value(value: Any, spec: ColumnSpec) -> tuple[Any, str | None]:
 
 
 def _parse_reported_age(value: Any) -> int | None:
-    """Coerce the free-text reported age to an integer (§5.5).
+    """Coerce the free-text reported age to an integer (§6.2).
 
     Families type values like ``4 turning 5`` or ``2.5`` into the
     optional cross-check field; the computed ``age_at_xmas`` is the
@@ -298,348 +300,259 @@ def _parse_reported_age(value: Any) -> int | None:
     return None
 
 
-def process_table(
-    frame: pl.DataFrame, table_name: str, cfg: Config
-) -> tuple[
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-]:
-    """Import, clean, and validate one table (§5.1–§5.3).
-
-    Family rows are deduplicated (§5.4) on cleaned rows before validation so
-    that coalescing can fill nulls a duplicate row would otherwise fail on.
-    Child rows are likewise deduplicated (§5.4) before validation, keeping
-    the most recent submission per (``primary_email``, ``first_name``).
+def compute_age_at_xmas(dob: str, xmas: date) -> int:
+    """Compute full years between dob and the configured Christmas date.
 
     Args:
-        frame: Raw records from ``zite.get_table_data``.
-        table_name: One of "sponsor", "family", "child".
-        cfg: Pipeline configuration.
+        dob: ISO date-of-birth string.
+        xmas: The configured Christmas date.
 
     Returns:
-        A tuple of (kept rows, rejected-row records, dedup-log rows,
-        cleaned pre-dedup submission rows) where each rejected record has
-        table, index, column, value, and reason keys; the dedup log is
-        empty except for the family and child tables; the submission
-        rows feed the ``family_submissions``/``child_submissions``
-        sheets (§4.2 of the audit architecture).
+        The age in completed years.
     """
-    rows = import_table(frame, table_name, cfg)
-    specs = cfg.tables[table_name].columns
-    cleaned: list[dict[str, Any]] = []
-    rejected: list[dict[str, Any]] = []
-    for index, row in enumerate(rows):
-        out: dict[str, Any] = {}
-        failures: list[tuple[str, Any, str]] = []
-        for key, spec in specs.items():
-            value = row.get(key)
-            # Blank strings are nulls (§5.3); normalize before the
-            # default fill so empty form fields still take the default.
-            if isinstance(value, str) and value.strip() == "":
-                value = None
-            if value is None and spec.has_default:
-                value = spec.default
-            if table_name == "child" and key == "age_reported":
-                if value is not None:
-                    value = _parse_reported_age(value)
-            cleaned_value, reason = clean_value(value, spec)
-            if reason is not None:
-                failures.append((key, value, reason))
-            out[key] = cleaned_value
-        if failures:
-            for key, value, reason in failures:
-                rejected.append(
-                    {
-                        "table": table_name,
-                        "index": index,
-                        "column": key,
-                        "value": value,
-                        "reason": reason,
-                    }
-                )
-        else:
-            cleaned.append(out)
-    submissions = list(cleaned)
-    if table_name == "family":
-        cleaned, dedup_log = dedup_families(cleaned, cfg)
-    elif table_name == "child":
-        cleaned, dedup_log = dedup_children(cleaned, cfg)
-    else:
-        dedup_log = []
-    kept, schema_rejected = validate_rows(cleaned, table_name, cfg)
-    rejected.extend(schema_rejected)
-    return kept, rejected, dedup_log, submissions
+    born = date.fromisoformat(dob)
+    return (
+        xmas.year
+        - born.year
+        - ((xmas.month, xmas.day) < (born.month, born.day))
+    )
 
 
-def submissions_frame(
-    rows: list[dict[str, Any]], table_name: str, cfg: Config
-) -> pl.DataFrame:
-    """Build one ``{table}_submissions`` sheet frame (§4.2 audit arch).
+def index_to_letters(index: int) -> str:
+    """Map a zero-based sibling index to an angel letter suffix (§6.5).
 
-    Exactly the table's config columns -- no ``family_id``/``angel_id``/
-    ``age_at_xmas`` (post-link derived) -- sorted by
-    (``created``, ``zite_record_id``) ascending, the same order dedup
-    uses.  Rows that later fail pandera validation are included (they
-    are real submissions the auditor should see); rows rejected during
-    cleaning never reach this frame.
+    A=0 ... Z=25, AA=26, AB=27, ... (letters exceed Z bijectively).
 
     Args:
-        rows: Cleaned pre-dedup rows from :func:`process_table`.
-        table_name: "family" or "child".
-        cfg: Pipeline configuration.
+        index: Zero-based position within the family.
 
     Returns:
-        The typed frame, sorted for the sheet.
+        The uppercase letter code.
     """
-    specs = cfg.tables[table_name].columns
-    schema: dict[str, PolarsDataType] = {
-        key: PL_DTYPES[spec.type] for key, spec in specs.items()
-    }
+    index += 1
+    letters = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def _created_value(row: dict[str, Any]) -> Any:
+    """Return the row's created timestamp under either config key.
+
+    The sponsor table's created column may be keyed ``created`` or
+    ``create`` depending on the config; family/child use ``created``.
+
+    Args:
+        row: One imported row.
+
+    Returns:
+        The created value (possibly None).
+    """
+    return (
+        row.get("created")
+        if row.get("created") is not None
+        else row.get("create")
+    )
+
+
+def assign_sponsor_ids(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assign sequential sponsor_id by created then email (§6.5).
+
+    Every sponsor submission keeps its own ``sponsor_id``; duplicate
+    sponsors (same email) each get a row and are flagged by screening's
+    duplicate detection, never merged.
+
+    Args:
+        rows: Cleaned sponsor rows.
+
+    Returns:
+        Rows with sponsor_id, pref_age_min, and pref_age_max added.
+    """
     ordered = sorted(
         rows,
-        key=lambda row: (
-            row.get("created") or "",
-            row.get("zite_record_id") or "",
-        ),
+        key=lambda row: (_created_value(row) or "", row.get("email") or ""),
     )
-    return pl.DataFrame(
-        [{key: row.get(key) for key in schema} for row in ordered],
-        schema=schema,
-    )
+    result: list[dict[str, Any]] = []
+    for sponsor_id, row in enumerate(ordered, start=1):
+        row = dict(row)
+        row["sponsor_id"] = sponsor_id
+        low, high = AGE_PREF_BOUNDS[row["age_preference"]]
+        row["pref_age_min"] = low
+        row["pref_age_max"] = high
+        result.append(row)
+    return result
 
 
-def dedup_families(
-    rows: list[dict[str, Any]], cfg: Config
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Coalesce duplicate family rows by primary_email (§5.4).
+def assign_family_ids(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assign one family_id per primary_email group (§6.5).
 
-    Rows are ordered by ``created`` ascending; for each column the first
-    non-null value wins, conflicting non-null values are logged, and the
-    surviving row keeps the earliest ``created`` timestamp.
+    Duplicate submissions (same ``primary_email``) share the family's
+    ``family_id``; nothing is merged.  Groups are ordered by their
+    earliest ``created`` then email; email-less rows are singleton
+    groups so every family row carries an id.
 
     Args:
         rows: Cleaned family rows.
-        cfg: Pipeline configuration (unused, kept for signature symmetry).
 
     Returns:
-        A tuple of (deduplicated rows, dedup-log rows).  One log row is
-        produced per merged duplicate record, carrying the primary email,
-        the surviving and duplicate zite ids, the conflicting columns,
-        the conflicting values, and the full recorded contents of both
-        records as JSON.
+        Rows with family_id added.
     """
-    del cfg  # signature symmetry only
-    ordered = sorted(
-        rows,
-        key=lambda row: (
-            row.get("created") or "",
-            row.get("zite_record_id") or "",
+    groups: dict[str | None, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(row.get("primary_email"), []).append(row)
+    ordered_groups = sorted(
+        groups.items(),
+        key=lambda item: (
+            min(_created_value(row) or "" for row in item[1]),
+            item[0] or "",
         ),
     )
-    groups: dict[str, list[dict[str, Any]]] = {}
-    no_email: list[dict[str, Any]] = []
-    for row in ordered:
-        email = row.get("primary_email")
-        if email is None:
-            # No email: nothing to deduplicate on; keep the row as-is so
-            # email-less families are never merged with each other.
-            no_email.append(row)
-            continue
-        groups.setdefault(email, []).append(row)
-    merged_rows: list[dict[str, Any]] = []
-    log_rows: list[dict[str, Any]] = []
-    for email, group in groups.items():
-        merged = dict(group[0])
-        for key in merged:
-            values = [row.get(key) for row in group if row.get(key) is not None]
-            if not values:
-                merged[key] = None
-                continue
-            merged[key] = values[0]
-            if key in DEDUP_CONFLICT_EXCLUDED:
-                continue
-            distinct = {str(value) for value in values}
-            if len(distinct) > 1:
-                logger.warning(
-                    "family dedup conflict for %s: column %s kept %r, dropped %r",
-                    email,
-                    key,
-                    values[0],
-                    values[1:],
-                )
-        merged_rows.append(merged)
-        if len(group) > 1:
-            log_rows.extend(_dedup_log_rows("family", email, merged, group[1:]))
-    merged_rows.extend(no_email)
-    merged_rows.sort(
-        key=lambda row: (
-            row.get("created") or "",
-            row.get("zite_record_id") or "",
-        )
-    )
-    return merged_rows, log_rows
+    result: list[dict[str, Any]] = []
+    for family_id, (_, group) in enumerate(ordered_groups, start=1):
+        for row in group:
+            row = dict(row)
+            row["family_id"] = family_id
+            result.append(row)
+    return result
 
 
-def _dedup_log_rows(
-    sheet: str,
-    email: Any,
-    merged: dict[str, Any],
-    duplicates: list[dict[str, Any]],
+def assign_angel_ids(
+    child_rows: list[dict[str, Any]],
+    cfg: Config,
+    family_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build one dedup-log row per merged duplicate record (§5.4).
+    """Link children to families and assign angel_id letters (§6.5).
+
+    Children link via primary_email to the family rows'
+    ``family_id`` (``family_rows`` when given, else the child rows
+    themselves).  Within a family, letters start at A for the oldest
+    child (descending age_at_xmas, tie-break earliest created then dob).
+    Duplicate submissions of the same child (same ``primary_email`` and
+    ``first_name``) never get a letter of their own: only the group's
+    most recent submission keeps an ``angel_id``, the others carry
+    ``family_id`` with ``angel_id=None`` and are flagged as potential
+    duplicates for the user to resolve.  Orphaned children keep null
+    family_id and angel_id.
 
     Args:
-        sheet: Name of the raw sheet the records came from.
-        email: The primary_email key the group was merged on.
-        merged: The surviving (coalesced) row as written to the sheet.
-        duplicates: The dropped duplicate rows, in merge order.
+        child_rows: Cleaned child rows.
+        cfg: Pipeline configuration.
+        family_rows: Prepared family rows carrying ``family_id``; when
+            None, the child rows themselves must already carry it.
 
     Returns:
-        Log rows with the kept/duplicate ids and created timestamps, the
-        conflicting columns (duplicate value differs from the surviving
-        value, both non-null), a human-readable detail string, and the
-        full recorded contents of both records as JSON.
+        Child rows with family_id, angel_id, and age_at_xmas added.
     """
-    log_rows: list[dict[str, Any]] = []
-    for duplicate in duplicates:
-        conflicts = [
-            key
-            for key in merged
-            if key not in DEDUP_CONFLICT_EXCLUDED
-            and merged.get(key) is not None
-            and duplicate.get(key) is not None
-            and str(duplicate.get(key)) != str(merged.get(key))
-        ]
-        details = "; ".join(
-            f"{key}: kept {merged.get(key)!r} / duplicate"
-            f" {duplicate.get(key)!r}"
-            for key in conflicts
-        )
-        log_rows.append(
-            {
-                "sheet": sheet,
-                "primary_email": email,
-                "kept_zite_record_id": merged.get("zite_record_id"),
-                "kept_created": merged.get("created"),
-                "duplicate_zite_record_id": duplicate.get("zite_record_id"),
-                "duplicate_created": duplicate.get("created"),
-                "conflict_columns": ",".join(conflicts),
-                "conflict_details": details,
-                "kept_record": json.dumps(merged, default=str, sort_keys=True),
-                "duplicate_record": json.dumps(
-                    duplicate, default=str, sort_keys=True
-                ),
-            }
-        )
-    return log_rows
-
-
-#: Column schema of the ``dedup_log`` sheet (§5.4).
-DEDUP_LOG_SCHEMA: dict[str, PolarsDataType] = {
-    "sheet": pl.String,
-    "primary_email": pl.String,
-    "kept_zite_record_id": pl.String,
-    "kept_created": pl.String,
-    "duplicate_zite_record_id": pl.String,
-    "duplicate_created": pl.String,
-    "conflict_columns": pl.String,
-    "conflict_details": pl.String,
-    "kept_record": pl.String,
-    "duplicate_record": pl.String,
-}
-
-
-def dedup_log_frame(log_rows: list[dict[str, Any]]) -> pl.DataFrame:
-    """Build the ``dedup_log`` sheet frame (§5.4).
-
-    Args:
-        log_rows: Log rows from :func:`dedup_families`.
-
-    Returns:
-        The typed frame (empty when nothing was deduplicated).
-    """
-    return pl.DataFrame(log_rows, schema=DEDUP_LOG_SCHEMA)
-
-
-def dedup_children(
-    rows: list[dict[str, Any]], cfg: Config
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Drop duplicate child submissions, keeping the most recent (§5.4).
-
-    A family may submit the same child (same ``first_name``) more than
-    once.  Rows are grouped by (``primary_email``, ``first_name``); the
-    most recent submission (latest ``created``, breaking ties by
-    ``zite_record_id``) is kept as-is -- unlike families, no coalescing
-    happens -- and every earlier submission is dropped and recorded in
-    the dedup log.  Rows without an email or without a first name are
-    never merged and never logged.
-
-    Args:
-        rows: Cleaned child rows (before validation).
-        cfg: Pipeline configuration (unused, kept for signature symmetry).
-
-    Returns:
-        A tuple of (deduplicated rows, dedup-log rows).  One log row is
-        produced per dropped duplicate submission, with the same columns
-        as the family dedup log rows (``sheet`` is ``"child"``).
-    """
-    del cfg  # signature symmetry only
-    ordered = sorted(
-        rows,
-        key=lambda row: (
-            row.get("created") or "",
-            row.get("zite_record_id") or "",
-        ),
-        reverse=True,
-    )
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    unkeyed: list[dict[str, Any]] = []
-    for row in ordered:
+    xmas = cfg.xmas
+    email_to_family: dict[str, int] = {}
+    for row in (*(family_rows or []), *child_rows):
         email = row.get("primary_email")
-        name = row.get("first_name")
-        if email is None or name is None:
-            # No email or no name: nothing to deduplicate on; keep the
-            # row as-is so such children are never merged.
-            unkeyed.append(row)
-            continue
-        groups.setdefault((email, name), []).append(row)
-    kept_rows: list[dict[str, Any]] = []
-    log_rows: list[dict[str, Any]] = []
-    for (email, name), group in groups.items():
-        kept = group[0]
-        kept_rows.append(kept)
-        if len(group) > 1:
+        family_id = row.get("family_id")
+        if email is not None and family_id is not None:
+            email_to_family.setdefault(email, family_id)
+    enriched: list[dict[str, Any]] = []
+    orphans: list[dict[str, Any]] = []
+    families: dict[int, list[dict[str, Any]]] = {}
+    for row in child_rows:
+        row = dict(row)
+        try:
+            row["age_at_xmas"] = compute_age_at_xmas(row["dob"], xmas)
+        except (TypeError, ValueError):
+            row["age_at_xmas"] = None  # unparsable dob; flagged downstream
+        reported = row.get("age_reported")
+        if reported is not None and reported != row["age_at_xmas"]:
             logger.warning(
-                "child dedup for %s: %r submitted %d time(s); kept %s"
-                " (%s), dropped %s",
-                email,
-                name,
-                len(group),
-                kept.get("zite_record_id"),
-                kept.get("created"),
-                [row.get("zite_record_id") for row in group[1:]],
+                "age mismatch for child %s: age_reported=%s, computed age_at_xmas=%s",
+                row["zite_record_id"],
+                reported,
+                row["age_at_xmas"],
             )
-            log_rows.extend(_dedup_log_rows("child", email, kept, group[1:]))
-    kept_rows.extend(unkeyed)
-    kept_rows.sort(
-        key=lambda row: (
-            row.get("created") or "",
-            row.get("zite_record_id") or "",
+        family_id = email_to_family.get(row.get("primary_email"))
+        if family_id is None:
+            row["family_id"] = None
+            row["angel_id"] = None
+            orphans.append(row)
+            logger.warning(
+                "orphaned child %s: no family registration for %r",
+                row["zite_record_id"],
+                row.get("primary_email"),
+            )
+            continue
+        row["family_id"] = family_id
+        families.setdefault(family_id, []).append(row)
+    for family_id in sorted(families):
+        # Survivor per duplicate-child group keeps the letter; extras
+        # (earlier submissions of the same child) stay letterless.
+        survivors: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for row in sorted(
+            families[family_id],
+            key=lambda item: (
+                item.get("created") or "",
+                item.get("zite_record_id") or "",
+            ),
+            reverse=True,
+        ):
+            email = row.get("primary_email")
+            name = row.get("first_name")
+            row["angel_id"] = None
+            if email is None or name is None:
+                survivors.append(row)  # unkeyed child: never merged
+                continue
+            key = (str(email), str(name))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            survivors.append(row)
+        ordered = sorted(
+            survivors,
+            key=lambda row: (
+                -(row["age_at_xmas"] or 0),
+                row.get("created") or "",
+                row.get("dob") or "",
+            ),
         )
-    )
-    return kept_rows, log_rows
+        for position, row in enumerate(ordered):
+            row["angel_id"] = f"{family_id}{index_to_letters(position)}"
+        enriched.extend(
+            sorted(
+                families[family_id],
+                key=lambda item: (
+                    item.get("created") or "",
+                    item.get("zite_record_id") or "",
+                ),
+            )
+        )
+    enriched.extend(orphans)
+    return enriched
 
 
-#: Same-family children whose birth dates are at most
-#: ``cfg.acquire.sibling_dob_max_gap_days`` apart are recorded in
-#: ``dob_conflict_log`` (§5.6).  The default (274) is ~9 months.
+def _cross_check_created(rows: list[dict[str, Any]], table_name: str) -> None:
+    """Log divergence between user created and zite_created_at (§5.1)."""
+    for row in rows:
+        created = _created_value(row)
+        zite_created = row.get("zite_created_at")
+        if created and zite_created and created != zite_created:
+            logger.info(
+                "%s %s: created %s != zite_created_at %s",
+                table_name,
+                row.get("zite_record_id"),
+                created,
+                zite_created,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Sibling DOB conflicts (§6.6, written by the screening stage).
+# ---------------------------------------------------------------------------
+
+
 def _dob_gap_months(earlier: date, later: date) -> int:
-    """Count completed calendar months between two dates (§5.6).
+    """Count completed calendar months between two dates (§6.6).
 
     Reporting only: the conflict threshold is day-based, from
-    ``cfg.acquire.sibling_dob_max_gap_days``.
+    ``cfg.screening.sibling_dob_max_gap_days``.
 
     Args:
         earlier: The earlier date.
@@ -654,7 +567,7 @@ def _dob_gap_months(earlier: date, later: date) -> int:
     return max(months, 0)
 
 
-#: Column schema of the ``dob_conflict_log`` sheet (§5.6).
+#: Column schema of the ``dob_conflict_log`` sheet (§6.6).
 DOB_CONFLICT_LOG_SCHEMA: dict[str, PolarsDataType] = {
     "family_id": pl.Int64,
     "primary_email": pl.String,
@@ -674,25 +587,27 @@ DOB_CONFLICT_LOG_SCHEMA: dict[str, PolarsDataType] = {
 def sibling_dob_conflicts(
     rows: list[dict[str, Any]], cfg: Config
 ) -> list[dict[str, Any]]:
-    """Find same-family children born too close together (§5.6).
+    """Find same-family children born too close together (§6.6).
 
     Every unordered pair of children sharing a ``family_id`` whose birth
-    dates are at most ``cfg.acquire.sibling_dob_max_gap_days`` days
+    dates are at most ``cfg.screening.sibling_dob_max_gap_days`` days
     apart (twins included) is recorded for human review -- each pair is
     compared and logged exactly once (``child_a`` is the earlier birth,
-    so no swapped duplicate rows are ever written).  Children without a
-    ``family_id`` (orphans) or without a ``dob`` are skipped.
+    so no swapped duplicate rows are ever written).  Duplicate
+    submissions of the same child (same ``primary_email`` and
+    ``first_name``) never form a pair, so a resubmission's identical DOB
+    is not a false conflict.  Children without a ``family_id`` (orphans)
+    or without a ``dob`` are skipped.
 
     Args:
-        rows: Cleaned, validated child rows with ``family_id`` and
-            ``angel_id`` assigned.
+        rows: Cleaned, ID-assigned child rows.
         cfg: Pipeline configuration (threshold in days).
 
     Returns:
         One log row per conflicting pair, ordered deterministically
         (family, then birth date, then record id).
     """
-    max_gap_days = cfg.acquire.sibling_dob_max_gap_days
+    max_gap_days = cfg.screening.sibling_dob_max_gap_days
     by_family: dict[Any, list[dict[str, Any]]] = {}
     for row in rows:
         if row.get("family_id") is None or row.get("dob") is None:
@@ -707,9 +622,7 @@ def sibling_dob_conflicts(
         )
         for index, child_a in enumerate(ordered):
             for child_b in ordered[index + 1 :]:
-                if child_a.get("zite_record_id") == child_b.get(
-                    "zite_record_id"
-                ):
+                if _child_identity(child_a) == _child_identity(child_b):
                     continue  # duplicated submission, not two children
                 dob_a = date.fromisoformat(str(child_a["dob"]))
                 dob_b = date.fromisoformat(str(child_b["dob"]))
@@ -758,8 +671,13 @@ def sibling_dob_conflicts(
     return log_rows
 
 
+def _child_identity(row: dict[str, Any]) -> tuple[str, str]:
+    """Duplicate-group identity of one child row (§6.5)."""
+    return (str(row.get("primary_email")), str(row.get("first_name")))
+
+
 def dob_conflict_log_frame(log_rows: list[dict[str, Any]]) -> pl.DataFrame:
-    """Build the ``dob_conflict_log`` sheet frame (§5.6).
+    """Build the ``dob_conflict_log`` sheet frame (§6.6).
 
     Args:
         log_rows: Log rows from :func:`sibling_dob_conflicts`.
@@ -770,293 +688,76 @@ def dob_conflict_log_frame(log_rows: list[dict[str, Any]]) -> pl.DataFrame:
     return pl.DataFrame(log_rows, schema=DOB_CONFLICT_LOG_SCHEMA)
 
 
-def build_schema(table_name: str, cfg: Config) -> pap.DataFrameSchema:
-    """Build the pandera schema for one table from config (§5.2).
+# ---------------------------------------------------------------------------
+# Verbatim fetch (the whole acquire stage).
+# ---------------------------------------------------------------------------
+
+
+def _verbatim_cell(value: Any) -> Any:
+    """Verbatim scalar form of one cell value (§5.1).
+
+    Zite may return a structured cell value -- e.g. the sponsor ``Source``
+    provenance object ``{"type": "form_submission", "sessionId": ...,
+    "flowPublicId": ...}``.  A deterministic JSON serialization preserves
+    the whole value verbatim inside the sheet's declared string column;
+    scalars pass through untouched.
 
     Args:
-        table_name: One of "sponsor", "family", "child".
-        cfg: Pipeline configuration.
+        value: The raw cell value (may be None).
 
     Returns:
-        The pandera polars DataFrameSchema.
+        The value as-is when scalar, else its JSON string form.
     """
-    columns: dict[str, pap.Column] = {}
-    for key, spec in cfg.tables[table_name].columns.items():
-        checks: list[Check] = []
-        if spec.type == "enum":
-            values = cfg.enum_values(table_name, key)
-            checks.append(Check.isin(values))
-        columns[key] = pap.Column(
-            PL_DTYPES[spec.type],
-            nullable=True,
-            checks=checks,
+    if isinstance(value, dict):
+        return json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
-    return pap.DataFrameSchema(columns, strict=True)
+    if isinstance(value, list | tuple):
+        return json.dumps(value, ensure_ascii=False)
+    return value
 
 
-def validate_rows(
-    rows: list[dict[str, Any]], table_name: str, cfg: Config
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Validate cleaned rows with pandera (§5.2, §5.3).
-
-    Args:
-        rows: Cleaned rows keyed by config columns.
-        table_name: One of "sponsor", "family", "child".
-        cfg: Pipeline configuration.
-
-    Returns:
-        A tuple of (kept rows, rejected-row records for the log).
-    """
-    if not rows:
-        return [], []
-    specs = cfg.tables[table_name].columns
-    schema = build_schema(table_name, cfg)
-    frame = pl.DataFrame(
-        rows, schema={key: PL_DTYPES[spec.type] for key, spec in specs.items()}
-    )
-    try:
-        schema.validate(frame, lazy=True)
-        return rows, []
-    except SchemaErrors as errors:
-        failures = errors.failure_cases
-        bad_indices = set(failures["index"].to_list())
-        rejected: list[dict[str, Any]] = []
-        for column, check, index in zip(
-            failures["column"].to_list(),
-            failures["check"].to_list(),
-            failures["index"].to_list(),
-            strict=False,
-        ):
-            rejected.append(
-                {
-                    "table": table_name,
-                    "index": index,
-                    "column": column,
-                    "value": rows[index].get(column),
-                    "reason": str(check),
-                }
-            )
-        kept = [
-            row for index, row in enumerate(rows) if index not in bad_indices
-        ]
-        return kept, rejected
-
-
-def compute_age_at_xmas(dob: str, xmas: date) -> int:
-    """Compute full years between dob and the configured Christmas date.
-
-    Args:
-        dob: ISO date-of-birth string.
-        xmas: The configured Christmas date.
-
-    Returns:
-        The age in completed years.
-    """
-    born = date.fromisoformat(dob)
-    return (
-        xmas.year
-        - born.year
-        - ((xmas.month, xmas.day) < (born.month, born.day))
-    )
-
-
-def index_to_letters(index: int) -> str:
-    """Map a zero-based sibling index to an angel letter suffix (§5.5).
-
-    A=0 ... Z=25, AA=26, AB=27, ... (letters exceed Z bijectively).
-
-    Args:
-        index: Zero-based position within the family.
-
-    Returns:
-        The uppercase letter code.
-    """
-    index += 1
-    letters = ""
-    while index:
-        index, remainder = divmod(index - 1, 26)
-        letters = chr(ord("A") + remainder) + letters
-    return letters
-
-
-def _created_value(row: dict[str, Any]) -> Any:
-    """Return the row's created timestamp under either config key.
-
-    The sponsor table's created column may be keyed ``created`` or
-    ``create`` depending on the config; family/child use ``created``.
-
-    Args:
-        row: One imported row.
-
-    Returns:
-        The created value (possibly None).
-    """
-    return (
-        row.get("created")
-        if row.get("created") is not None
-        else row.get("create")
-    )
-
-
-def assign_sponsor_ids(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Assign sequential sponsor_id by created then email (§5.5).
-
-    Args:
-        rows: Cleaned, validated sponsor rows.
-
-    Returns:
-        Rows with sponsor_id, pref_age_min, and pref_age_max added.
-    """
-    ordered = sorted(
-        rows,
-        key=lambda row: (_created_value(row) or "", row.get("email") or ""),
-    )
-    result: list[dict[str, Any]] = []
-    for sponsor_id, row in enumerate(ordered, start=1):
-        row = dict(row)
-        row["sponsor_id"] = sponsor_id
-        low, high = AGE_PREF_BOUNDS[row["age_preference"]]
-        row["pref_age_min"] = low
-        row["pref_age_max"] = high
-        result.append(row)
-    return result
-
-
-def assign_family_ids(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Assign sequential family_id by created then primary_email (§5.5).
-
-    Args:
-        rows: Cleaned, validated, deduplicated family rows.
-
-    Returns:
-        Rows with family_id added.
-    """
-    ordered = sorted(
-        rows,
-        key=lambda row: (
-            row.get("created") or "",
-            row.get("primary_email") or "",
-        ),
-    )
-    result: list[dict[str, Any]] = []
-    for family_id, row in enumerate(ordered, start=1):
-        row = dict(row)
-        row["family_id"] = family_id
-        result.append(row)
-    return result
-
-
-def assign_angel_ids(
-    child_rows: list[dict[str, Any]],
-    family_rows: list[dict[str, Any]],
-    cfg: Config,
-) -> list[dict[str, Any]]:
-    """Link children to families and assign angel_id letters (§5.5).
-
-    Children link via primary_email; within a family, letters start at A for
-    the oldest child (descending age_at_xmas, tie-break earliest created
-    then dob).  Orphaned children keep null family_id and angel_id but stay
-    in raw_child.
-
-    Args:
-        child_rows: Cleaned, validated child rows.
-        family_rows: Family rows with family_id assigned.
-        cfg: Pipeline configuration.
-
-    Returns:
-        Child rows with family_id, angel_id, and age_at_xmas added.
-    """
-    xmas = cfg.xmas
-    email_to_family = {
-        row["primary_email"]: row["family_id"] for row in family_rows
-    }
-    enriched: list[dict[str, Any]] = []
-    orphans: list[dict[str, Any]] = []
-    families: dict[int, list[dict[str, Any]]] = {}
-    for row in child_rows:
-        row = dict(row)
-        row["age_at_xmas"] = compute_age_at_xmas(row["dob"], xmas)
-        reported = row.get("age_reported")
-        if reported is not None and reported != row["age_at_xmas"]:
-            logger.warning(
-                "age mismatch for child %s: age_reported=%s, computed age_at_xmas=%s",
-                row["zite_record_id"],
-                reported,
-                row["age_at_xmas"],
-            )
-        family_id = email_to_family.get(row.get("primary_email"))
-        if family_id is None:
-            row["family_id"] = None
-            row["angel_id"] = None
-            orphans.append(row)
-            logger.warning(
-                "orphaned child %s: no family registration for %r",
-                row["zite_record_id"],
-                row.get("primary_email"),
-            )
-            continue
-        row["family_id"] = family_id
-        families.setdefault(family_id, []).append(row)
-    for family_id in sorted(families):
-        ordered = sorted(
-            families[family_id],
-            key=lambda row: (
-                -row["age_at_xmas"],
-                row.get("created") or "",
-                row.get("dob") or "",
-            ),
-        )
-        for position, row in enumerate(ordered):
-            row["angel_id"] = f"{family_id}{index_to_letters(position)}"
-        enriched.extend(ordered)
-    enriched.extend(orphans)
-    return enriched
-
-
-def _cross_check_created(rows: list[dict[str, Any]], table_name: str) -> None:
-    """Log divergence between user created and zite_created_at (§5.1)."""
-    for row in rows:
-        created = _created_value(row)
-        zite_created = row.get("zite_created_at")
-        if created and zite_created and created != zite_created:
-            logger.info(
-                "%s %s: created %s != zite_created_at %s",
-                table_name,
-                row.get("zite_record_id"),
-                created,
-                zite_created,
-            )
-
-
-def _rows_to_frame(
+def _raw_frame(
     rows: list[dict[str, Any]], table_name: str, cfg: Config
 ) -> pl.DataFrame:
-    """Build the output sheet DataFrame with config + derived columns."""
+    """Build the verbatim raw sheet frame: config columns, untouched values.
+
+    Column dtypes follow the declared column types where every value
+    fits (strict cast); a column holding values that cannot be cast --
+    e.g. free-text ``age_reported`` against an ``int`` declaration --
+    keeps its inferred dtype so the verbatim text survives (§5.1).
+
+    Args:
+        rows: Imported rows from :func:`import_table`.
+        table_name: One of "sponsor", "family", "child".
+        cfg: Pipeline configuration.
+
+    Returns:
+        The typed frame (dtypes per the declared column types).
+    """
     specs = cfg.tables[table_name].columns
     schema: dict[str, PolarsDataType] = {
         key: PL_DTYPES[spec.type] for key, spec in specs.items()
     }
-    if table_name == "sponsor":
-        schema.update(
-            {
-                "sponsor_id": pl.Int64,
-                "pref_age_min": pl.Int64,
-                "pref_age_max": pl.Int64,
-            }
-        )
-    elif table_name == "family":
-        schema["family_id"] = pl.Int64
-    else:
-        schema.update(
-            {
-                "family_id": pl.Int64,
-                "angel_id": pl.String,
-                "age_at_xmas": pl.Int64,
-            }
-        )
-    frame = pl.DataFrame(
-        [{key: row.get(key) for key in schema} for row in rows], schema=schema
-    )
+    cells = [
+        {key: _verbatim_cell(row.get(key)) for key in schema} for row in rows
+    ]
+    if not cells:
+        return pl.DataFrame(schema=schema)
+    frame = pl.DataFrame(cells)
+    for key, dtype in schema.items():
+        column = frame.get_column(key)
+        if column.dtype == dtype:
+            continue
+        try:
+            frame = frame.with_columns(column.cast(dtype, strict=True))
+        except pl.exceptions.PolarsError:
+            logger.warning(
+                "table %s column %s: value(s) not %s; column kept verbatim",
+                table_name,
+                key,
+                dtype,
+            )
     return frame.select(list(schema))
 
 
@@ -1091,7 +792,13 @@ def pull_tables(cfg: Config) -> dict[str, pl.DataFrame]:
 
 
 def run(cfg: Config) -> None:
-    """Run module 1 end to end (§5).
+    """Run module 1 end to end (§5): fetch only.
+
+    Pulls the three Zite tables and writes each one verbatim to its
+    ``raw_*`` sheet -- no cleaning, no validation, no deduplication, no
+    ID assignment, no duplicate removal.  Every downstream preparation
+    (cleaning, validation-as-flags, IDs, duplicate flags, email/address
+    checks, AI screening) happens in ``ccat screen``.
 
     Args:
         cfg: Pipeline configuration.
@@ -1101,47 +808,14 @@ def run(cfg: Config) -> None:
     """
     frames = pull_tables(cfg)
     sheets: dict[str, pl.DataFrame] = {}
-    dedup_log_rows: list[dict[str, Any]] = []
-    dob_conflict_rows: list[dict[str, Any]] = []
     for table_name in ("sponsor", "family", "child"):
-        kept, rejected, log_rows, submission_rows = process_table(
-            frames[table_name], table_name, cfg
-        )
-        dedup_log_rows.extend(log_rows)
-        if table_name in ("family", "child"):
-            sheets[f"{table_name}_submissions"] = submissions_frame(
-                submission_rows, table_name, cfg
-            )
-        for record in rejected:
-            logger.warning(
-                "rejected %s row %s column %s value %r: %s",
-                record["table"],
-                record["index"],
-                record["column"],
-                record["value"],
-                record["reason"],
-            )
-        if table_name == "sponsor":
-            kept = assign_sponsor_ids(kept)
-        elif table_name == "family":
-            kept = assign_family_ids(kept)
-        else:
-            family_rows = sheets["raw_family"].to_dicts()
-            kept = assign_angel_ids(kept, family_rows, cfg)
-            _cross_check_created(kept, "child")
-            dob_conflict_rows.extend(sibling_dob_conflicts(kept, cfg))
-        if table_name == "family":
-            _cross_check_created(kept, "family")
+        rows = import_table(frames[table_name], table_name, cfg)
+        sheets[f"raw_{table_name}"] = _raw_frame(rows, table_name, cfg)
         logger.info(
-            "table %s: pulled %d, kept %d, rejected %d",
+            "table %s: pulled %d rows verbatim",
             table_name,
             frames[table_name].height,
-            len(kept),
-            len({(record["table"], record["index"]) for record in rejected}),
         )
-        sheets[f"raw_{table_name}"] = _rows_to_frame(kept, table_name, cfg)
-    sheets["dedup_log"] = dedup_log_frame(dedup_log_rows)
-    sheets["dob_conflict_log"] = dob_conflict_log_frame(dob_conflict_rows)
     final_sheets = [
         "final_child",
         "final_family",

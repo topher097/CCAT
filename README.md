@@ -15,8 +15,11 @@ uv sync             # create .venv and install dependencies
 Each module runs independently against one Excel workbook and config:
 
 ```sh
-ccat acquire      [--config PATH]          # 1: pull/validate Zite data -> raw_* + submissions sheets
-ccat screen       [--config PATH] [--test] # 2: LLM adjudication -> dense adj_child
+ccat acquire      [--config PATH]          # 1: fetch Zite tables verbatim -> raw_* (duplicates kept)
+ccat screen       [--config PATH] [--test] [--skip-email-check] [--skip-address-check]
+                                           # 2: local pre-audit (clean, IDs, duplicate flags,
+                                           #    ZeroBounce emails, Nominatim addresses) + LLM
+                                           #    child screening -> submissions + adj_* sheets
 ccat audit        [--config PATH] [--test] # 3: human audit NiceGUI app -> adj_* + final_child
 ccat match        [--config PATH] [--test] # 4: matchmaking -> adj_* assignments + final_family/sponsor
 ccat generate     [--config PATH] [--test] # 5: child info sheet PDFs
@@ -26,6 +29,16 @@ ccat audit-migrate --config config/ccat_2026_v2.json --from ./output/ccat_2026.x
 
 Default config: `config/ccat_2026.json`. `--test` stops each module after
 its first unit of work (first family, first sponsor, first PDF).
+
+The AI screening prompt never carries personal data — trivial
+capitalization/format fixes stay local, and sponsors/families are never
+AI-screened. Potential duplicates are flagged (`potential_duplicate` +
+`require_clarification`, full group in `duplicate_log`), never merged;
+resolve them in the audit tool by ignoring the extras. Every new
+sponsor/family email goes through ZeroBounce and every family address
+through Nominatim during screening, with the complete verbatim API
+responses logged in `email_validation_log` / `address_validation_log`
+(`ZEROBOUNCE_API_KEY` env var required for the email check).
 
 **v2 audit workbook** (`config/ccat_2026_v2.json` →
 `output/ccat_2026_v2.xlsx`): the multi-entity human audit (sponsors,

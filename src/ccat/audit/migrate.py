@@ -16,12 +16,7 @@ from typing import Any
 
 import polars as pl
 
-from ccat.acquire import (
-    AGE_PREF_BOUNDS,
-    DEDUP_LOG_SCHEMA,
-    DOB_CONFLICT_LOG_SCHEMA,
-    submissions_frame,
-)
+from ccat.acquire import AGE_PREF_BOUNDS
 from ccat.audit import AuditError
 from ccat.audit.store import (
     ADJ_CHILD_COLUMNS,
@@ -31,7 +26,6 @@ from ccat.audit.store import (
     CHILD_LINKAGE_COLUMNS,
     FAMILY_EDITABLE_COLUMNS,
     FAMILY_LINKAGE_COLUMNS,
-    FINAL_CHILD_COLUMNS,
     FINAL_FAMILY_COLUMNS,
     FINAL_SPONSOR_COLUMNS,
     SPONSOR_EDITABLE_COLUMNS,
@@ -44,6 +38,7 @@ from ccat.audit.store import (
     build_adj_frame,
     normalize_row,
     project_final,
+    project_final_child,
     status_of,
 )
 from ccat.config import Config
@@ -62,6 +57,9 @@ _BLOCKING_SHEETS = (
 )
 
 #: Raw-layer sheets copied verbatim from the old workbook (§11.2).
+#: The old workbook's ``raw_*`` sheets already carry the old pipeline's
+#: cleaned, ID-assigned rows, so they double as the prepared
+#: ``*_submissions`` rows the audit store works from.
 _RAW_SHEETS = (
     "raw_sponsor",
     "raw_family",
@@ -215,26 +213,31 @@ def run(
     sheets: dict[str, pl.DataFrame] = {}
     for sheet in _RAW_SHEETS:
         frame = frames[sheet]
-        if frame is not None:
+        if frame is not None and sheet != "dedup_log":
+            # dedup_log is a record of the OLD pipeline's merged
+            # duplicates; the new pipeline flags duplicates without
+            # merging (duplicate_log), so the legacy sheet is dropped.
             sheets[sheet] = frame
-    for sheet in ("dedup_log", "dob_conflict_log"):
-        if sheet not in sheets:
-            schemas = {
-                "dedup_log": DEDUP_LOG_SCHEMA,
-                "dob_conflict_log": DOB_CONFLICT_LOG_SCHEMA,
-            }
-            sheets[sheet] = pl.DataFrame(schema=schemas[sheet])
-    # Submission sheets do not exist in the old workbook: created empty,
-    # they fill on the next `ccat acquire` run (§11.2).
-    sheets["family_submissions"] = submissions_frame([], "family", cfg)
-    sheets["child_submissions"] = submissions_frame([], "child", cfg)
+    # The old raw sheets are already cleaned and ID-assigned; they feed
+    # the prepared submissions layer directly (§11.2).  The old
+    # `dedup_log` (merged duplicates) is not carried over.
+    for entity, sheet in (
+        ("sponsor", "raw_sponsor"),
+        ("family", "raw_family"),
+        ("child", "raw_child"),
+    ):
+        frame = frames[sheet]
+        sheets[f"{entity}_submissions"] = (
+            frame if frame is not None else pl.DataFrame()
+        )
+    sheets["dob_conflict_log"] = sheets.get("dob_conflict_log", pl.DataFrame())
     child_frame = build_adj_frame("child", adj_children)
     family_frame = build_adj_frame("family", adj_families)
     sponsor_frame = build_adj_frame("sponsor", adj_sponsors)
     sheets["adj_child"] = child_frame
     sheets["adj_family"] = family_frame
     sheets["adj_sponsor"] = sponsor_frame
-    sheets["final_child"] = project_final(child_frame, FINAL_CHILD_COLUMNS)
+    sheets["final_child"] = project_final_child(child_frame)
     sheets["final_family"] = project_final(family_frame, FINAL_FAMILY_COLUMNS)
     sheets["final_sponsor"] = project_final(
         sponsor_frame, FINAL_SPONSOR_COLUMNS

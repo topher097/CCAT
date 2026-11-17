@@ -597,6 +597,14 @@ def render_detail(
                 badge_slot.clear()
                 with badge_slot:
                     status_badge(detail.status())
+                    if as_bool(entry.adj.get("potential_duplicate")):
+                        ui.badge(
+                            "potential duplicate", color="deep-orange"
+                        ).tooltip(
+                            "Flagged by screening as a possible duplicate"
+                            " submission; resolve by ignoring the extras"
+                            " (see duplicate_log)"
+                        )
 
             render_badge()
 

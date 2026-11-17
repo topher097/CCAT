@@ -383,20 +383,20 @@ class TestRun:
     def test_run_raw_reads_raw_sheets(
         self, cfg: Config, tmp_path: Path
     ) -> None:
-        """--raw builds the report from raw_child/raw_family."""
+        """--raw builds the report from the child/family submissions."""
         stamp = datetime(2026, 10, 2, 12, 0)
         write_sheets(
             cfg.excel_file,
-            "acquire",
+            "screen",
             {
-                "raw_child": pl.DataFrame(
+                "child_submissions": pl.DataFrame(
                     [
                         child_row("rec1", 1, stamp, "Male"),
                         child_row("rec2", 1, stamp, "Female", age=5),
                     ],
                     schema=CHILD_SCHEMA,
                 ),
-                "raw_family": pl.DataFrame(
+                "family_submissions": pl.DataFrame(
                     [family_row(1, "Hancock", None)],
                     schema={
                         key: value
@@ -421,9 +421,9 @@ class TestRun:
     def test_run_raw_raises_when_raw_child_missing(
         self, cfg: Config, tmp_path: Path
     ) -> None:
-        """--raw without raw_child raises StatsError naming the sheet."""
+        """--raw without child_submissions raises naming the sheet."""
         report_cfg = _report_cfg(cfg, tmp_path)
-        with pytest.raises(StatsError, match="raw_child"):
+        with pytest.raises(StatsError, match="child_submissions"):
             stats.run(report_cfg, raw=True)
 
     def test_run_raises_when_created_column_missing(

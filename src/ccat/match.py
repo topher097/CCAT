@@ -844,6 +844,69 @@ def _apply_prior_to_family_rows(
     return warnings
 
 
+def _duplicate_pool_warnings(
+    adj_family: list[dict[str, Any]],
+    adj_sponsor: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Flag unresolved duplicate entities left in the pools (§8.7).
+
+    Screening flags potential duplicates but never merges; the user
+    resolves them by ignoring the extras in the audit tool.  A
+    duplicate pair that reaches the pools unresolved (both rows
+    non-ignored with the same primary email) can double-match, so it is
+    reported here.
+
+    Args:
+        adj_family: The non-ignored adj_family rows.
+        adj_sponsor: The non-ignored adj_sponsor rows.
+
+    Returns:
+        match_report rows (kind ``duplicate``), one per unresolved pair.
+    """
+    report: list[dict[str, str]] = []
+    by_email: dict[str, list[str]] = {}
+    for row in adj_family:
+        email = row.get("primary_email")
+        if email:
+            by_email.setdefault(str(email).strip().lower(), []).append(
+                str(row["family_id"])
+            )
+    for email, family_ids in sorted(by_email.items()):
+        if len(family_ids) > 1:
+            report.append(
+                {
+                    "kind": "duplicate",
+                    "ref": ",".join(family_ids),
+                    "reason": (
+                        f"unresolved potential duplicate families sharing"
+                        f" primary email {email}; resolve in the audit"
+                        " tool before matching"
+                    ),
+                }
+            )
+    by_sponsor_email: dict[str, list[str]] = {}
+    for row in adj_sponsor:
+        email = row.get("email")
+        if email:
+            by_sponsor_email.setdefault(str(email).strip().lower(), []).append(
+                str(row["sponsor_id"])
+            )
+    for email, sponsor_ids in sorted(by_sponsor_email.items()):
+        if len(sponsor_ids) > 1:
+            report.append(
+                {
+                    "kind": "duplicate",
+                    "ref": ",".join(sponsor_ids),
+                    "reason": (
+                        f"unresolved potential duplicate sponsors sharing"
+                        f" email {email}; resolve in the audit tool"
+                        " before matching"
+                    ),
+                }
+            )
+    return report
+
+
 def run(
     cfg: Config,
     test: bool = False,
@@ -1053,6 +1116,7 @@ def run(
         row["assigned_angel_ids"] = ",".join(angel_ids) if angel_ids else None
         row["num_angels_assigned"] = len(angel_ids)
 
+    report.extend(_duplicate_pool_warnings(adj_family, adj_sponsor))
     report_frame = pl.DataFrame(
         report,
         schema={"kind": pl.String, "ref": pl.String, "reason": pl.String},

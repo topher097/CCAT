@@ -174,7 +174,31 @@ class ClarifySpec(BaseModel):
 
 
 class AcquireSpec(BaseModel):
-    """Data acquisition settings (module 1)."""
+    """Data acquisition settings (module 1).
+
+    Module 1 only fetches the Zite tables; this section is deprecated
+    and kept only so older config files keep loading.  The sibling DOB
+    threshold moved to ``screening.sibling_dob_max_gap_days``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Same-family children born at most this many days apart are
+    #: recorded in ``dob_conflict_log`` (§5.6); 274 days is ~9 months.
+    #: Deprecated: read ``screening.sibling_dob_max_gap_days`` instead.
+    sibling_dob_max_gap_days: int = 274
+
+    @field_validator("sibling_dob_max_gap_days")
+    @classmethod
+    def _check_gap_days(cls, value: int) -> int:
+        """Require a positive day threshold."""
+        if value <= 0:
+            raise ValueError("sibling_dob_max_gap_days must be positive")
+        return value
+
+
+class ScreeningSpec(BaseModel):
+    """Pre-audit screening settings (module 2, non-AI checks)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -189,6 +213,56 @@ class AcquireSpec(BaseModel):
         if value <= 0:
             raise ValueError("sibling_dob_max_gap_days must be positive")
         return value
+
+
+class EmailCheckSpec(BaseModel):
+    """ZeroBounce email deliverability check settings (module 2).
+
+    Attributes:
+        enabled: Run the bulk ZeroBounce check during screening.
+        workers: Fallback per-email checks run on this many worker
+            threads (the bulk batch path uses one call per 100 emails).
+        delay: Retained for sequential pacing; the bulk and threaded
+            paths do not sleep between calls.
+        api_key_env: Environment variable holding the ZeroBounce key.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    workers: int = 4
+    delay: float = 0.25
+    api_key_env: str = "ZEROBOUNCE_API_KEY"
+
+    @field_validator("workers")
+    @classmethod
+    def _check_workers(cls, value: int) -> int:
+        """Require at least one worker thread."""
+        if value < 1:
+            raise ValueError("workers must be positive")
+        return value
+
+
+class AddressCheckSpec(BaseModel):
+    """Nominatim family-address validation settings (module 2).
+
+    Attributes:
+        enabled: Run the address check during screening.
+        base_url: Nominatim root URL (self-hosted instances work).
+        delay: Seconds between requests; the OSM usage policy caps
+            Nominatim at 1 request per second.
+        user_agent: Identifying User-Agent header (required by the
+            OSM usage policy).
+        timeout: Per-request timeout in seconds.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    base_url: str = "https://nominatim.openstreetmap.org"
+    delay: float = 1.1
+    user_agent: str = "ccat-angel-tree/1.0 (family address validation)"
+    timeout: float = 30.0
 
 
 class MatchmakingSpec(BaseModel):
@@ -331,8 +405,11 @@ class Config(BaseModel):
     tables: dict[str, TableSpec]
     vocabularies: dict[str, list[str]]
     location_groups: dict[str, list[str]]
-    acquire: AcquireSpec
+    acquire: AcquireSpec = AcquireSpec()
     ai_screening: AIScreeningSpec
+    screening: ScreeningSpec = ScreeningSpec()
+    email_check: EmailCheckSpec = EmailCheckSpec()
+    address_check: AddressCheckSpec = AddressCheckSpec()
     audit: AuditSpec
     clarify: ClarifySpec
     matchmaking: MatchmakingSpec

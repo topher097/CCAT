@@ -230,7 +230,7 @@ def build_table(excel_file: Path) -> pl.DataFrame:
         )
 
     families = _read_required(excel_file, "final_family", FAMILY_COLUMNS)
-    # The date of birth exactly as provided in the raw_child form.
+    # The date of birth exactly as typed into the registration form.
     raw_child = _read_required(
         excel_file, "raw_child", ("dob", "zite_record_id")
     )
