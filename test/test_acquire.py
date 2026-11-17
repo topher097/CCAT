@@ -1,4 +1,4 @@
-"""Tests for module 1 — data acquisition and validation (§5)."""
+"""Tests for module 1 — verbatim data acquisition (§5)."""
 
 import json
 from datetime import date
@@ -18,16 +18,13 @@ from ccat.acquire import (
     assign_sponsor_ids,
     clean_value,
     compute_age_at_xmas,
-    dedup_children,
-    dedup_families,
     import_table,
     index_to_letters,
-    process_table,
     run,
     sibling_dob_conflicts,
     snake_case,
 )
-from ccat.config import Config, ZiteSpec, load_config
+from ccat.config import Config, ScreeningSpec, ZiteSpec, load_config
 from ccat.io import SheetOwnershipError, read_sheet, write_sheets
 
 SPONSOR_BASE: dict[str, Any] = {
@@ -118,7 +115,7 @@ def test_snake_case() -> None:
 
 
 def test_clean_names_preserve_apostrophes_and_hyphens() -> None:
-    """Name cleaning title-cases while preserving ' and - (§5.3)."""
+    """Name cleaning title-cases while preserving ' and - (§6.2)."""
     from ccat.config import ColumnSpec
 
     spec = ColumnSpec(type="name")
@@ -179,7 +176,7 @@ def test_import_table_renames_and_allow_list(cfg: Config) -> None:
     rows = import_table(frame, "sponsor", cfg)
     assert len(rows) == 1
     row = rows[0]
-    assert row["email"] == "Sponsor@Example.COM"  # cleaning happens later
+    assert row["email"] == "Sponsor@Example.COM"  # verbatim: uncleaned
     assert row["num_children"] == "2"
     assert row["zite_record_id"] == "rec_s1"
     assert "some_extra_column" not in row
@@ -209,315 +206,13 @@ def test_import_table_missing_column_is_structural_failure(cfg: Config) -> None:
         import_table(frame, "sponsor", cfg)
 
 
-def test_process_table_keeps_valid_rows(cfg: Config) -> None:
-    """A valid sponsor row survives cleaning and validation."""
-    kept, rejected, _dedup = process_table(
-        zite_frame(SPONSOR_BASE, [{}]), "sponsor", cfg
-    )
-    assert rejected == []
-    assert len(kept) == 1
-    row = kept[0]
-    assert row["email"] == "sponsor@example.com"
-    assert row["first_name"] == "Mary Jane"
-    assert row["last_name"] == "O'Brien"
-    assert row["phone"] == "(906) 555-1234"
-    assert row["num_children"] == 2
-    assert row["age_preference"] == "Any Age"  # default substituted for null
-
-
-def test_process_table_rejects_invalid_email_row(cfg: Config) -> None:
-    """A row with an invalid email is excluded and reported (§5.3)."""
-    kept, rejected, _dedup = process_table(
-        zite_frame(SPONSOR_BASE, [{"Email": "broken"}, {}]), "sponsor", cfg
-    )
-    assert len(kept) == 1
-    assert kept[0]["email"] == "sponsor@example.com"
-    assert len(rejected) == 1
-    assert rejected[0]["column"] == "email"
-    assert rejected[0]["reason"] == "invalid email"
-
-
-def test_process_table_rejects_invalid_enum_value(cfg: Config) -> None:
-    """Enum values outside the vocabulary reject the row (§5.3)."""
-    kept, rejected, _dedup = process_table(
-        zite_frame(SPONSOR_BASE, [{"Affiliation": "Sole Proprietor"}]),
-        "sponsor",
-        cfg,
-    )
-    assert kept == []
-    assert rejected[0]["column"] == "sponsor_type"
-
-
-def test_process_table_keeps_null_without_default(cfg: Config) -> None:
-    """Nulls in columns without a default are kept as null (§5.2)."""
-    kept, rejected, _dedup = process_table(
-        zite_frame(SPONSOR_BASE, [{"First Name": None}]), "sponsor", cfg
-    )
-    assert rejected == []
-    assert len(kept) == 1
-    assert kept[0]["first_name"] is None
-
-
-def test_process_table_fills_default_on_null(cfg: Config) -> None:
-    """Nulls take the configured default when one is specified (§5.2)."""
-    kept, rejected, _dedup = process_table(
-        zite_frame(
-            SPONSOR_BASE, [{"First Name": None, "Age Preference": None}]
-        ),
-        "sponsor",
-        cfg,
-    )
-    assert rejected == []
-    assert kept[0]["first_name"] is None
-    assert kept[0]["age_preference"] == "Any Age"  # config default
-
-
-def test_process_table_blank_string_takes_default(cfg: Config) -> None:
-    """A blank-string cell is a null and takes the default (§5.3)."""
-    kept, rejected, _dedup = process_table(
-        zite_frame(SPONSOR_BASE, [{"Age Preference": "   "}]),
-        "sponsor",
-        cfg,
-    )
-    assert rejected == []
-    assert kept[0]["age_preference"] == "Any Age"
-
-
-def test_dedup_families_never_merges_emailless_families(cfg: Config) -> None:
-    """Families without an email stay separate (null is not a key)."""
-    rows = [
-        {
-            "zite_record_id": "r1",
-            "primary_email": None,
-            "created": None,
-            "phone": "(906) 555-0001",
-        },
-        {
-            "zite_record_id": "r2",
-            "primary_email": None,
-            "created": None,
-            "phone": "(906) 555-0002",
-        },
-        {
-            "zite_record_id": "r3",
-            "primary_email": "a@x.com",
-            "created": None,
-            "phone": None,
-        },
-        {
-            "zite_record_id": "r4",
-            "primary_email": "a@x.com",
-            "created": None,
-            "phone": "(906) 555-0003",
-        },
-    ]
-    merged, _log = dedup_families(rows, cfg)
-    emails = [row["primary_email"] for row in merged]
-    assert emails.count(None) == 2  # kept apart
-    assert emails.count("a@x.com") == 1  # deduped by email
-    assert _log == [
-        {
-            "sheet": "family",
-            "primary_email": "a@x.com",
-            "kept_zite_record_id": "r3",
-            "kept_created": None,
-            "duplicate_zite_record_id": "r4",
-            "duplicate_created": None,
-            "conflict_columns": "",
-            "conflict_details": "",
-            "kept_record": _log[0]["kept_record"],
-            "duplicate_record": _log[0]["duplicate_record"],
-        }
-    ]
-
-
-def test_process_table_coerces_free_text_reported_age(cfg: Config) -> None:
-    """Free-text age_reported degrades to an int or null (§5.5).
-
-    The computed age_at_xmas is authoritative, so a family typing
-    "4 turning 5" must not reject the whole child row.
-    """
-    children = zite_frame(
-        CHILD_BASE,
-        [
-            {"Age at Christmas 2026": "8"},
-            {"First Name": "kiddo2", "Age at Christmas 2026": "4 turning 5"},
-            {"First Name": "kiddo3", "Age at Christmas 2026": "2.5"},
-            {"First Name": "kiddo4", "Age at Christmas 2026": "young"},
-        ],
-    )
-    kept, rejected, _dedup = process_table(children, "child", cfg)
-    assert rejected == []
-    assert [row["age_reported"] for row in kept] == [8, 4, 2, None]
-
-
-def test_dedup_families_coalesces_and_keeps_earliest(cfg: Config) -> None:
-    """Family dedup coalesces first non-null and keeps earliest created (§5.4)."""
-    early = {
-        "id": "f1",
-        "created": "2026-01-01T00:00:00Z",
-        "primary_email": "a@x.com",
-        "phone": None,
-        "city": "Hancock",
-    }
-    late = {
-        "id": "f2",
-        "created": "2026-01-02T00:00:00Z",
-        "primary_email": "a@x.com",
-        "phone": "(906) 555-0000",
-        "city": None,
-    }
-    other = {
-        "id": "f3",
-        "created": "2026-01-03T00:00:00Z",
-        "primary_email": "b@x.com",
-        "phone": "(906) 555-1111",
-        "city": "Calumet",
-    }
-    merged, _log = dedup_families([late, other, early], cfg)
-    assert len(merged) == 2
-    survivor = next(row for row in merged if row["primary_email"] == "a@x.com")
-    assert survivor["phone"] == "(906) 555-0000"  # coalesced from later row
-    assert survivor["city"] == "Hancock"
-    assert survivor["created"] == "2026-01-01T00:00:00Z"  # earliest timestamp
-
-
-def test_dedup_families_logs_conflict(cfg: Config, caplog) -> None:
-    """Conflicting non-null values keep the earliest and log a warning (§5.4)."""
-    early = {
-        "zite_record_id": "r1",
-        "created": "2026-01-01T00:00:00Z",
-        "primary_email": "a@x.com",
-        "city": "Hancock",
-    }
-    late = {
-        "zite_record_id": "r2",
-        "created": "2026-01-02T00:00:00Z",
-        "primary_email": "a@x.com",
-        "city": "Calumet",
-    }
-    with caplog.at_level("WARNING", logger="ccat.acquire"):
-        merged, log = dedup_families([late, early], cfg)
-    assert merged[0]["city"] == "Hancock"
-    assert any("dedup conflict" in message for message in caplog.messages)
-    # the log row records the conflict and both records (§5.4)
-    assert len(log) == 1
-    assert log[0]["primary_email"] == "a@x.com"
-    assert log[0]["kept_zite_record_id"] == "r1"
-    assert log[0]["duplicate_zite_record_id"] == "r2"
-    assert log[0]["conflict_columns"] == "city"
-    assert (
-        log[0]["conflict_details"]
-        == "city: kept 'Hancock' / duplicate 'Calumet'"
-    )
-    assert json.loads(log[0]["kept_record"])["city"] == "Hancock"
-    assert json.loads(log[0]["duplicate_record"])["city"] == "Calumet"
-
-
-def test_dedup_children_keeps_most_recent(cfg: Config) -> None:
-    """Child dedup keeps the latest submission per family + name (§5.4)."""
-    early = {
-        "zite_record_id": "r1",
-        "created": "2026-01-01T00:00:00Z",
-        "primary_email": "a@x.com",
-        "first_name": "Kiddo",
-        "dob": "2018-05-10",
-        "need_1": "winter coat",
-    }
-    late = {
-        "zite_record_id": "r2",
-        "created": "2026-01-02T00:00:00Z",
-        "primary_email": "a@x.com",
-        "first_name": "Kiddo",
-        "dob": "2018-05-10",
-        "need_1": "winter coat, mittens",
-    }
-    other = {
-        "zite_record_id": "r3",
-        "created": "2026-01-03T00:00:00Z",
-        "primary_email": "a@x.com",
-        "first_name": "Sibling",
-        "dob": "2016-03-01",
-        "need_1": "hat",
-    }
-    merged, log = dedup_children([early, late, other], cfg)
-    assert sorted(row["zite_record_id"] for row in merged) == ["r2", "r3"]
-    kept = next(row for row in merged if row["zite_record_id"] == "r2")
-    assert kept["need_1"] == "winter coat, mittens"  # latest entry as-is
-    assert len(log) == 1
-    assert log[0]["sheet"] == "child"
-    assert log[0]["primary_email"] == "a@x.com"
-    assert log[0]["kept_zite_record_id"] == "r2"
-    assert log[0]["kept_created"] == "2026-01-02T00:00:00Z"
-    assert log[0]["duplicate_zite_record_id"] == "r1"
-    assert log[0]["duplicate_created"] == "2026-01-01T00:00:00Z"
-    assert log[0]["conflict_columns"] == "need_1"
-    assert json.loads(log[0]["kept_record"])["need_1"] == (
-        "winter coat, mittens"
-    )
-    assert json.loads(log[0]["duplicate_record"])["need_1"] == "winter coat"
-
-
-def test_dedup_children_never_merges_distinct_or_unkeyed(cfg: Config) -> None:
-    """Distinct children and unkeyed rows stay separate (§5.4)."""
-    rows = [
-        {  # same name, different family -> kept apart
-            "zite_record_id": "r1",
-            "created": "2026-01-01T00:00:00Z",
-            "primary_email": "a@x.com",
-            "first_name": "Kiddo",
-        },
-        {
-            "zite_record_id": "r2",
-            "created": "2026-01-02T00:00:00Z",
-            "primary_email": "b@x.com",
-            "first_name": "Kiddo",
-        },
-        {  # different name, same family -> kept apart
-            "zite_record_id": "r3",
-            "created": "2026-01-03T00:00:00Z",
-            "primary_email": "a@x.com",
-            "first_name": "Sibling",
-        },
-        {  # no email -> never merged
-            "zite_record_id": "r4",
-            "created": "2026-01-04T00:00:00Z",
-            "primary_email": None,
-            "first_name": "Kiddo",
-        },
-        {  # no name -> never merged
-            "zite_record_id": "r5",
-            "created": "2026-01-05T00:00:00Z",
-            "primary_email": "a@x.com",
-            "first_name": None,
-        },
-    ]
-    merged, log = dedup_children(rows, cfg)
-    assert len(merged) == 5
-    assert log == []
-
-
-def test_process_table_dedups_duplicate_child(cfg: Config) -> None:
-    """Same child submitted twice in one family: latest entry survives."""
-    children = zite_frame(
-        CHILD_BASE,
-        [
-            {"id": "rec_c1", "Need #1": "winter coat"},
-            {
-                "id": "rec_c2",
-                "Creation Time": "2026-02-02T09:00:00Z",
-                "Need #1": "winter coat, mittens",
-            },
-        ],
-    )
-    kept, rejected, dedup = process_table(children, "child", cfg)
-    assert rejected == []
-    assert len(kept) == 1
-    assert kept[0]["zite_record_id"] == "rec_c2"
-    assert kept[0]["need_1"] == "winter coat, mittens"
-    assert len(dedup) == 1
-    assert dedup[0]["sheet"] == "child"
-    assert dedup[0]["duplicate_zite_record_id"] == "rec_c1"
+def test_dob_gap_months_calendar_arithmetic() -> None:
+    """Completed months are day-of-month aware; equal dates yield 0 (§6.6)."""
+    assert _dob_gap_months(date(2020, 1, 15), date(2020, 10, 16)) == 9
+    assert _dob_gap_months(date(2020, 1, 15), date(2020, 10, 14)) == 8
+    assert _dob_gap_months(date(2020, 1, 31), date(2020, 2, 1)) == 0
+    assert _dob_gap_months(date(2020, 1, 15), date(2020, 1, 15)) == 0
+    assert _dob_gap_months(date(2019, 1, 15), date(2020, 1, 15)) == 12
 
 
 def _dob_check_child(
@@ -527,7 +222,7 @@ def _dob_check_child(
     angel_id: str | None = None,
     first_name: str = "Kiddo",
 ) -> dict[str, Any]:
-    """One child row for sibling-dob checks (§5.6)."""
+    """One child row for sibling-dob checks (§6.6)."""
     return {
         "zite_record_id": record_id,
         "family_id": family_id,
@@ -538,17 +233,8 @@ def _dob_check_child(
     }
 
 
-def test_dob_gap_months_calendar_arithmetic() -> None:
-    """Completed months are day-of-month aware; equal dates yield 0 (§5.6)."""
-    assert _dob_gap_months(date(2020, 1, 15), date(2020, 10, 16)) == 9
-    assert _dob_gap_months(date(2020, 1, 15), date(2020, 10, 14)) == 8
-    assert _dob_gap_months(date(2020, 1, 31), date(2020, 2, 1)) == 0
-    assert _dob_gap_months(date(2020, 1, 15), date(2020, 1, 15)) == 0
-    assert _dob_gap_months(date(2019, 1, 15), date(2020, 1, 15)) == 12
-
-
 def test_sibling_dob_conflicts_flags_close_pairs(cfg: Config) -> None:
-    """Same-family pairs <=9 months apart are logged once, in order (§5.6)."""
+    """Same-family pairs <=9 months apart are logged once, in order (§6.6)."""
     rows = [
         _dob_check_child("c1", 1, "2020-01-15", "1A", "Kiddo One"),
         _dob_check_child("c2", 1, "2020-08-20", "1B", "Kiddo Two"),
@@ -577,7 +263,7 @@ def test_sibling_dob_conflicts_flags_close_pairs(cfg: Config) -> None:
 
 
 def test_sibling_dob_conflicts_flags_twins(cfg: Config) -> None:
-    """Same-date siblings (twins) are recorded with a 0-month gap (§5.6)."""
+    """Same-date siblings (twins) are recorded with a 0-month gap (§6.6)."""
     rows = [
         _dob_check_child("t1", 1, "2020-05-01", "1A", "Twin One"),
         _dob_check_child("t2", 1, "2020-05-01", "1B", "Twin Two"),
@@ -591,41 +277,44 @@ def test_sibling_dob_conflicts_flags_twins(cfg: Config) -> None:
 
 
 def test_sibling_dob_conflicts_never_repeats_a_pair(cfg: Config) -> None:
-    """A pair reaching the check twice logs once, in one direction."""
+    """A duplicate submission of the same child never forms a pair (§6.6)."""
     rows = [
         _dob_check_child("c1", 1, "2020-01-15", "1A", "Kiddo One"),
         _dob_check_child("c2", 1, "2020-08-20", "1B", "Kiddo Two"),
-        # Duplicated submission of the same child.
-        _dob_check_child("c2", 1, "2020-08-20", "1B", "Kiddo Two"),
+        # Duplicated submission of the same child (same email + name).
+        _dob_check_child("c2", 1, "2020-08-20", None, "Kiddo Two"),
     ]
     log = sibling_dob_conflicts(rows, cfg)
-    unordered = [
-        frozenset(
-            (row["child_a_zite_record_id"], row["child_b_zite_record_id"])
-        )
+    assert [
+        (row["child_a_zite_record_id"], row["child_b_zite_record_id"])
         for row in log
-    ]
-    assert len(log) == len(set(unordered)) == 1
-    assert log[0]["child_a_zite_record_id"] == "c1"
-    assert log[0]["child_b_zite_record_id"] == "c2"
+    ] == [("c1", "c2")]
 
 
 def test_sibling_dob_conflicts_day_threshold_boundary(cfg: Config) -> None:
-    """Pairs at exactly the configured threshold flag; one day more does not (§5.6)."""
+    """Pairs at exactly the configured threshold flag; one day more does not (§6.6)."""
     from datetime import timedelta
 
     base = date(2020, 1, 15)
-    max_days = cfg.acquire.sibling_dob_max_gap_days
+    max_days = cfg.screening.sibling_dob_max_gap_days
     rows = [
         # family 1: exactly at the threshold -> flagged
-        _dob_check_child("b1", 1, base.isoformat(), "1A"),
+        _dob_check_child("b1", 1, base.isoformat(), "1A", "Boundary One"),
         _dob_check_child(
-            "b2", 1, (base + timedelta(days=max_days)).isoformat(), "1B"
+            "b2",
+            1,
+            (base + timedelta(days=max_days)).isoformat(),
+            "1B",
+            "Boundary Two",
         ),
         # family 2: one day past the threshold -> not flagged
-        _dob_check_child("c1", 2, base.isoformat(), "2A"),
+        _dob_check_child("c1", 2, base.isoformat(), "2A", "Past One"),
         _dob_check_child(
-            "c2", 2, (base + timedelta(days=max_days + 1)).isoformat(), "2B"
+            "c2",
+            2,
+            (base + timedelta(days=max_days + 1)).isoformat(),
+            "2B",
+            "Past Two",
         ),
     ]
     log = sibling_dob_conflicts(rows, cfg)
@@ -638,19 +327,17 @@ def test_sibling_dob_conflicts_day_threshold_boundary(cfg: Config) -> None:
 
 
 def test_sibling_dob_conflicts_threshold_from_config(cfg: Config) -> None:
-    """A custom ``acquire.sibling_dob_max_gap_days`` changes the flags (§5.6)."""
+    """A custom ``screening.sibling_dob_max_gap_days`` changes the flags (§6.6)."""
     from datetime import timedelta
 
-    from ccat.config import AcquireSpec
-
     tight = cfg.model_copy(
-        update={"acquire": AcquireSpec(sibling_dob_max_gap_days=100)}
+        update={"screening": ScreeningSpec(sibling_dob_max_gap_days=100)}
     )
     base = date(2020, 1, 15)
     rows = [
-        _dob_check_child("b1", 1, base.isoformat(), "1A"),
+        _dob_check_child("b1", 1, base.isoformat(), "1A", "Gap One"),
         _dob_check_child(
-            "b2", 1, (base + timedelta(days=150)).isoformat(), "1B"
+            "b2", 1, (base + timedelta(days=150)).isoformat(), "1B", "Gap Two"
         ),
     ]
     assert len(sibling_dob_conflicts(rows, cfg)) == 1  # 150 <= 274 default
@@ -658,7 +345,7 @@ def test_sibling_dob_conflicts_threshold_from_config(cfg: Config) -> None:
 
 
 def test_index_to_letters() -> None:
-    """Letters run A..Z then AA, AB (§5.5)."""
+    """Letters run A..Z then AA, AB (§6.5)."""
     assert index_to_letters(0) == "A"
     assert index_to_letters(25) == "Z"
     assert index_to_letters(26) == "AA"
@@ -672,7 +359,7 @@ def test_compute_age_at_xmas(cfg: Config) -> None:
 
 
 def test_assign_family_ids_orders_by_created_then_email(cfg: Config) -> None:
-    """family_id is sequential by created then primary_email (§5.5)."""
+    """family_id is sequential by group (earliest created then email) (§6.5)."""
     rows = [
         {"created": "2026-01-02T00:00:00+00:00", "primary_email": "a@x.com"},
         {"created": "2026-01-01T00:00:00+00:00", "primary_email": "z@x.com"},
@@ -687,8 +374,33 @@ def test_assign_family_ids_orders_by_created_then_email(cfg: Config) -> None:
     ]
 
 
+def test_assign_family_ids_shares_ids_across_duplicates(cfg: Config) -> None:
+    """Duplicate family submissions share one family_id; nothing merges (§6.5)."""
+    rows = [
+        {
+            "zite_record_id": "f1",
+            "created": "2026-01-01T00:00:00+00:00",
+            "primary_email": "a@x.com",
+        },
+        {
+            "zite_record_id": "f2",
+            "created": "2026-01-02T00:00:00+00:00",
+            "primary_email": "a@x.com",
+        },
+        {
+            "zite_record_id": "f3",
+            "created": "2026-01-03T00:00:00+00:00",
+            "primary_email": "b@x.com",
+        },
+    ]
+    result = assign_family_ids(rows)
+    ids = {row["zite_record_id"]: row["family_id"] for row in result}
+    assert ids["f1"] == ids["f2"] == 1
+    assert ids["f3"] == 2
+
+
 def test_assign_sponsor_ids_orders_by_created_then_email(cfg: Config) -> None:
-    """sponsor_id is sequential by created then email (§5.5)."""
+    """sponsor_id is sequential by created then email (§6.5)."""
     rows = [
         {
             "created": "2026-01-01T00:00:00+00:00",
@@ -708,26 +420,36 @@ def test_assign_sponsor_ids_orders_by_created_then_email(cfg: Config) -> None:
 
 
 def child_row(
-    record_id: str, email: str, dob: str, created: str
+    record_id: str,
+    email: str,
+    dob: str,
+    created: str,
+    first_name: str | None = None,
 ) -> dict[str, Any]:
-    """Build a post-validation child row for ID assignment tests."""
+    """Build a cleaned child row for ID assignment tests.
+
+    The first name defaults to the record id, so distinct ids are
+    distinct children; duplicate submissions pass an explicit shared
+    name.
+    """
     return {
         "zite_record_id": record_id,
         "primary_email": email,
+        "first_name": first_name or record_id,
         "dob": dob,
         "created": created,
     }
 
 
 def test_assign_angel_ids_oldest_gets_a(cfg: Config) -> None:
-    """Letters go to children by descending age (§5.5)."""
+    """Letters go to children by descending age (§6.5)."""
     families = [{"family_id": 1, "primary_email": "f@x.com"}]
     children = [
         child_row("c1", "f@x.com", "2016-01-01", "2026-01-01T00:00:00+00:00"),
         child_row("c2", "f@x.com", "2019-01-01", "2026-01-02T00:00:00+00:00"),
         child_row("c3", "f@x.com", "2012-01-01", "2026-01-03T00:00:00+00:00"),
     ]
-    result = assign_angel_ids(children, families, cfg)
+    result = assign_angel_ids(children, cfg, families)
     by_id = {row["zite_record_id"]: row for row in result}
     assert by_id["c3"]["angel_id"] == "1A"  # oldest
     assert by_id["c1"]["angel_id"] == "1B"
@@ -736,7 +458,7 @@ def test_assign_angel_ids_oldest_gets_a(cfg: Config) -> None:
 
 
 def test_assign_angel_ids_age_tie_breaks_by_created(cfg: Config) -> None:
-    """Equal ages tie-break by earliest created then dob (§5.5)."""
+    """Equal ages tie-break by earliest created then dob (§6.5)."""
     families = [{"family_id": 1, "primary_email": "f@x.com"}]
     children = [
         child_row(
@@ -746,14 +468,14 @@ def test_assign_angel_ids_age_tie_breaks_by_created(cfg: Config) -> None:
             "c_early", "f@x.com", "2018-05-10", "2026-01-01T00:00:00+00:00"
         ),
     ]
-    result = assign_angel_ids(children, families, cfg)
+    result = assign_angel_ids(children, cfg, families)
     by_id = {row["zite_record_id"]: row for row in result}
     assert by_id["c_early"]["angel_id"] == "1A"
     assert by_id["c_late"]["angel_id"] == "1B"
 
 
 def test_assign_angel_ids_orphans_kept_with_null_ids(cfg: Config) -> None:
-    """Orphaned children stay in raw_child with null angel_id (§5.5)."""
+    """Orphaned children stay with null angel_id (§6.5)."""
     families = [{"family_id": 1, "primary_email": "f@x.com"}]
     children = [
         child_row("c1", "f@x.com", "2016-01-01", "2026-01-01T00:00:00+00:00"),
@@ -761,13 +483,39 @@ def test_assign_angel_ids_orphans_kept_with_null_ids(cfg: Config) -> None:
             "orphan", "missing@x.com", "2015-01-01", "2026-01-01T00:00:00+00:00"
         ),
     ]
-    result = assign_angel_ids(children, families, cfg)
+    result = assign_angel_ids(children, cfg, families)
     orphan = next(row for row in result if row["zite_record_id"] == "orphan")
     assert orphan["angel_id"] is None
     assert orphan["family_id"] is None
     assert orphan in result  # kept, not dropped
     linked = next(row for row in result if row["zite_record_id"] == "c1")
     assert linked["angel_id"] == "1A"
+
+
+def test_assign_angel_ids_duplicate_keeps_latest_only(cfg: Config) -> None:
+    """Duplicate child submissions: only the latest keeps an angel_id (§6.5)."""
+    families = [{"family_id": 1, "primary_email": "f@x.com"}]
+    children = [
+        child_row(
+            "c_early",
+            "f@x.com",
+            "2016-01-01",
+            "2026-01-01T00:00:00+00:00",
+            "Kiddo",
+        ),
+        child_row(
+            "c_late",
+            "f@x.com",
+            "2016-01-01",
+            "2026-01-02T00:00:00+00:00",
+            "Kiddo",
+        ),
+    ]
+    result = assign_angel_ids(children, cfg, families)
+    by_id = {row["zite_record_id"]: row for row in result}
+    assert by_id["c_late"]["angel_id"] == "1A"  # survivor: most recent
+    assert by_id["c_early"]["angel_id"] is None  # extra: flagged, letterless
+    assert by_id["c_early"]["family_id"] == 1  # still linked to the family
 
 
 def _acquire_cfg(tmp_path) -> Config:
@@ -788,7 +536,7 @@ def _acquire_cfg(tmp_path) -> Config:
 
 
 def _scenario_frames() -> dict[str, pl.DataFrame]:
-    """Three consistent Zite frames: 2 sponsors, 1 family, 4 children (1 orphan, 1 duplicate submission)."""
+    """Three Zite frames: 2 sponsors, 1 family submitted twice, 4 children (1 orphan, 1 duplicate submission)."""
     sponsor = zite_frame(
         SPONSOR_BASE,
         [
@@ -845,8 +593,7 @@ def _scenario_frames() -> dict[str, pl.DataFrame]:
                 "Date of Birth": "2014-03-01",
             },
             {
-                # duplicate submission of rec_c1 (same family + name);
-                # the most recent entry (rec_c4) must win (§5.4)
+                # duplicate submission of rec_c1 (same family + name)
                 "id": "rec_c4",
                 "Creation Time": "2026-02-03T09:00:00Z",
                 "Need #1": "winter coat, mittens",
@@ -856,17 +603,14 @@ def _scenario_frames() -> dict[str, pl.DataFrame]:
     return {"sponsor": sponsor, "family": family, "child": child}
 
 
-def test_run_end_to_end(tmp_path, monkeypatch, caplog) -> None:
-    """Full acquire run writes raw sheets, IDs, and preserves final_* (§5.6)."""
-    import logging
-
+def test_run_writes_verbatim_raw_sheets(tmp_path, monkeypatch) -> None:
+    """Acquire only fetches: values untouched, no derived columns (§5)."""
     cfg = _acquire_cfg(tmp_path)
     frames = _scenario_frames()
     monkeypatch.setattr(
         acquire.zite, "get_table_data", lambda ref: frames[ref.split("::")[1]]
     )
-    with caplog.at_level(logging.WARNING, logger="ccat.acquire"):
-        run(cfg)
+    run(cfg)
     raw_sponsor = read_sheet(cfg.excel_file, "raw_sponsor")
     raw_family = read_sheet(cfg.excel_file, "raw_family")
     raw_child = read_sheet(cfg.excel_file, "raw_child")
@@ -875,179 +619,69 @@ def test_run_end_to_end(tmp_path, monkeypatch, caplog) -> None:
         and raw_family is not None
         and raw_child is not None
     )
-    # sponsor_id ordered by created, not by pull order
-    assert raw_sponsor["sponsor_id"].to_list() == [1, 2]
-    assert raw_sponsor["email"].to_list() == [
-        "aaa@example.com",
-        "zzz@example.com",
+    # verbatim: no cleaning, no defaults, no derived columns
+    assert "sponsor_id" not in raw_sponsor.columns
+    assert "family_id" not in raw_family.columns
+    assert "angel_id" not in raw_child.columns
+    assert raw_sponsor["num_children"].to_list() == [2, 2]  # sheet dtype only
+    assert raw_sponsor["age_preference"].to_list() == [None, None]
+    # every submission survives -- duplicates included
+    assert raw_family["zite_record_id"].to_list() == ["rec_f1", "rec_f2"]
+    assert raw_child["zite_record_id"].to_list() == [
+        "rec_c1",
+        "rec_c2",
+        "rec_c3",
+        "rec_c4",
     ]
-    # family dedup: one survivor, phone coalesced from the later duplicate
-    assert raw_family.height == 1
-    assert raw_family["phone"].to_list() == ["(906) 555-9876"]
-    # dedup_log records the merged family duplicate (§5.4) and the
-    # dropped child duplicate (§5.4b)
-    dedup_log = read_sheet(cfg.excel_file, "dedup_log")
-    assert dedup_log is not None and dedup_log.height == 2
-    log_row = dedup_log.to_dicts()[0]
-    assert log_row["sheet"] == "family"
-    assert log_row["primary_email"] == "fam@example.com"
-    assert log_row["kept_zite_record_id"] == "rec_f1"
-    assert log_row["duplicate_zite_record_id"] == "rec_f2"
-    # the phone was coalesced (kept null), not a conflict (empty cells
-    # read back as null from xlsx)
-    assert not log_row["conflict_columns"]
-    assert not log_row["conflict_details"]
-    assert json.loads(log_row["duplicate_record"])["phone"] == "(906) 555-9876"
-    child_log_row = dedup_log.to_dicts()[1]
-    assert child_log_row["sheet"] == "child"
-    assert child_log_row["primary_email"] == "fam@example.com"
-    assert child_log_row["kept_zite_record_id"] == "rec_c4"
-    assert child_log_row["duplicate_zite_record_id"] == "rec_c1"
-    assert json.loads(child_log_row["kept_record"])["need_1"] == (
-        "winter coat, mittens"
-    )
-    assert json.loads(child_log_row["duplicate_record"])["need_1"] == (
-        "winter coat"
-    )
-    # children: the kept "kiddo" (rec_c4, age 8) is older than "sibling"
-    # (age 7), so it takes 1A; the orphan keeps null ids.  Rows are
-    # ordered by family (age-descending), orphans last.
-    assert raw_child["angel_id"].to_list() == ["1A", "1B", None]
-    assert raw_child["age_at_xmas"].to_list() == [8, 7, 12]
-    # age_reported mismatch logged for c3 (reported 8, computed 12)
-    assert any("age mismatch" in m for m in caplog.messages)
-    # orphan logged
-    assert any("orphaned child" in m for m in caplog.messages)
+    assert set(raw_child.columns) == set(cfg.tables["child"].columns)
 
 
-def test_run_writes_dedup_log_with_conflicts(tmp_path, monkeypatch) -> None:
-    """dedup_log records duplicates, conflicts, and raw contents (§5.4)."""
+def test_raw_frame_serializes_structured_cells(cfg: Config) -> None:
+    """Structured Zite cells land verbatim as JSON strings (§5.1)."""
+    source = {
+        "type": "form_submission",
+        "sessionId": "36bdfea1-bf44-4599-a1ab-536df1ad1597",
+        "flowPublicId": "t5gReH972fus",
+    }
+    rows = [
+        {"zite_record_id": "r1", "source": source},
+        {"zite_record_id": "r2", "source": None},
+    ]
+    frame = acquire._raw_frame(rows, "sponsor", cfg)
+    assert frame["source"].to_list() == [
+        json.dumps(
+            source, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ),
+        None,
+    ]
+
+
+def test_raw_frame_keeps_uncastable_columns_verbatim(cfg: Config) -> None:
+    """Columns holding non-castable values keep the verbatim text (§5.1)."""
+    rows = [
+        {"zite_record_id": "r1", "age_reported": "2 turning 3"},
+        {"zite_record_id": "r2", "age_reported": "4"},
+    ]
+    frame = acquire._raw_frame(rows, "child", cfg)
+    assert frame["age_reported"].dtype == pl.String
+    assert frame["age_reported"].to_list() == ["2 turning 3", "4"]
+
+
+def test_run_writes_no_log_sheets(tmp_path, monkeypatch) -> None:
+    """No dedup/duplicate or DOB log sheets exist after acquire (§5)."""
     cfg = _acquire_cfg(tmp_path)
-    sponsor = zite_frame(
-        SPONSOR_BASE,
-        [{"id": "rec_s1", "createdAt": "2026-01-01T10:00:00Z"}],
-    )
-    family = zite_frame(
-        FAMILY_BASE,
-        [
-            {
-                "id": "rec_f1",
-                "createdAt": "2026-01-05T10:00:00Z",
-                "Created time": "2026-01-05T10:00:00Z",
-                "Phone Number": "(906) 555-1111",
-                "City": "Hancock",
-            },
-            {
-                "id": "rec_f2",
-                "createdAt": "2026-01-06T10:00:00Z",
-                "Created time": "2026-01-06T10:00:00Z",
-                "Phone Number": "(906) 555-2222",
-                "City": "Calumet",
-            },
-        ],
-    )
-    child = zite_frame(
-        CHILD_BASE,
-        [
-            {
-                "id": "rec_c1",
-                "Primary Email": "fam@example.com",
-                "Date of Birth": "2016-03-01",
-                "Age at Christmas 2026": "10",
-            }
-        ],
-    )
-    frames = {"sponsor": sponsor, "family": family, "child": child}
+    frames = _scenario_frames()
     monkeypatch.setattr(
         acquire.zite, "get_table_data", lambda ref: frames[ref.split("::")[1]]
     )
     run(cfg)
-    dedup_log = read_sheet(cfg.excel_file, "dedup_log")
-    assert dedup_log is not None and dedup_log.height == 1
-    log_row = dedup_log.to_dicts()[0]
-    assert log_row["sheet"] == "family"
-    assert log_row["primary_email"] == "fam@example.com"
-    assert log_row["kept_zite_record_id"] == "rec_f1"
-    assert log_row["kept_created"] == "2026-01-05T10:00:00+00:00"
-    assert log_row["duplicate_zite_record_id"] == "rec_f2"
-    assert log_row["duplicate_created"] == "2026-01-06T10:00:00+00:00"
-    assert log_row["conflict_columns"] == "phone,city"
-    assert log_row["conflict_details"] == (
-        "phone: kept '(906) 555-1111' / duplicate '(906) 555-2222';"
-        " city: kept 'Hancock' / duplicate 'Calumet'"
-    )
-    assert json.loads(log_row["kept_record"])["city"] == "Hancock"
-    assert json.loads(log_row["duplicate_record"])["phone"] == "(906) 555-2222"
-    # raw_family keeps the merged survivor with the earliest values
-    raw_family = read_sheet(cfg.excel_file, "raw_family")
-    assert raw_family is not None and raw_family.height == 1
-    assert raw_family["phone"].to_list() == ["(906) 555-1111"]
-    assert raw_family["city"].to_list() == ["Hancock"]
-
-
-def test_run_writes_dob_conflict_log(tmp_path, monkeypatch) -> None:
-    """dob_conflict_log records same-family children born <=9 months apart (§5.6)."""
-    cfg = _acquire_cfg(tmp_path)
-    sponsor = zite_frame(
-        SPONSOR_BASE,
-        [{"id": "rec_s1", "createdAt": "2026-01-01T10:00:00Z"}],
-    )
-    family = zite_frame(
-        FAMILY_BASE,
-        [{"id": "rec_f1", "createdAt": "2026-01-05T10:00:00Z"}],
-    )
-    child = zite_frame(
-        CHILD_BASE,
-        [
-            {
-                "id": "rec_c1",
-                "Primary Email": "fam@example.com",
-                "First Name": "older kiddo",
-                "Date of Birth": "2020-01-15",
-                "Age at Christmas 2026": "6",
-            },
-            {
-                "id": "rec_c2",
-                "Primary Email": "fam@example.com",
-                "First Name": "younger kiddo",
-                "Date of Birth": "2020-08-20",
-                "Age at Christmas 2026": "6",
-            },
-            {
-                "id": "rec_c3",
-                "Primary Email": "fam@example.com",
-                "First Name": "distant kiddo",
-                "Date of Birth": "2022-03-01",
-                "Age at Christmas 2026": "4",
-            },
-        ],
-    )
-    frames = {"sponsor": sponsor, "family": family, "child": child}
-    monkeypatch.setattr(
-        acquire.zite, "get_table_data", lambda ref: frames[ref.split("::")[1]]
-    )
-    run(cfg)
-    dob_log = read_sheet(cfg.excel_file, "dob_conflict_log")
-    assert dob_log is not None and dob_log.height == 1
-    log_row = dob_log.to_dicts()[0]
-    assert log_row["family_id"] == 1
-    assert log_row["primary_email"] == "fam@example.com"
-    assert log_row["child_a_zite_record_id"] == "rec_c1"
-    assert log_row["child_a_angel_id"] == "1A"
-    assert log_row["child_a_first_name"] == "Older Kiddo"
-    assert log_row["child_a_dob"] == "2020-01-15"
-    assert log_row["child_b_zite_record_id"] == "rec_c2"
-    assert log_row["child_b_angel_id"] == "1B"
-    assert log_row["child_b_dob"] == "2020-08-20"
-    assert log_row["gap_months"] == 7
-    assert log_row["gap_days"] == 218
-    # the distant sibling produced no row; raw_child still holds all three
-    raw_child = read_sheet(cfg.excel_file, "raw_child")
-    assert raw_child is not None and raw_child.height == 3
+    assert read_sheet(cfg.excel_file, "duplicate_log") is None
+    assert read_sheet(cfg.excel_file, "dedup_log") is None
+    assert read_sheet(cfg.excel_file, "dob_conflict_log") is None
 
 
 def test_run_is_deterministic_on_rerun(tmp_path, monkeypatch) -> None:
-    """Re-running with the same data produces stable IDs (§5.6)."""
+    """Re-running with the same data produces identical sheets (§5)."""
     cfg = _acquire_cfg(tmp_path)
     frames = _scenario_frames()
     monkeypatch.setattr(
@@ -1062,9 +696,13 @@ def test_run_is_deterministic_on_rerun(tmp_path, monkeypatch) -> None:
 
 
 def test_run_never_touches_final_sheets(tmp_path, monkeypatch) -> None:
-    """final_child is byte-identical before and after a run (§5.6)."""
+    """final_child is byte-identical before and after a run (§5)."""
     cfg = _acquire_cfg(tmp_path)
-    sentinel = pl.DataFrame({"zite_record_id": ["x"], "audited": [True]})
+    from ccat.audit.store import build_final_frame
+
+    sentinel = build_final_frame(
+        "child", [{"zite_record_id": "x", "status": "audited"}]
+    )
     write_sheets(
         cfg.excel_file,
         "audit",

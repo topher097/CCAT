@@ -1,103 +1,81 @@
-"""CCAT gift-giving matching system.
+"""CCAT gift-giving pipeline and workbook-migration CLI.
 
-Main dispatch for the ``ccat`` CLI (pipeline_architecture.md §2): five
-modules runnable independently, each taking an optional ``--config`` path
-(default ``config/ccat_2026.json``).
+The persistent workbook has one editable truth per entity: ``final_sponsor``,
+``final_family``, and ``final_child``. ``raw_*`` sheets are replaceable Zite
+source snapshots; operational logs are separate process history. No active
+submissions, adjudication, or final-projection layers exist.
 
-    ccat acquire  [--config PATH]
-    ccat screen   [--config PATH] [--redo ZITE_RECORD_ID] [--test]
-                  [--overwrite]
-    ccat audit    [--config PATH] [--test] [--overwrite] [--restart]
-                  [--hide-completed]
-    ccat match    [--config PATH] [--test] [--overwrite] [--skip-match]
-    ccat generate [--config PATH] [--test] [--overwrite]
-    ccat stats    [--config PATH] [--raw]
-    ccat clarify  [--config PATH] [--generate] [--overwrite]
-    ccat clarify-export [--config PATH] [--output PATH]
+Commands (all accept ``--config`` where applicable)::
 
-The ``--test`` flag (screen/audit/match/generate) stops the run after the
-first full family (screening: only the first family's children are
-screened; audit: the queue is limited to the first family and the server
-stops once it is fully audited; match: only the first sponsor in phase
-order is matched; generate: only the first info sheet PDF is generated).
+    ccat acquire
+    ccat screen [--redo ID] [--test] [--overwrite]
+                [--skip-email-check] [--skip-address-check]
+    ccat audit [--test] [--restart]
+    ccat match [--test] [--overwrite] [--skip-match]
+    ccat generate [--test] [--overwrite] [--sponsor ID] [--max-workers N]
+    ccat stats [--raw]
+    ccat clarify [--generate] [--overwrite]
+    ccat clarify-export [--output PATH]
+    ccat audit-migrate --from PATH [--force]
+    ccat consolidate-migrate --from PATH --output PATH
+                             [--force --backup PATH] [--report PATH]
 
-The ``--overwrite`` flag (screen/audit/match/generate) ignores previously
-generated output: screening replaces every ``adj_child`` row; the audit
-tool re-queues audited children and allows re-saving frozen rows;
-matchmaking ignores the ``audited`` column and replaces its outputs in
-place instead of archiving; info sheet generation re-renders every PDF
-regardless of the ``generated_info_sheet`` column.
+``acquire`` replaces only raw sheets. ``screen`` cleans all raw records in
+memory, appends new persistent entities, refreshes global diagnostics and
+validation logs, and AI-screens only uncompleted children. ``--redo`` and
+``--overwrite`` are deliberate re-evaluation controls, not blanket data
+replacement: human edits and module-owned values retain their protections.
 
-The audit tool's ``--restart`` flag stops any currently running audit
-tool process (e.g. a stale server still holding the port) before
-starting.  With ``--hide-completed`` the queue shows only children
-that have no ``final_child`` row at all (children saved earlier —
-audited or needing clarification — are hidden).
+``audit`` is the sole interactive entity editor. Full final rows retain
+ignored, orphaned, duplicate, and raw-missing entities; output eligibility is
+a separate in-memory filter. Match owns assignment fields, while generate
+owns ``generated_info_sheet`` after actual PDF completion. Timestamped match
+archives preserve previous assignments. Sponsor packets are built by the
+generate command after required angel PDFs exist.
 
-``ccat match --skip-match`` skips the automatic assignment algorithm
-and only reconciles ``final_family`` with the current ``raw_family``
-(previously assigned sponsors carry over; new families get rows with
-no sponsor) so downstream modules see every current family.
+``stats --raw`` retains its CLI spelling for compatibility but means ephemeral
+locally cleaned/ID-assigned preparation, not persisted submissions and not a
+second review of raw source text. Clarification HTML/JSON drafts, contact
+state, and CSV exports remain external to workbook consolidation.
 
-``ccat generate`` renders the child information sheet PDFs, then —
-once every sponsored angel's sheet exists — builds one sponsor packet
-directory per assigned sponsor under ``sponsor_packets.output_dir``
-(default ``output/sponsor_packets``): an HTML email draft
-(personalized greeting plus a table of angel IDs, genders, ages, and
-drop-off locations) and the combined child information PDF, plus a
-copy of the sponsor instruction file.  Open the HTML in a browser and
-copy it into your email client for manual sending.
-
-``ccat stats`` renders a dated statistics report (daily admissions per
-pickup site, per-location table, gender/age distributions) as HTML and
-PDF into ``report.output_dir`` (default ``output/reports``).  With
-``--raw`` it reads ``raw_child``/``raw_family`` instead of the final
-sheets, so the report works before audit/match has run; sponsor counts
-are zero in that mode (``raw_family`` has no ``assigned_sponsor_id``).
-
-``ccat clarify`` serves a local NiceGUI web app with one card per
-family whose Angels carry a ``require_clarification`` note
-(module 7).  A per-family button generates a polite clarification
-email to the family's primary email — prose written by the configured
-LLM via the opencode SDK, wrapped in a paste-safe HTML template —
-shown in an editable copy dialog and saved under ``clarify.output_dir``
-(``family_<id>.html`` plus its editable ``family_<id>.json``
-companion).  Each card also tracks contact status ("Mark contacted"
-stamps the time, a "Reply received" switch records the answer),
-persisted in a JSON sidecar and merged into the CSV's ``contacted``,
-``contacted_at``, and ``replied`` columns.  The CSV copy
-(``clarify.clarifications_csv``) is refreshed on start and after
-every save/status change; its ``clarification_email_file`` column
-references each family's saved draft.  ``ccat clarify --generate``
-skips the server entirely and headlessly generates every missing
-family's draft; adding ``--overwrite`` regenerates existing drafts
-too.  ``--overwrite`` without ``--generate`` does nothing (the
-server starts normally).  ``ccat clarify-export`` only refreshes the
-CSV (no server, no generation), the successor of the old
-``scripts/find_clarification.py``.
+``audit-migrate`` bootstraps the old v1 format directly into persistent finals.
+``consolidate-migrate`` instead converts full v2 adj stores into a separate
+new workbook without changing its input. It validates schemas, row identities,
+all fields/controls, logs, reports, and age formulas/caches, then writes a JSON
+migration report. Existing output is refused unless ``--force`` is paired with
+an explicit readable ``--backup``. Production config cutover is always manual;
+rollback restores the original config and immutable input workbook.
 """
 
 import importlib
 import logging
+import os
 from pathlib import Path
 
 import fire
 
 from ccat.config import ConfigError, load_config
-from ccat.io import SheetOwnershipError, setup_logging
+from ccat.io import SheetOwnershipError, SheetSchemaError, setup_logging
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG = "config/ccat_2026.json"
+#: Default config path for every ``ccat`` command.  The
+#: ``DEFAULT_CONFIG`` environment variable overrides it (exported by
+#: ``.envrc``); the fallback is the original 2026 season config, so the
+#: repo default only changes when the user cuts over (audit arch §14
+#: Q1).
+DEFAULT_CONFIG = os.environ.get("DEFAULT_CONFIG", "config/ccat_2026.json")
 
 
 def _typed_errors() -> tuple[type[BaseException], ...]:
     """Collect the typed exceptions modules may raise (§11)."""
     from ccat.acquire import AcquisitionError
-    from ccat.audit.server import AuditError
+    from ccat.audit import AuditError
     from ccat.child_info_generate import InfoSheetError
     from ccat.clarify import ClarifyError
+    from ccat.consolidate import ConsolidationError
     from ccat.match import MatchError
+    from ccat.preparation import PreparationError
     from ccat.screening import ScreeningError
     from ccat.sponsor_packets import SponsorPacketError
     from ccat.stats import StatsError
@@ -109,6 +87,9 @@ def _typed_errors() -> tuple[type[BaseException], ...]:
         AuditError,
         ClarifyError,
         MatchError,
+        ConsolidationError,
+        PreparationError,
+        SheetSchemaError,
         InfoSheetError,
         SponsorPacketError,
         StatsError,
@@ -157,16 +138,21 @@ def _screen_cmd(
     redo: str | None = None,
     test: bool = False,
     overwrite: bool = False,
+    skip_email_check: bool = False,
+    skip_address_check: bool = False,
 ) -> None:
-    """Run module 2: AI screening (§6).
+    """Run module 2: pre-audit screening (§6).
 
     Args:
         config: Path to the JSON configuration file.
-        redo: Optional zite_record_id to re-screen, replacing its adj row.
+        redo: Optional current final-child zite_record_id to re-screen.
         test: Stop after the first full family (first family's children
-            only).
-        overwrite: Re-screen every child, replacing all existing
-            adj_child rows.
+            only are AI-screened).
+        overwrite: Re-screen every current child under the same human-edit
+            and module-owned-field protection as redo.
+        skip_email_check: Skip the ZeroBounce email deliverability
+            validation.
+        skip_address_check: Skip the Nominatim family-address validation.
     """
     _dispatch(
         "screen",
@@ -175,36 +161,100 @@ def _screen_cmd(
         redo=redo,
         test=test,
         overwrite=overwrite,
+        skip_email_check=skip_email_check,
+        skip_address_check=skip_address_check,
     )
 
 
 def _audit_cmd(
     config: str = DEFAULT_CONFIG,
     test: bool = False,
-    overwrite: bool = False,
     restart: bool = False,
-    hide_completed: bool = False,
 ) -> None:
-    """Run module 3: local human audit web tool (§7).
+    """Run module 3: local human audit web tool (§7 audit architecture).
 
     Args:
         config: Path to the JSON configuration file.
-        test: Stop after the first full family is audited.
-        overwrite: Ignore the audited column: audited children re-enter
-            the queue and frozen rows may be re-saved.
+        test: Limit every list to the first family (lowest family_id),
+            its children, and the first sponsor; the dashboard reflects
+            the reduced scope.
         restart: Stop any currently running audit tool process before
             starting.
-        hide_completed: Queue only children with no final_child row at
-            all; children saved earlier are hidden.
     """
     _dispatch(
         "audit",
         "audit.server:run",
         config,
         test=test,
-        overwrite=overwrite,
         restart=restart,
-        hide_completed=hide_completed,
+    )
+
+
+def _audit_migrate_cmd(config: str = DEFAULT_CONFIG, **kwargs: object) -> None:
+    """Bootstrap the v2 workbook from the old one (§11 audit arch).
+
+    Args:
+        config: Path to the **new** JSON configuration file (typically
+            ``config/ccat_2026_v2.json``).
+        kwargs: ``from`` (passed as ``--from``; the old workbook,
+            opened read-only) and the optional ``force`` flag that
+            re-creates persistent final sheets in a non-empty target.
+
+    Raises:
+        SystemExit: On unknown flags.
+    """
+    from_path = kwargs.pop("from", None)
+    if from_path is None:
+        from_path = kwargs.pop("from_path", None)
+    force = bool(kwargs.pop("force", False))
+    if kwargs:
+        raise SystemExit(f"unknown flags: {sorted(kwargs)}")
+    if not from_path:
+        raise SystemExit(
+            "audit-migrate requires --from PATH (the old workbook)"
+        )
+    _dispatch(
+        "audit-migrate",
+        "audit.migrate:run",
+        config,
+        from_path=str(from_path),
+        force=force,
+    )
+
+
+def _consolidate_migrate_cmd(
+    config: str = DEFAULT_CONFIG, **kwargs: object
+) -> None:
+    """Convert full legacy adj stores to a separate persistent-final workbook.
+
+    Args:
+        config: Season configuration, including Christmas formula context.
+        kwargs: Required ``from`` and ``output`` paths; optional ``force``,
+            required-existing ``backup`` when forcing, and ``report`` path.
+
+    Raises:
+        SystemExit: If required paths are absent or flags are unknown.
+    """
+    from_path = kwargs.pop("from", kwargs.pop("from_path", None))
+    output_path = kwargs.pop("output", kwargs.pop("output_path", None))
+    force = bool(kwargs.pop("force", False))
+    backup_path = kwargs.pop("backup", kwargs.pop("backup_path", None))
+    report_path = kwargs.pop("report", kwargs.pop("report_path", None))
+    if kwargs:
+        raise SystemExit(f"unknown flags: {sorted(kwargs)}")
+    if not from_path or not output_path:
+        raise SystemExit(
+            "consolidate-migrate requires --from PATH and --output PATH"
+        )
+    _dispatch(
+        "consolidate-migrate",
+        "consolidate:run",
+        config,
+        from_path=str(from_path),
+        output_path=str(output_path),
+        force=force,
+        backup_path=str(backup_path) if backup_path else None,
+        report_path=str(report_path) if report_path else None,
     )
 
 
@@ -219,16 +269,15 @@ def _match_cmd(
     Args:
         config: Path to the JSON configuration file.
         test: Stop after the first full sponsor is matched.
-        overwrite: Ignore the audited column and replace previous
-            final_family/final_sponsor/match_report in place instead of
-            archiving them.
-        skip_match: Reconcile final_family and final_sponsor with the
-            current raw rows without running the matching algorithm: every
-            family and sponsor gets a row, existing assignments carry
-            over, new ones get none.  prior_assigned_angel_ids propagates
-            to assigned_angel_ids and points the angel's family at that
-            sponsor in final_family; duplicate angel ids across sponsors
-            raise an error.  match_report is untouched.
+        overwrite: Replace previous final_family/final_sponsor/match_report
+            in place instead of archiving them. The audited-child
+            participation gate still applies.
+        skip_match: Reconcile assignment-owned columns in the persistent
+            family/sponsor stores without running matching. Existing
+            assignments carry over; prior_assigned_angel_ids propagates to
+            assigned_angel_ids and points the angel's family at that sponsor.
+            Duplicate angel ids across sponsors raise before writes.
+            match_report is untouched.
             Without skip_match the §8.5 reconciliation stays
             authoritative; prior angels only fill in families the
             matching left unassigned.
@@ -281,8 +330,9 @@ def _stats_cmd(config: str = DEFAULT_CONFIG, raw: bool = False) -> None:
 
     Args:
         config: Path to the JSON configuration file.
-        raw: Build the report from the raw sheets instead of the final
-            sheets.
+        raw: Build from ephemeral locally cleaned/ID-assigned preparation
+            instead of the eligible persistent-final population. No prepared
+            submission sheets are persisted.
     """
     _dispatch("stats", "stats:run", config, raw=raw)
 
@@ -336,6 +386,8 @@ def main() -> None:
             "acquire": _acquire_cmd,
             "screen": _screen_cmd,
             "audit": _audit_cmd,
+            "audit-migrate": _audit_migrate_cmd,
+            "consolidate-migrate": _consolidate_migrate_cmd,
             "match": _match_cmd,
             "generate": _generate_cmd,
             "stats": _stats_cmd,

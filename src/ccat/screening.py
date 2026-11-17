@@ -1,40 +1,65 @@
-"""Module 2 — AI screening (§6).
+"""Module 2 — local preparation and resumable AI screening.
 
-Adjudicates each child row with an LLM via the opencode python SDK, flags
-anomalies, and appends sparse rows to the ``adj_child`` sheet for
-zite_record_ids not already present.  The child's name is never passed to
-the LLM; ``zite_record_id`` is the sole identifier in the prompt (§6.2).
+Every run cleans all verbatim ``raw_*`` rows in memory, assigns/reconciles
+stable IDs, refreshes duplicate and sibling-DOB diagnostics, and performs
+only previously unlogged ZeroBounce/Nominatim checks. Prepared submissions
+are never persisted as a second entity store.
 
-Batch screening runs each child's LLM check on a
-``concurrent.futures.ThreadPoolExecutor`` -- the calls are I/O-bound, so
-threads scale them without GIL issues (same pattern as the pgi-s3
-transfers).  Each worker thread owns one opencode session so concurrent
-generates never share a conversation, and the shared tqdm progress bar
-advances once per child under a lock as futures complete.  Ctrl-C stops
-the run promptly: queued tasks are cancelled and abandoned in-flight
-calls die with their threads, while every row completed so far is
-already persisted (see below).
+The full ``final_*`` sheets are the durable truth. Genuinely new entities
+are seeded; existing rows receive only source-metadata, stable-linkage,
+machine-diagnostic, and computed-field merges. Human edits, audit controls,
+assignments, generation state, ignored/orphan rows, and raw-missing rows
+survive. New children start unscreened.
 
-``--redo`` re-screens one child; ``--overwrite`` re-screens every child,
-replacing all existing ``adj_child`` rows (§6.3).
+Ordinary AI work reads the final-child ``screened`` marker and skips completed
+rows. ``--redo`` and ``--overwrite`` deliberately clear only target markers
+before work, so malformed/failed/interrupted attempts remain retryable.
+Each successful result updates AI-eligible fields under the existing human-
+baseline protection and persists ``screened=True`` with the complete child
+row on the main thread. Prompts contain no names or contact information.
 """
 
 import json
 import logging
 import re
 import subprocess
+import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import polars as pl
 from polars._typing import PolarsDataType
 from pydantic import BaseModel, ConfigDict, field_validator
 from tqdm import tqdm
 
+from ccat.acquire import dob_conflict_log_frame
+from ccat.audit.store import (
+    FINAL_CHILD_COLUMNS,
+    CHILD_EDITABLE_COLUMNS,
+    CHILD_LINKAGE_COLUMNS,
+    ORPHAN_NOTE,
+    STATUS_NEEDS_CLARIFICATION,
+    STATUS_NEW,
+    as_bool,
+    _computed_age,
+    build_final_frame,
+    prepare_persistent_store,
+    reconcile_preparation,
+    write_final_rows,
+)
 from ccat.config import Config
-from ccat.io import read_sheet, read_sheet_or_empty, write_sheets
+from ccat.io import read_sheet, write_sheets
+from ccat.preparation import (
+    append_note,
+    dob_notes_by_child,
+    duplicate_log_frame,
+    duplicate_note,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +118,389 @@ def _require_opencode_v2() -> None:
         )
 
 
-#: adj_child columns (§6.3), in sheet order.
-ADJ_CHILD_COLUMNS = (
+# ---------------------------------------------------------------------------
+# Log-sheet schemas (§6).
+# ---------------------------------------------------------------------------
+
+
+#: Column schema of the ``duplicate_log`` sheet (§6.4): one row per
+#: flagged duplicate submission; nothing is ever merged or dropped.
+DUPLICATE_LOG_SCHEMA: dict[str, PolarsDataType] = {
+    "sheet": pl.String,
+    "group_key": pl.String,
+    "zite_record_id": pl.String,
+    "created": pl.String,
+    "survivor": pl.Boolean,
+    "conflict_columns": pl.String,
+    "conflict_details": pl.String,
+    "record": pl.String,
+}
+
+#: Column schema of the ``email_validation_log`` sheet (§6.7).
+EMAIL_VALIDATION_LOG_SCHEMA: dict[str, PolarsDataType] = {
+    "source_sheet": pl.String,
+    "zite_record_id": pl.String,
+    "field": pl.String,
+    "email": pl.String,
+    "status": pl.String,
+    "sub_status": pl.String,
+    "did_you_mean": pl.String,
+    "response_json": pl.String,
+    "checked_at": pl.String,
+}
+
+#: Column schema of the ``address_validation_log`` sheet (§6.8).
+ADDRESS_VALIDATION_LOG_SCHEMA: dict[str, PolarsDataType] = {
+    "source_sheet": pl.String,
+    "zite_record_id": pl.String,
+    "query": pl.String,
+    "status": pl.String,
+    "display_name": pl.String,
+    "lat": pl.String,
+    "lon": pl.String,
+    "response_json": pl.String,
+    "checked_at": pl.String,
+}
+
+
+# ---------------------------------------------------------------------------
+# Email (ZeroBounce) and address (Nominatim) validation (§6.7/§6.8).
+# ---------------------------------------------------------------------------
+
+
+def _scripts_dir() -> Path:
+    """Locate the repo's ``scripts/`` directory."""
+    candidate = Path(__file__).resolve().parents[2] / "scripts"
+    if candidate.is_dir():
+        return candidate
+    return Path.cwd() / "scripts"
+
+
+def _email_engine() -> tuple[Callable[..., Any], type[Exception]]:
+    """Import the ZeroBounce engine from ``scripts/`` (§6.7).
+
+    Returns:
+        A tuple of (:func:`scripts.zerobounce_email_check.validate_email`,
+        its ``OutOfCreditsError``).
+
+    Raises:
+        ScreeningError: If the scripts directory or the zerobouncesdk
+            package is unavailable.
+    """
+    scripts = _scripts_dir()
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    try:
+        from zerobounce_email_check import (  # type: ignore[import-not-found]
+            OutOfCreditsError,
+            validate_email,
+        )
+    except ImportError as error:
+        raise ScreeningError(
+            "could not import the ZeroBounce engine"
+            f" ({scripts}/zerobounce_email_check.py): {error}; install"
+            " zerobouncesdk or set config.email_check.enabled = false"
+        ) from error
+    return validate_email, OutOfCreditsError
+
+
+def _email_batch_engine() -> Callable[..., Any] | None:
+    """Import the ZeroBounce batch (bulk) engine from ``scripts/`` (§6.7).
+
+    Returns:
+        :func:`scripts.zerobounce_email_check.bulk_validate_emails`, or
+        None when the engine cannot be imported -- the email check then
+        falls back to threaded per-email calls.
+    """
+    scripts = _scripts_dir()
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    try:
+        from zerobounce_email_check import (  # type: ignore[import-not-found]
+            bulk_validate_emails,
+        )
+    except ImportError:
+        return None
+    return bulk_validate_emails
+
+
+def _address_engine() -> tuple[Callable[..., Any], Callable[..., str]]:
+    """Import the Nominatim engine from ``scripts/`` (§6.8).
+
+    Returns:
+        A tuple of
+        (:func:`scripts.nominatim_address_check.check_address`,
+        :func:`scripts.nominatim_address_check.build_query`).
+
+    Raises:
+        ScreeningError: If the scripts directory is unavailable.
+    """
+    scripts = _scripts_dir()
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    try:
+        from nominatim_address_check import (  # type: ignore[import-not-found]
+            build_query,
+            check_address,
+        )
+    except ImportError as error:
+        raise ScreeningError(
+            "could not import the Nominatim engine"
+            f" ({scripts}/nominatim_address_check.py): {error}"
+        ) from error
+    return check_address, build_query
+
+
+def _validation_log_rows(cfg: Config, sheet: str) -> list[dict[str, Any]]:
+    """Read one validation log sheet as row dicts (empty when absent)."""
+    frame = read_sheet(cfg.excel_file, sheet)
+    if frame is None:
+        return []
+    return frame.to_dicts()
+
+
+def check_emails(
+    cfg: Config,
+    rows_by_table: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Run the ZeroBounce bulk check over every new email (§6.7).
+
+    Targets: ``sponsor.email``, family ``primary_email`` and
+    ``secondary_email`` -- deduplicated by normalized address, skipping
+    every email already recorded in ``email_validation_log`` (so re-runs
+    never burn credits twice).  The ENTIRE verbatim ZeroBounce response
+    is stored in the log's ``response_json``.  API failures are
+    non-fatal: the affected emails are left unchecked for the next run.
+
+    Method: the batch endpoint (one call per 100 addresses) when the
+    engine is available; otherwise threaded per-email calls
+    (``config.email_check.workers`` workers).
+
+    Args:
+        cfg: Pipeline configuration.
+        rows_by_table: Mapping of table name to prepared rows.
+
+    Returns:
+        The new ``email_validation_log`` rows (possibly empty).
+    """
+    targets: list[tuple[str, str, str, str]] = []
+    fields: dict[str, tuple[str, ...]] = {
+        "sponsor": ("email",),
+        "family": ("primary_email", "secondary_email"),
+    }
+    for table_name, table_fields in fields.items():
+        sheet = f"{table_name}_submissions"
+        for row in rows_by_table.get(table_name, []):
+            record_id = str(row.get("zite_record_id") or "")
+            for field in table_fields:
+                email = row.get(field)
+                if email is None or not str(email).strip():
+                    continue
+                targets.append((sheet, record_id, field, str(email).strip()))
+    existing = _validation_log_rows(cfg, "email_validation_log")
+    checked_emails = {
+        str(row.get("email")).strip().lower()
+        for row in existing
+        if row.get("email")
+    }
+    pending = [t for t in targets if t[3].lower() not in checked_emails]
+    if not pending:
+        logger.info("email check: nothing new to check")
+        return []
+    unique_emails = list(dict.fromkeys(t[3] for t in pending))
+    logger.info(
+        "email check: %d new email(s) of %d target(s) via ZeroBounce",
+        len(unique_emails),
+        len(pending),
+    )
+    validate_email, out_of_credits = _email_engine()
+    bulk_validate_emails = _email_batch_engine()
+    checked_at = datetime.now(UTC).isoformat(timespec="seconds")
+    if bulk_validate_emails is not None:
+        # Bulk method: one batch call per 100 addresses (§6.7).
+        try:
+            bulk_results = bulk_validate_emails(unique_emails)
+        except out_of_credits as error:  # type: ignore[misc]
+            logger.error("%s; stopping the email check for this run", error)
+            return []
+        except Exception as error:  # noqa: BLE001 - fall back per-email
+            logger.error(
+                "ZeroBounce batch check failed (%s); falling back to"
+                " threaded per-email checks",
+                error,
+            )
+        else:
+            if bulk_results is not None:
+                log_rows = _email_log_rows(pending, bulk_results, checked_at)
+                logger.info("email check: %d new log row(s)", len(log_rows))
+                return log_rows
+    else:
+        logger.info("email check: batch engine unavailable; threaded checks")
+    # Fallback: threaded per-email checks (I/O-bound, so threads scale).
+    workers = max(1, min(cfg.email_check.workers, len(unique_emails)))
+    logger.info("email check: %d worker thread(s)", workers)
+    results = {}
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = {
+            pool.submit(validate_email, email): email for email in unique_emails
+        }
+        for future in as_completed(futures):
+            email = futures[future]
+            try:
+                results[email] = future.result()
+            except out_of_credits as error:  # type: ignore[misc]
+                logger.error("%s; stopping the email check for this run", error)
+                break
+            except Exception as error:  # noqa: BLE001 - keep checking the rest
+                logger.error("ZeroBounce error for %s: %s", email, error)
+                results[email] = None
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    log_rows = _email_log_rows(pending, results, checked_at)
+    logger.info("email check: %d new log row(s)", len(log_rows))
+    return log_rows
+
+
+def _email_log_rows(
+    pending: list[tuple[str, str, str, str]],
+    results: dict[str, dict[str, Any] | None],
+    checked_at: str,
+) -> list[dict[str, Any]]:
+    """Convert ZeroBounce results into ``email_validation_log`` rows.
+
+    Args:
+        pending: The (sheet, record_id, field, email) targets checked.
+        results: Mapping of email to its ZeroBounce result dict, or None
+            when the API failed (those emails stay unchecked).
+        checked_at: The shared run timestamp.
+
+    Returns:
+        One log row per (record, field) occurrence with a result.
+    """
+    log_rows: list[dict[str, Any]] = []
+    for sheet, record_id, field, email in pending:
+        result = results.get(email)
+        if result is None:
+            continue  # API error or never reached: left unchecked
+        log_rows.append(
+            {
+                "source_sheet": sheet,
+                "zite_record_id": record_id,
+                "field": field,
+                "email": email,
+                "status": str(result.get("status", "")),
+                "sub_status": str(result.get("sub_status", "")),
+                "did_you_mean": str(result.get("did_you_mean", "")),
+                "response_json": str(result.get("raw_response", "")),
+                "checked_at": checked_at,
+            }
+        )
+    return log_rows
+
+
+def check_addresses(
+    cfg: Config,
+    family_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Run the Nominatim check over every new family address (§6.8).
+
+    Targets: each family submission's street/apt/city/state/ZIP,
+    deduplicated by normalized query text, skipping every query already
+    recorded in ``address_validation_log``.  The ENTIRE verbatim
+    Nominatim response is stored in the log's ``response_json``.
+    Failures are non-fatal: the affected addresses stay unchecked for
+    the next run.
+
+    Args:
+        cfg: Pipeline configuration.
+        family_rows: Prepared family rows.
+
+    Returns:
+        The new ``address_validation_log`` rows (possibly empty).
+    """
+    check_address, build_query = _address_engine()
+    targets: list[tuple[str, str, dict[str, Any]]] = []
+    for row in family_rows:
+        record_id = str(row.get("zite_record_id") or "")
+        parts = {
+            "street": row.get("street_address"),
+            "apt_floor": row.get("apt_floor"),
+            "city": row.get("city"),
+            "state": row.get("state"),
+            "zip_code": row.get("zip_code"),
+        }
+        if not any(str(value or "").strip() for value in parts.values()):
+            continue  # no address data at all; pre-audit flags the row
+        targets.append(("family_submissions", record_id, parts))
+    existing = _validation_log_rows(cfg, "address_validation_log")
+    checked_queries = {
+        str(row.get("query")).strip() for row in existing if row.get("query")
+    }
+    pending: list[tuple[str, str, dict[str, Any], str]] = []
+    seen_queries: set[str] = set()
+    for sheet, record_id, parts in targets:
+        query = build_query(
+            parts["street"],
+            parts["apt_floor"],
+            parts["city"],
+            parts["state"],
+            parts["zip_code"],
+        )
+        if query in checked_queries or query in seen_queries:
+            continue
+        seen_queries.add(query)
+        pending.append((sheet, record_id, parts, query))
+    if not pending:
+        logger.info("address check: nothing new to check")
+        return []
+    logger.info("address check: %d new address(es) via Nominatim", len(pending))
+    log_rows: list[dict[str, Any]] = []
+    for index, (sheet, record_id, parts, query) in enumerate(pending):
+        try:
+            result = check_address(
+                parts["street"],
+                apt_floor=parts["apt_floor"],
+                city=parts["city"],
+                state=parts["state"],
+                zip_code=parts["zip_code"],
+                base_url=cfg.address_check.base_url,
+                user_agent=cfg.address_check.user_agent,
+                timeout=cfg.address_check.timeout,
+            )
+        except Exception as error:  # noqa: BLE001 - keep checking the rest
+            logger.error("Nominatim error for %r: %s", query, error)
+            continue
+        log_rows.append(
+            {
+                "source_sheet": sheet,
+                "zite_record_id": record_id,
+                "query": str(result.get("query", query)),
+                "status": str(result.get("status", "error")),
+                "display_name": result.get("display_name"),
+                "lat": result.get("lat"),
+                "lon": result.get("lon"),
+                "response_json": result.get("response_json"),
+                "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            }
+        )
+        if index < len(pending) - 1:
+            time.sleep(cfg.address_check.delay)
+    logger.info("address check: %d new log row(s)", len(log_rows))
+    return log_rows
+
+
+# ---------------------------------------------------------------------------
+# AI screening (children only) (§6.2 output contract).
+# ---------------------------------------------------------------------------
+
+
+#: Model-owned final-child fields (§6.2): the columns the model may
+#: correct.  ``age_at_xmas`` is excluded (computed from the adjudicated
+#: dob, D13); controls and linkage are never model-owned.
+RESPONSE_COLUMNS = (
     "zite_record_id",
     "dob",
-    "age_at_xmas",
     "need_1",
     "need_2",
     "desire_1",
@@ -115,13 +518,6 @@ ADJ_CHILD_COLUMNS = (
     "favorite_colors",
     "other_notes",
     "potential_anomoly",
-)
-
-#: Key set the model must return (§6.2).  ``age_at_xmas`` is excluded: it
-#: is computed by acquire (§5.5) and copied into adj_child verbatim; the
-#: model never owns it.
-RESPONSE_COLUMNS = tuple(
-    column for column in ADJ_CHILD_COLUMNS if column != "age_at_xmas"
 )
 
 #: Enum-checked size columns -> vocabulary name (§6.2 output contract).
@@ -166,7 +562,7 @@ _DOB_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class AdjChildRow(BaseModel):
-    """Pydantic schema for one adjudicated adj_child row (§6.2)."""
+    """Pydantic schema for one AI screening response (§6.2)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -207,7 +603,7 @@ def build_prompt(child: dict[str, Any], cfg: Config) -> str:
     pseudonymous zite_record_id and screening-relevant fields.
 
     Args:
-        child: One raw_child row as a dict.
+        child: One prepared child row as a dict.
         cfg: Pipeline configuration.
 
     Returns:
@@ -257,7 +653,7 @@ def validate_adj_response(
 
     Args:
         parsed: The parsed JSON object.
-        child: The raw_child row it must join back to.
+        child: The prepared child row it must join back to.
         cfg: Pipeline configuration.
 
     Returns:
@@ -292,15 +688,16 @@ def screen_child(
     """Screen one child with one retry, then give up (§6.2).
 
     Args:
-        child: One raw_child row as a dict.
+        child: One prepared child row as a dict.
         cfg: Pipeline configuration.
         send: Callable sending one prompt to the model session and
             returning its raw text response.
 
     Returns:
-        The adj_child row for this child (all-null adjudication cells when
-        the model returned the literal null), or None when the child could
-        not be screened (logged as unscreened, picked up next run).
+        The validated corrections for this child (all-null cells when
+        the model returned the literal null, meaning "no changes"), or
+        None when the child could not be screened (logged as
+        unscreened, picked up next run).
     """
     prompt = build_prompt(child, cfg)
     last_error: Exception | None = None
@@ -317,7 +714,7 @@ def screen_child(
             )
             continue
         if parsed is None:
-            return {column: None for column in ADJ_CHILD_COLUMNS} | {
+            return {column: None for column in FINAL_CHILD_COLUMNS} | {
                 "zite_record_id": child["zite_record_id"]
             }
         try:
@@ -355,7 +752,7 @@ def screen_children(
     scheduling; one failed task still counts as progress.
 
     Args:
-        children: raw_child rows to screen.
+        children: Prepared child rows to screen.
         cfg: Pipeline configuration.
         send: Callable sending one prompt to the model session.  Must be
             safe to call from multiple threads (each thread keeps its
@@ -367,7 +764,7 @@ def screen_children(
             used by ``run`` to persist rows as they arrive.
 
     Returns:
-        The adj_child rows to persist (one per successfully screened
+        The final-child rows to persist (one per successfully screened
         child, sparse cells, §6.3).
 
     Raises:
@@ -444,50 +841,131 @@ def screen_children(
     return rows
 
 
-def _adj_schema() -> dict[str, PolarsDataType]:
-    """Sheet schema for adj_child: every column is a string."""
-    return {column: pl.String for column in ADJ_CHILD_COLUMNS}
+def _values_equal(left: Any, right: Any) -> bool:
+    """String-normalized equality for human-edit protection (§7.3)."""
+    if left is None or (isinstance(left, str) and left.strip() == ""):
+        left = None
+    if right is None or (isinstance(right, str) and right.strip() == ""):
+        right = None
+    if left is None or right is None:
+        return left is None and right is None
+    return str(left).strip() == str(right).strip()
 
 
-def _upsert_adj_row(
-    adj_rows: list[dict[str, Any]], row: dict[str, Any]
-) -> None:
-    """Insert or replace one adj row in place, keyed by zite_record_id.
+def dense_final_row(
+    child: dict[str, Any],
+    corrections: dict[str, Any],
+    cfg: Config,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one dense final-child row from a screening result (§7.3).
+
+    The row starts from the child's cleaned values (linkage and
+    adjudicable data), overlays the model's non-null corrections, and
+    recomputes ``age_at_xmas`` from the adjudicated dob (D13).  When a
+    row already exists (``existing``), human edits survive: a
+    correction lands on a model-owned field only when that field still
+    equals the baseline, other fields keep the existing adj values, and
+    the existing controls and module-owned columns are preserved.
 
     Args:
-        adj_rows: The mutable adj_child row list.
+        child: One prepared child row as a dict.
+        corrections: The validated model response (sparse: non-null
+            values are corrections); may be all-null ("no changes").
+        cfg: Pipeline configuration.
+        existing: The child's existing full final row, when one exists.
+
+    Returns:
+        The dense final-child row with ``screened`` set true.
+    """
+    row: dict[str, Any] = {column: None for column in FINAL_CHILD_COLUMNS}
+    for column in (*CHILD_LINKAGE_COLUMNS, *CHILD_EDITABLE_COLUMNS):
+        row[column] = child.get(column)
+    if existing is not None and as_bool(existing.get("ignore")):
+        # AI never targets ignored rows; this defensive path preserves the
+        # complete skeleton and records only successful screening.
+        row = dict(existing)
+        row["screened"] = True
+        return row
+    if existing is not None:
+        for column in (
+            *CHILD_EDITABLE_COLUMNS,
+            "age_at_xmas",
+            "generated_info_sheet",
+            "status",
+            "ignore",
+            "clarification_notes",
+            "audited_at",
+            "potential_duplicate",
+        ):
+            row[column] = existing.get(column)
+    for column in CHILD_EDITABLE_COLUMNS:
+        value = corrections.get(column)
+        if value is None:
+            continue
+        if existing is not None and not _values_equal(
+            existing.get(column), child.get(column)
+        ):
+            # The human already changed this field; leave it alone (§7.3).
+            continue
+        row[column] = value
+    row["zite_record_id"] = child["zite_record_id"]
+    row["screened"] = True
+    if existing is None:
+        row["status"] = STATUS_NEW
+        row["ignore"] = False
+        row["generated_info_sheet"] = False
+        row["potential_duplicate"] = False
+    row["age_at_xmas"] = _computed_age(row.get("dob"), cfg)
+    if row.get("family_id") is None:
+        # Orphaned child: no matching family registration; surface it
+        # for the user to fix (§8.7).
+        row["clarification_notes"] = append_note(
+            row.get("clarification_notes"), ORPHAN_NOTE
+        )
+        if row.get("status") == STATUS_NEW:
+            row["status"] = STATUS_NEEDS_CLARIFICATION
+    return row
+
+
+def _upsert_final_row(
+    final_rows: list[dict[str, Any]], row: dict[str, Any]
+) -> None:
+    """Insert or replace one final row in place, keyed by zite_record_id.
+
+    Args:
+        final_rows: The mutable final-child row list.
         row: The row to insert (new id) or replace (existing id).
     """
-    for index, existing in enumerate(adj_rows):
+    for index, existing in enumerate(final_rows):
         if existing.get("zite_record_id") == row["zite_record_id"]:
-            adj_rows[index] = row
+            final_rows[index] = row
             return
-    adj_rows.append(row)
+    final_rows.append(row)
 
 
-def _write_adj(
-    cfg: Config, adj_rows: list[dict[str, Any]], raw_child: pl.DataFrame
+def _write_final_children(
+    cfg: Config, final_rows: list[dict[str, Any]]
 ) -> pl.DataFrame:
-    """Atomically write the adj_child sheet with ages filled in (§5.5).
+    """Atomically write the complete persistent final-child store.
 
     Args:
         cfg: Pipeline configuration.
-        adj_rows: All current adj_child rows.
-        raw_child: The raw_child frame joined for computed ages.
+        final_rows: Every persistent child, including raw-missing rows.
 
     Returns:
-        The written adj_child frame.
+        The validated written frame.
 
     Raises:
         ScreeningError: If the workbook cannot be written.
     """
-    frame = pl.DataFrame(
-        _with_computed_age(adj_rows, raw_child), schema=_adj_schema()
-    )
+    frame = build_final_frame("child", final_rows)
     try:
-        write_sheets(cfg.excel_file, "screen", {"adj_child": frame})
+        write_final_rows(cfg, "screen", "child", final_rows)
     except Exception as error:  # noqa: BLE001 - wrap any save failure
-        raise ScreeningError(f"could not persist adj_child: {error}") from error
+        raise ScreeningError(
+            f"could not persist final_child: {error}"
+        ) from error
     return frame
 
 
@@ -501,7 +979,7 @@ def first_family_children(
     returned so test mode still has one record to process.
 
     Args:
-        children: raw_child rows as dicts.
+        children: Prepared child rows as dicts.
 
     Returns:
         The children belonging to the first family.
@@ -529,19 +1007,18 @@ def _screen_targets(
     lives for the duration of the run.
 
     Args:
-        targets: raw_child rows to screen.
+        targets: Prepared child rows to screen.
         cfg: Pipeline configuration.
         on_result: Optional per-row callback forwarded to
             :func:`screen_children` (see its docstring).
 
     Returns:
-        One adj_child row per target.
+        One final-child row per target.
 
     Raises:
         ScreeningError: If the opencode server cannot be started.
     """
     import os
-    from pathlib import Path
 
     from opencode import Opencode, OpencodeServer, ServerStartError
     from opencode.types import ModelRef
@@ -600,53 +1077,60 @@ def _screen_targets(
         ) from error
 
 
-def _with_computed_age(
-    adj_rows: list[dict[str, Any]], raw_child: pl.DataFrame
-) -> list[dict[str, Any]]:
-    """Fill ``age_at_xmas`` on every adj row from raw_child (§5.5).
-
-    The computed age is authoritative; the model never owns this column,
-    so it is copied in verbatim (stored as text, matching the all-string
-    sheet schema).  Rows screened before the column existed are
-    backfilled on the next run.
-
-    Args:
-        adj_rows: adj_child rows as dicts.
-        raw_child: The raw_child frame to join on.
-
-    Returns:
-        The same rows with ``age_at_xmas`` set.
-    """
-    ages = {
-        row["zite_record_id"]: row.get("age_at_xmas")
-        for row in raw_child.to_dicts()
-    }
-    for row in adj_rows:
-        age = ages.get(row["zite_record_id"])
-        row["age_at_xmas"] = None if age is None else str(age)
-    return adj_rows
+# ---------------------------------------------------------------------------
+# Persistent final seeding for sponsors and families (shared contract).
+# ---------------------------------------------------------------------------
 
 
-def _audited_count(final_child: pl.DataFrame) -> int:
-    """Count audited children in final_child (§6).
-
-    Tolerates the sheet's Boolean columns reading back as strings
-    ("true"/"false") after another module rewrites the workbook.
+def _flagged_row(
+    row: dict[str, Any],
+    duplicate_note_text: str | None,
+    validation_notes: list[str],
+) -> dict[str, Any]:
+    """Apply the duplicate flag and notes to one persistent row.
 
     Args:
-        final_child: The final_child frame (or any frame).
+        row: The full final row (mutated in place).
+        duplicate_note_text: The duplicate note, when flagged.
+        validation_notes: Validation-failure notes for this record.
 
     Returns:
-        The number of rows with ``audited`` true; 0 when the column is
-        missing or empty.
+        The same row, flagged and annotated.
     """
-    if "audited" not in final_child.columns:
-        return 0
-    audited_column = final_child["audited"]
-    if audited_column.dtype == pl.String:
-        text = audited_column.str.strip_chars().str.to_lowercase()
-        audited_column = text == "true"
-    return int(audited_column.fill_null(False).sum())
+    flagged = duplicate_note_text is not None
+    if "potential_duplicate" in row:
+        row["potential_duplicate"] = bool(
+            row.get("potential_duplicate") or flagged
+        )
+    note = "; ".join([*validation_notes, duplicate_note_text or ""]).strip("; ")
+    if note:
+        row["clarification_notes"] = append_note(
+            row.get("clarification_notes"), note or None
+        )
+    return row
+
+
+def _apply_flags(
+    final_row: dict[str, Any],
+    duplicate_note_text: str | None,
+    validation_notes: list[str],
+) -> None:
+    """Merge duplicate/validation diagnostics into one persistent row.
+
+    Existing rows are never re-seeded; a newly appearing duplicate or
+    validation issue still surfaces idempotently.
+
+    Args:
+        final_row: Existing full row, mutated in place.
+        duplicate_note_text: The duplicate note, when flagged.
+        validation_notes: Validation-failure notes for this record.
+    """
+    _flagged_row(final_row, duplicate_note_text, validation_notes)
+
+
+# ---------------------------------------------------------------------------
+# The run (§6).
+# ---------------------------------------------------------------------------
 
 
 def run(
@@ -654,111 +1138,188 @@ def run(
     redo: str | None = None,
     test: bool = False,
     overwrite: bool = False,
+    skip_email_check: bool = False,
+    skip_address_check: bool = False,
 ) -> None:
-    """Run module 2 end to end (§6).
+    """Prepare persistent finals, run external checks, and resume AI work.
 
-    Successfully screened rows are persisted to ``adj_child`` as they
-    arrive (one atomic workbook write per completed child), so an
-    interrupted run keeps every completed result; the final write
-    reconciles the whole sheet.
+    Local preparation and global diagnostics run for every raw record. Only
+    children whose final row is unscreened enter ordinary AI work. Explicit
+    redo/overwrite runs clear the target success marker first so failures or
+    interruption remain retryable without deleting any entity state.
 
     Args:
         cfg: Pipeline configuration.
-        redo: Optional zite_record_id to re-screen, replacing its adj row
-            (explicit opt-in only, §6.3).
-        test: Stop after the first full family: only the children of the
-            first family (lowest family_id) are screened.
-        overwrite: Ignore the existing ``adj_child`` sheet: every child
-            is re-screened and its adj row replaced (§6.3).
+        redo: Optional current child ``zite_record_id`` to re-screen.
+        test: Restrict AI candidates to the first stable family.
+        overwrite: Deliberately re-screen every current child.
+        skip_email_check: Skip ZeroBounce work for this run.
+        skip_address_check: Skip Nominatim work for this run.
 
     Raises:
-        ScreeningError: If opencode v2 is not installed, raw_child is
-            missing, a redo target is unknown, or the opencode session
-            cannot be created.
+        ScreeningError: If a redo key is unknown or AI setup/save fails.
     """
-    _require_opencode_v2()
-    if cfg.ai_screening.model == "TODO":
+    preparation = prepare_persistent_store(cfg)
+    children = preparation.rows["child"]
+    if redo is not None and not any(
+        child.get("zite_record_id") == redo for child in children
+    ):
         raise ScreeningError(
-            "config.ai_screening.model is still TODO; fill in the model id"
-            " first (§12 item 1)"
+            f"redo target {redo!r} not found in the prepared child rows"
         )
-    raw_child = read_sheet(cfg.excel_file, "raw_child")
-    if raw_child is None or raw_child.is_empty():
-        raise ScreeningError(
-            "raw_child sheet is missing or empty; run `ccat acquire` first"
-        )
-    children = raw_child.to_dicts()
-    adj = read_sheet_or_empty(cfg.excel_file, "adj_child", _adj_schema())
-    adj_rows = adj.to_dicts()
-    existing_ids = {row.get("zite_record_id") for row in adj_rows}
-    final_child = read_sheet(cfg.excel_file, "final_child")
-    audited = _audited_count(final_child) if final_child is not None else 0
-    logger.info("children already audited in final_child: %d", audited)
 
-    if redo is not None:
-        targets = [
-            child for child in children if child["zite_record_id"] == redo
-        ]
-        if not targets:
-            raise ScreeningError(f"redo target {redo!r} not found in raw_child")
+    stores = reconcile_preparation(
+        cfg, preparation, "screen", refresh_existing=True
+    )
+    log_sheets: dict[str, pl.DataFrame] = {
+        "duplicate_log": duplicate_log_frame(preparation.duplicate_log),
+        "dob_conflict_log": dob_conflict_log_frame(preparation.dob_log),
+    }
+    write_sheets(cfg.excel_file, "screen", log_sheets)
+    logger.info(
+        "refreshed duplicate_log (%d) and dob_conflict_log (%d)",
+        len(preparation.duplicate_log),
+        len(preparation.dob_log),
+    )
+
+    if skip_email_check:
+        logger.info("email check: skipped (--skip-email-check)")
+    elif not cfg.email_check.enabled:
+        logger.info("email check: disabled (config.email_check.enabled)")
     else:
-        if overwrite:
-            targets = children
-            logger.info(
-                "overwrite: re-screening all %d children (existing adj rows"
-                " are replaced)",
-                len(targets),
+        email_rows = check_emails(cfg, preparation.rows)
+        if email_rows:
+            existing = _validation_log_rows(cfg, "email_validation_log")
+            # Commit billable successes before any later phase can fail.
+            write_sheets(
+                cfg.excel_file,
+                "screen",
+                {
+                    "email_validation_log": pl.DataFrame(
+                        [*existing, *email_rows],
+                        schema=EMAIL_VALIDATION_LOG_SCHEMA,
+                    )
+                },
             )
-        else:
-            targets = [
-                child
-                for child in children
-                if child["zite_record_id"] not in existing_ids
-            ]
-        if test:
-            allowed = {
-                child["zite_record_id"]
-                for child in first_family_children(children)
-            }
-            pending = len(targets)
-            targets = [
-                child for child in targets if child["zite_record_id"] in allowed
-            ]
             logger.info(
-                "test mode: screening first family only (%d of %d pending"
-                " children)",
-                len(targets),
-                pending,
+                "persisted %d new email validation row(s)",
+                len(email_rows),
             )
-    logger.info("children to screen: %d", len(targets))
+    if skip_address_check:
+        logger.info("address check: skipped (--skip-address-check)")
+    elif not cfg.address_check.enabled:
+        logger.info("address check: disabled (config.address_check.enabled)")
+    else:
+        address_rows = check_addresses(cfg, preparation.rows["family"])
+        if address_rows:
+            existing = _validation_log_rows(cfg, "address_validation_log")
+            write_sheets(
+                cfg.excel_file,
+                "screen",
+                {
+                    "address_validation_log": pl.DataFrame(
+                        [*existing, *address_rows],
+                        schema=ADDRESS_VALIDATION_LOG_SCHEMA,
+                    )
+                },
+            )
+            logger.info(
+                "persisted %d new address validation row(s)",
+                len(address_rows),
+            )
 
-    # A redo target's old row is removed up front; the upsert below then
-    # replaces rows in place as results arrive.
+    final_rows = stores["child"]
+    by_id = {str(row.get("zite_record_id") or ""): row for row in final_rows}
     if redo is not None:
-        adj_rows = [
-            row for row in adj_rows if row.get("zite_record_id") != redo
+        if as_bool(by_id[redo].get("ignore")):
+            raise ScreeningError(
+                f"redo target {redo!r} is ignored; un-ignore it first"
+            )
+        targets = [
+            child for child in children if child.get("zite_record_id") == redo
         ]
+    elif overwrite:
+        targets = [
+            child
+            for child in children
+            if not as_bool(
+                by_id[str(child.get("zite_record_id") or "")].get("ignore")
+            )
+        ]
+    else:
+        targets = [
+            child
+            for child in children
+            if not as_bool(
+                by_id[str(child.get("zite_record_id") or "")].get("screened")
+            )
+            and not as_bool(
+                by_id[str(child.get("zite_record_id") or "")].get("ignore")
+            )
+        ]
+    if test and redo is None:
+        allowed = {
+            child.get("zite_record_id")
+            for child in first_family_children(children)
+        }
+        targets = [
+            child for child in targets if child.get("zite_record_id") in allowed
+        ]
+    logger.info("children to AI-screen: %d", len(targets))
 
-    new_rows: list[dict[str, Any]] = []
+    if (redo is not None or overwrite) and targets:
+        for target in targets:
+            existing = by_id[str(target.get("zite_record_id") or "")]
+            existing["screened"] = False
+        _write_final_children(cfg, final_rows)
 
-    def persist(row: dict[str, Any]) -> None:
-        """Upsert one screened row and save adj_child immediately.
+    conflict_notes = dob_notes_by_child(preparation.dob_log)
 
-        Runs in the completion loop (main thread), so workbook writes
-        never race each other; ``io.write_sheets`` is atomic, so an
-        interrupted save never leaves a half-written workbook.
-        """
-        _upsert_adj_row(adj_rows, row)
-        _write_adj(cfg, adj_rows, raw_child)
-        new_rows.append(row)
-        logger.debug(
-            "persisted adj_child row for %s (%d rows in sheet)",
-            row["zite_record_id"],
-            len(adj_rows),
+    def persist(corrections: dict[str, Any]) -> None:
+        """Persist one completed child on the main completion thread."""
+        record_id = str(corrections["zite_record_id"])
+        child = next(
+            current
+            for current in children
+            if current.get("zite_record_id") == record_id
         )
+        dense = dense_final_row(child, corrections, cfg, by_id.get(record_id))
+        _apply_flags(
+            dense,
+            duplicate_note(record_id, preparation.survivors["child"], "child"),
+            preparation.validation_notes["child"].get(record_id, []),
+        )
+        dense["potential_anomoly"] = _merge_anomoly(
+            dense.get("potential_anomoly"), conflict_notes.get(record_id)
+        )
+        _upsert_final_row(final_rows, dense)
+        by_id[record_id] = dense
+        _write_final_children(cfg, final_rows)
+        logger.debug("persisted final_child row for %s", record_id)
 
+    completed: list[dict[str, Any]] = []
     if targets:
-        new_rows = _screen_targets(targets, cfg, on_result=persist)
+        _require_opencode_v2()
+        if cfg.ai_screening.model == "TODO":
+            raise ScreeningError(
+                "config.ai_screening.model is still TODO; fill in the model id"
+                " first (§12 item 1)"
+            )
+        completed = _screen_targets(targets, cfg, on_result=persist)
+    logger.info(
+        "final_child holds %d row(s); %d AI result(s) completed this run",
+        len(final_rows),
+        len(completed),
+    )
 
-    frame = _write_adj(cfg, adj_rows, raw_child)
-    logger.info("wrote %d adj_child rows (%d new)", frame.height, len(new_rows))
+
+def _merge_anomoly(existing: str | None, note: str | None) -> str | None:
+    """Idempotently append a DOB-conflict note to ``potential_anomoly``."""
+    if not note:
+        return existing
+    text = (existing or "").strip()
+    if not text:
+        return note
+    if note in text:
+        return text
+    return f"{text}; {note}"

@@ -515,8 +515,19 @@
       "CCAM (Calumet)"
     ]
   },
-  "acquire": {
+  "acquire": {},
+  "screening": {
     "sibling_dob_max_gap_days": 274
+  },
+  "email_check": {
+    "enabled": true,
+    "delay": 0.25
+  },
+  "address_check": {
+    "enabled": true,
+    "base_url": "https://nominatim.openstreetmap.org",
+    "delay": 1.1,
+    "user_agent": "ccat-angel-tree/1.0 (family address validation)"
   },
   "ai_screening": {
     "model": "opencode/glm-5.3-flash",

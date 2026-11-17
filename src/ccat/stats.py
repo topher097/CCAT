@@ -1,9 +1,10 @@
 """Module 6 -- statistics report generation.
 
-Reads the post-match state (``final_child`` joined with ``final_family``
-and ``final_sponsor``) from the pipeline workbook -- or the raw
-``raw_child``/``raw_family`` sheets with ``--raw`` -- and renders a dated
-report as both HTML and PDF into ``report.output_dir``:
+Reads output-eligible rows from the complete persistent ``final_child``,
+``final_family``, and ``final_sponsor`` stores, joins them, and renders a
+dated report as both HTML and PDF into ``report.output_dir``.  With
+``--raw``, it instead prepares the raw forms ephemerally in memory, with
+local cleaning and ID assignment but no screening-side workbook output:
 
 1. A stacked bar chart of children (angels) added per day per pickup
    site, spanning every calendar day from the earliest child
@@ -40,8 +41,10 @@ from jinja2 import Environment
 from PIL import Image
 from xhtml2pdf import pisa
 
+from ccat.audit import AuditError
+from ccat.audit.store import read_eligible_final_frame
 from ccat.config import Config
-from ccat.io import read_sheet
+from ccat.preparation import PreparationError, prepare_workbook, prepared_frame
 
 logger = logging.getLogger(__name__)
 
@@ -172,11 +175,14 @@ def _location_order(cfg: Config, present: list[str]) -> list[str]:
     return ordered
 
 
-def _coerce_created(frame: pl.DataFrame) -> pl.DataFrame:
+def _coerce_created(
+    frame: pl.DataFrame, source: str = "final_child"
+) -> pl.DataFrame:
     """Coerce the ``created`` column to Datetime in place.
 
     Args:
-        frame: The ``final_child`` frame.
+        frame: The final or ephemerally prepared child frame.
+        source: Source label used in errors.
 
     Returns:
         The frame with ``created`` as Datetime (nulls where a string
@@ -206,39 +212,61 @@ def _coerce_created(frame: pl.DataFrame) -> pl.DataFrame:
         return frame.with_columns(pl.col("created").cast(pl.Datetime))
     except Exception as error:  # noqa: BLE001 - cast raises many types
         raise StatsError(
-            f"final_child.created has unusable type {dtype}: {error}"
+            f"{source}.created has unusable type {dtype}: {error}"
         ) from error
 
 
 def _load_enriched(
     cfg: Config, raw: bool = False
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
-    """Read and join the report's source sheets.
+    """Read output-eligible finals or prepare ephemeral raw rows, then join.
 
     Args:
         cfg: The pipeline configuration.
-        raw: Read the ``raw_child``/``raw_family`` sheets instead of the
-            final sheets.  ``raw_family`` has no ``assigned_sponsor_id``,
-            so sponsor counts are zero in this mode.
+        raw: Clean and ID-assign all three raw forms locally in memory.  No
+            final-output ignore/orphan filtering applies to these prepared
+            rows, and no workbook output is produced.  Prepared families have
+            no ``assigned_sponsor_id``, so sponsored-angel counts are zero.
 
     Returns:
-        A tuple of (enriched child frame -- child sheet plus
+        A tuple of (enriched child frame -- child rows plus
         ``gift_pickup_location`` and ``assigned_sponsor_id`` joined
-        from the family sheet with normalized location/gender columns,
+        from the family rows with normalized location/gender columns,
         family frame with a normalized location column, sponsor frame
         (empty schema stand-in when absent), ordered location labels).
 
     Raises:
-        StatsError: If the child/family sheet is missing or empty, or
-            lacks the required columns.
+        StatsError: If preparation fails, a final store is malformed, or the
+            child/family population is empty or lacks required columns.
     """
-    child_sheet = "raw_child" if raw else "final_child"
-    family_sheet = "raw_family" if raw else "final_family"
-    sponsor_sheet = "raw_sponsor" if raw else "final_sponsor"
-    child = read_sheet(cfg.excel_file, child_sheet)
-    if child is None or child.is_empty():
+    if raw:
+        try:
+            preparation = prepare_workbook(cfg)
+            child = prepared_frame(preparation.rows["child"], "child", cfg)
+            family = prepared_frame(preparation.rows["family"], "family", cfg)
+            sponsor = prepared_frame(
+                preparation.rows["sponsor"], "sponsor", cfg
+            )
+        except PreparationError as error:
+            raise StatsError(str(error)) from error
+        child_label = "prepared child rows"
+        family_label = "prepared family rows"
+        sponsor_label = "prepared sponsor rows"
+        prerequisite = "acquire"
+    else:
+        try:
+            child = read_eligible_final_frame(cfg, "child")
+            family = read_eligible_final_frame(cfg, "family")
+            sponsor = read_eligible_final_frame(cfg, "sponsor")
+        except AuditError as error:
+            raise StatsError(str(error)) from error
+        child_label = "final_child sheet"
+        family_label = "final_family sheet"
+        sponsor_label = "final_sponsor sheet"
+        prerequisite = "audit"
+    if child.is_empty():
         raise StatsError(
-            f"{child_sheet} sheet is missing or empty; run `ccat acquire` first"
+            f"{child_label}: missing or empty; run `ccat {prerequisite}` first"
         )
     missing = [
         column
@@ -247,15 +275,15 @@ def _load_enriched(
     ]
     if missing:
         raise StatsError(
-            f"{child_sheet} lacks column(s): {missing}; run `ccat acquire`"
-            " first"
+            f"{child_label} lacks column(s): {missing};"
+            f" run `ccat {prerequisite}` first"
         )
-    child = _coerce_created(child)
-    family = read_sheet(cfg.excel_file, family_sheet)
-    if family is None or family.is_empty():
+    child = _coerce_created(child, "prepared child" if raw else "final_child")
+    family_prerequisite = "acquire" if raw else "match"
+    if family.is_empty():
         raise StatsError(
-            f"{family_sheet} sheet is missing or empty; run `ccat acquire`"
-            " first"
+            f"{family_label}: missing or empty;"
+            f" run `ccat {family_prerequisite}` first"
         )
     missing_family = [
         column for column in FAMILY_JOIN_COLUMNS if column not in family.columns
@@ -264,11 +292,11 @@ def _load_enriched(
         raw and missing_family == ["assigned_sponsor_id"]
     ):
         raise StatsError(
-            f"{family_sheet} lacks column(s): {missing_family}; run"
-            " `ccat acquire` first"
+            f"{family_label} lacks column(s): {missing_family}; run"
+            f" `ccat {family_prerequisite}` first"
         )
     if "assigned_sponsor_id" not in family.columns:
-        # raw_family has no sponsor assignment yet (§9 ownership matrix).
+        # Ephemeral prepared rows precede matchmaking assignments.
         family = family.with_columns(
             pl.lit(None, dtype=pl.Int64).alias("assigned_sponsor_id")
         )
@@ -276,7 +304,7 @@ def _load_enriched(
     if not duplicated.is_empty():
         logger.warning(
             "%s family_id is not unique; keeping the first row per family: %s",
-            family_sheet,
+            family_label,
             duplicated["family_id"].to_list(),
         )
         family = family.unique(subset="family_id", keep="first")
@@ -302,7 +330,10 @@ def _load_enriched(
         .alias("gender_key"),
         pl.col("assigned_sponsor_id").cast(pl.Int64, strict=False),
     )
-    sponsor = _load_sponsor(cfg, sponsor_sheet)
+    enriched = enriched.sort(
+        ["created", "zite_record_id"], nulls_last=True, maintain_order=True
+    )
+    sponsor = _load_sponsor(sponsor, sponsor_label)
     present = sorted(
         set(enriched["gift_pickup_location"].to_list())
         | set(family["gift_pickup_location"].to_list())
@@ -319,24 +350,23 @@ _SPONSOR_SCHEMA: dict[str, Any] = {
 }
 
 
-def _load_sponsor(cfg: Config, sponsor_sheet: str) -> pl.DataFrame:
-    """Read the sponsor sheet for the desired-angels column.
+def _load_sponsor(sponsor: pl.DataFrame, source: str) -> pl.DataFrame:
+    """Validate sponsor columns needed for the desired-angels fallback.
 
     Args:
-        cfg: The pipeline configuration.
-        sponsor_sheet: ``raw_sponsor`` (raw mode) or ``final_sponsor``.
+        sponsor: Output-eligible final or ephemerally prepared sponsor rows.
+        source: Source label used in warnings.
 
     Returns:
         The sponsor frame, or an empty frame with the expected schema
-        when the sheet is absent or unusable (a warning is logged and
+        when the population is empty or unusable (a warning is logged and
         the report's sponsor columns show zeros).
     """
-    sponsor = read_sheet(cfg.excel_file, sponsor_sheet)
-    if sponsor is None or sponsor.is_empty():
+    if sponsor.is_empty():
         logger.warning(
-            "%s sheet is missing or empty; sponsor columns show zeros"
+            "%s is missing or empty; sponsor columns show zeros"
             " (run `ccat acquire` to collect sponsor registrations)",
-            sponsor_sheet,
+            source,
         )
         return pl.DataFrame(schema=_SPONSOR_SCHEMA)
     missing = [
@@ -345,7 +375,7 @@ def _load_sponsor(cfg: Config, sponsor_sheet: str) -> pl.DataFrame:
     if missing:
         logger.warning(
             "%s lacks column(s) %s; sponsor columns show zeros",
-            sponsor_sheet,
+            source,
             missing,
         )
         return pl.DataFrame(schema=_SPONSOR_SCHEMA)
@@ -384,11 +414,13 @@ def _desired_angels_by_location(sponsor: pl.DataFrame) -> dict[str, int]:
 
 def _daily_admissions(
     enriched: pl.DataFrame,
+    source: str = "final_child",
 ) -> tuple[list[date], dict[str, list[int]]]:
     """Count children added per day per pickup location.
 
     Args:
         enriched: The enriched child frame (``created`` as Datetime).
+        source: Child source label used in errors.
 
     Returns:
         A tuple of (every calendar day from the earliest ``created``
@@ -402,7 +434,7 @@ def _daily_admissions(
     stamped = enriched.filter(pl.col("created").is_not_null())
     if stamped.is_empty():
         raise StatsError(
-            "final_child has no usable created timestamps for the daily"
+            f"{source}: no usable created timestamps for the daily"
             " admissions chart"
         )
     counts = (
@@ -444,8 +476,8 @@ def _location_table(
     Args:
         enriched: The enriched child frame.
         family: The family frame (normalized location).
-        sponsor: The sponsor frame (``raw_sponsor`` or
-            ``final_sponsor``), or an empty stand-in.
+        sponsor: Ephemerally prepared or output-eligible ``final_sponsor``
+            rows, or an empty stand-in.
         locations: Ordered location labels.
         gender_keys: Ordered lowercase gender keys for the columns.
 
@@ -791,25 +823,30 @@ def _render_pdf(html: str, pdf_path: Path) -> None:
 def run(cfg: Config, raw: bool = False) -> None:
     """Generate the dated statistics report (HTML and PDF).
 
-    Reads the final sheets (or the raw sheets with ``raw``), computes
-    the daily admissions, the per-location table, and the gender/age
-    distributions, then writes ``<filename_prefix>_<YYYY-MM-DD>.html``
-    and ``.pdf`` into ``report.output_dir``.
+    Reads output-eligible rows from the complete final stores (or prepares
+    raw forms ephemerally with ``raw``), computes the daily admissions, the
+    per-location table, and the gender/age distributions, then writes
+    ``<filename_prefix>_<YYYY-MM-DD>.html`` and ``.pdf`` into
+    ``report.output_dir``.
 
     Args:
         cfg: The pipeline configuration.
-        raw: Build the report from ``raw_child``/``raw_family`` instead
-            of the final sheets; sponsor counts are zero because
-            ``raw_family`` has no ``assigned_sponsor_id``.
+        raw: Build from locally cleaned, ID-assigned prepared rows without
+            applying final-output ignore/orphan filters or writing workbook
+            state.  Sponsored-angel counts are zero because prepared families
+            have no ``assigned_sponsor_id``; desired-angels counts still use
+            prepared sponsors.
 
     Raises:
-        StatsError: If the sheets are unusable or rendering fails.
+        StatsError: If the sources are unusable or rendering fails.
     """
     spec = cfg.report
     out_dir = Path(spec.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     enriched, family, sponsor, locations = _load_enriched(cfg, raw=raw)
-    days, per_location = _daily_admissions(enriched)
+    days, per_location = _daily_admissions(
+        enriched, "prepared child rows" if raw else "final_child"
+    )
     colors = _location_colors(locations)
     gender_keys = [
         key

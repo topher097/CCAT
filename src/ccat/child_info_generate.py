@@ -6,6 +6,9 @@ LibreOffice template ``info_sheet.template_file`` with the child's data
 via py3o and converts the result to a PDF named
 ``AT<season>_<angel_id>.pdf`` in ``info_sheet.output_dir``.  Children
 without an assigned sponsor are skipped (run `ccat match` first).
+Orphaned children (``family_id`` null — no matching family
+registration) and ignored entities are excluded by the eligible-final
+readers but remain in the persistent store for later correction.
 Successfully generated
 rows flip their flag to ``True`` so reruns only process pending children
 (§13).  Failed rows keep ``False`` and are reported as one typed error
@@ -44,10 +47,9 @@ default 30) for hand-filling; the placeholder text is kept in the
 converted PDF.  Individual sponsors with missing contact info render
 blank, as do unassigned children.  Children without an
 assigned sponsor render that section blank for hand-filling, as do
-unmapped ``sponsor.*`` placeholders.  Only the
-original ``final_child`` columns plus ``generated_info_sheet`` are
-written back to the workbook; the enrichment columns never reach the
-sheet.
+unmapped ``sponsor.*`` placeholders.  The ``generated_info_sheet``
+flag is owned directly by ``final_child`` and updated in one atomic
+complete-store write; the enrichment columns are never persisted.
 """
 
 import logging
@@ -67,8 +69,13 @@ from py3o.template import Template
 from tqdm import tqdm
 
 from ccat import sponsor_packets
+from ccat.audit.store import (
+    STATUS_AUDITED,
+    read_eligible_final_frame,
+    read_final,
+    write_final_rows,
+)
 from ccat.config import Config
-from ccat.io import read_sheet, write_sheets
 from ccat.match import canonical_location
 
 logger = logging.getLogger(__name__)
@@ -163,67 +170,55 @@ def _terminate(process: subprocess.Popen[str]) -> None:
         process.wait()
 
 
-def _normalize_flag(frame: pl.DataFrame) -> tuple[pl.DataFrame, bool]:
-    """Normalize the ``generated_info_sheet`` column to Boolean.
-
-    Adds the column (all ``False``) when missing -- the first-run schema
-    evolution (§13) -- fills nulls with ``False``, and tolerates string
-    booleans ("true"/"false") coming back from the sheet.
-
-    Args:
-        frame: The ``final_child`` frame.
-
-    Returns:
-        A tuple of (normalized frame, whether the column was missing).
-    """
-    name = "generated_info_sheet"
-    if name not in frame.columns:
-        return frame.with_columns(pl.lit(False).alias(name)), True
-    if frame.schema[name] == pl.Boolean:
-        return frame.with_columns(pl.col(name).fill_null(False)), False
-    text = pl.col(name).cast(pl.String).str.strip_chars().str.to_lowercase()
-    normalized = pl.when(text == "true").then(True).otherwise(False).alias(name)
-    return frame.with_columns(normalized), False
-
-
-def _load_enriched_rows(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame, bool]:
+def _load_enriched_rows(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Read ``final_child`` and enrich it with family and sponsor data (§13).
+
+    Eligible readers reproduce the retired final projections: ignored
+    entities are excluded, and children must have a ``family_id``.  The
+    full store is not modified by enrichment.
 
     Args:
         cfg: The pipeline configuration.
 
     Returns:
-        A tuple of (base frame -- the normalized original
-        ``final_child`` columns, enriched frame -- base plus the family
-        and sponsor join and computed columns, whether
-        ``generated_info_sheet`` was newly added to the schema).
+        A tuple of (the eligible ``final_child`` frame, that frame plus
+        family/sponsor joins and computed columns).
 
     Raises:
-        InfoSheetError: If ``final_child`` is missing or empty, if
-            ``final_family``/``final_sponsor`` is missing or lacks the
-            join columns, if ``family_id``/``sponsor_id`` is duplicated
-            or missing on the family/sponsor side, or if a child row has
-            no ``family_id``.
+        InfoSheetError: If ``final_child`` is missing or has no eligible
+            rows, if ``final_family``/``final_sponsor`` is missing or
+            lacks the join columns, or if ``family_id``/``sponsor_id`` is
+            duplicated or missing on the family/sponsor side.
     """
-    frame = read_sheet(cfg.excel_file, "final_child")
-    if frame is None or frame.is_empty():
+    frame = read_eligible_final_frame(cfg, "child")
+    if frame.is_empty():
         raise InfoSheetError(
-            "final_child sheet is missing or empty; run `ccat audit` first"
+            "final_child sheet is missing or has no eligible rows;"
+            " run `ccat audit` first"
         )
-    frame, schema_added = _normalize_flag(frame)
     if "family_id" not in frame.columns:
         raise InfoSheetError(
             "final_child has no family_id column; run `ccat match` first"
         )
     orphaned = frame.filter(pl.col("family_id").is_null())
     if not orphaned.is_empty():
-        ids = orphaned["zite_record_id"].to_list()
-        raise InfoSheetError(
-            "final_child rows without family_id (run `ccat match` first):"
-            f" {ids}"
+        # Orphaned children (no matching family registration) cannot be
+        # generated; ignore them for the user to fix later.
+        logger.warning(
+            "ignoring %d final_child row(s) without family_id"
+            " (orphaned; run `ccat screen`/`ccat audit` once the family"
+            " registration exists): %s",
+            orphaned.height,
+            orphaned["zite_record_id"].to_list(),
         )
-    family_frame = read_sheet(cfg.excel_file, "final_family")
-    if family_frame is None or family_frame.is_empty():
+        frame = frame.filter(pl.col("family_id").is_not_null())
+        if frame.is_empty():
+            raise InfoSheetError(
+                "every final_child row lacks a family_id (orphaned);"
+                " nothing to generate"
+            )
+    family_frame = read_eligible_final_frame(cfg, "family")
+    if family_frame.is_empty():
         raise InfoSheetError(
             "final_family sheet is missing or empty; run `ccat match` first"
         )
@@ -258,8 +253,8 @@ def _load_enriched_rows(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame, bool]:
         on="family_id",
         how="left",
     )
-    sponsor_frame = read_sheet(cfg.excel_file, "final_sponsor")
-    if sponsor_frame is None or sponsor_frame.is_empty():
+    sponsor_frame = read_eligible_final_frame(cfg, "sponsor")
+    if sponsor_frame.is_empty():
         raise InfoSheetError(
             "final_sponsor sheet is missing or empty; run `ccat match` first"
         )
@@ -319,24 +314,26 @@ def _load_enriched_rows(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame, bool]:
         enriched.group_by("family_id").len().rename({"len": "family_size"})
     )
     enriched = enriched.join(family_size, on="family_id", how="left")
-    return frame, enriched, schema_added
+    return frame, enriched
 
 
 def _pending_rows(
     frame: pl.DataFrame, overwrite: bool = False
 ) -> tuple[pl.DataFrame, int]:
-    """Select rows still awaiting a generated info sheet (§13.4).
+    """Select rows still awaiting a generated info sheet (§13.4, §7.5).
 
-    A row is pending when its family has an **assigned sponsor** and
-    its ``generated_info_sheet`` flag is False (every sponsored row,
-    with ``overwrite``) -- the sheet's purpose is to hand the sponsor
-    their child's wish list, so unsponsored children get no sheet.
+    A row is pending when it is **audited** (``status == "audited"``,
+    the readiness gate replacing the old ``audited`` Boolean), its
+    family has an **assigned sponsor**, and its ``generated_info_sheet``
+    flag is False (every sponsored audited row, with ``overwrite``) --
+    the sheet's purpose is to hand the sponsor their child's wish list,
+    so unsponsored or unaudited children get no sheet.
 
     Args:
         frame: An enriched ``final_child`` frame (needs the
-            ``assigned_sponsor_id`` join column).
+            ``assigned_sponsor_id`` join column and ``status``).
         overwrite: Ignore the ``generated_info_sheet`` column: every
-            sponsored row is pending.
+            sponsored audited row is pending.
 
     Returns:
         A tuple of (the pending rows, how many rows were skipped
@@ -344,12 +341,24 @@ def _pending_rows(
 
     Raises:
         InfoSheetError: If a pending row lacks ``zite_record_id`` or a
-            usable ``angel_id`` filename.
+            usable ``angel_id`` filename, or ``final_child.status`` is
+            missing (run ``ccat audit`` first).
     """
+    if "status" not in frame.columns:
+        raise InfoSheetError(
+            "final_child has no status column; run `ccat audit` first"
+        )
     if overwrite:
         pending = frame
     else:
         pending = frame.filter(~pl.col("generated_info_sheet"))
+    audited = pending.filter(pl.col("status") == STATUS_AUDITED)
+    if audited.height < pending.height:
+        logger.info(
+            "skipping %d child(ren) not yet audited (status gate, §7.5)",
+            pending.height - audited.height,
+        )
+    pending = audited
     sponsored = pending.filter(pl.col("assigned_sponsor_id").is_not_null())
     skipped_unsponsored = pending.height - sponsored.height
     if skipped_unsponsored:
@@ -570,25 +579,26 @@ def _find_binary(name: str) -> str | None:
     return shutil.which(name)
 
 
-def _record_flags(frame: pl.DataFrame, generated: list[Any]) -> pl.DataFrame:
-    """Flip ``generated_info_sheet`` to True for the generated rows.
+def _commit_generated_flags(cfg: Config, generated: list[Any]) -> None:
+    """Mark actual PDF successes in the full ``final_child`` store (§7.5).
+
+    Only ``generated_info_sheet`` changes.  Ignored, orphaned, raw-missing,
+    and failed rows remain present with their existing values.  The
+    complete store is written atomically through the generate-owned writer;
+    its final-child formula cache receives ``cfg.xmas`` automatically.
 
     Args:
-        frame: The base ``final_child`` frame.
+        cfg: Pipeline configuration.
         generated: ``zite_record_id`` values generated this run.
-
-    Returns:
-        The frame with updated flags (unchanged when ``generated`` is
-        empty).
     """
     if not generated:
-        return frame
-    return frame.with_columns(
-        pl.when(pl.col("zite_record_id").is_in(generated))
-        .then(True)
-        .otherwise(pl.col("generated_info_sheet"))
-        .alias("generated_info_sheet")
-    )
+        return
+    rows = read_final(cfg, "child")
+    done = {str(value) for value in generated}
+    for row in rows:
+        if str(row.get("zite_record_id")) in done:
+            row["generated_info_sheet"] = True
+    write_final_rows(cfg, module="generate", entity="child", rows=rows)
 
 
 def _sheet_stem(cfg: Config, angel_id: str) -> str:
@@ -621,12 +631,13 @@ def run(
     ``info_sheet.output_dir`` on a thread pool of ``max_workers``
     workers (``info_sheet.max_workers`` by default, clamped to the
     pending row count), tracked by a ``tqdm`` progress bar.
-    Successfully generated rows flip their flag to ``True`` in one
-    atomic sheet write at the end, so an interrupted run never leaves a
-    half-updated workbook and failed rows are simply picked up again on
-    the next run.  Ctrl+C cancels queued rows, terminates in-flight
-    LibreOffice conversions, commits the flags of the children already
-    generated, and re-raises the interrupt.
+    Successfully generated rows flip their ``generated_info_sheet``
+    flag directly in ``final_child`` in one atomic complete-store write,
+    so an interrupted run never leaves a half-updated workbook and failed
+    rows are simply picked up again on the next run.  Ctrl+C cancels
+    queued rows, terminates in-flight LibreOffice conversions, commits
+    the flags of the children already generated, and re-raises the
+    interrupt.
 
     Packet phase: after every sponsored angel's sheet exists, one
     sponsor packet directory per assigned sponsor is built under
@@ -663,7 +674,7 @@ def run(
         )
     out_dir = Path(spec.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    base, enriched, schema_added = _load_enriched_rows(cfg)
+    _base, enriched = _load_enriched_rows(cfg)
     pending, _skipped = _pending_rows(enriched, overwrite=overwrite)
     if sponsor is not None:
         scoped = pending.filter(pl.col("assigned_sponsor_id") == sponsor)
@@ -827,11 +838,7 @@ def run(
                 executor.shutdown(wait=True)
             finally:
                 progress.close()
-    base = _record_flags(base, generated)
-    if schema_added or generated:
-        write_sheets(
-            cfg.excel_file, "generate", {"final_child": base}, xmas=cfg.xmas
-        )
+    _commit_generated_flags(cfg, generated)
     logger.info(
         "generated %d info sheet(s); %d failed", len(generated), len(failed)
     )

@@ -1,603 +1,27 @@
-"""Module 3 — local human audit web server (§7).
+"""Module 3 — the NiceGUI audit server (§9.1, §9.3).
 
-A Python-stdlib ``http.server`` serving one static HTML page plus a small
-JSON API.  No frameworks, no extra dependencies, single human user.  The
-tool reviews raw vs. adjudicated child data side by side and commits
-audited rows to ``final_child``; it never touches ``final_family`` or
-``final_sponsor`` (§7.3).
-
-Children appearing in the acquire ``dob_conflict_log`` (§5.6) carry a
-sibling-DOB-conflict note: it is merged into the ``potential_anomoly``
-field of the queue item shown to the auditor, and re-merged (idempotently)
-into every saved ``final_child`` row so the conflict can never be dropped
-by an edit or an unscreened child.
+``run()`` loads the configuration, seeds the adj sheets
+(:func:`ccat.audit.store.ensure_final_sheets`), installs the app state,
+and serves the pages from :mod:`ccat.audit.pages` until interrupted.
+The process-discovery helpers keep ``--restart`` working: a stale
+audit tool still holding the port is stopped before the new one binds.
 """
 
-import json
 import logging
 import os
 import re
 import signal
 import time
-from datetime import datetime, UTC
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
-from urllib.parse import urlsplit
+from typing import Any
 
-import polars as pl
+from nicegui import ui
 
+from ccat.audit import AuditError, pages
+from ccat.audit.store import ensure_final_sheets
 from ccat.config import Config
-from ccat.io import read_sheet, write_sheets
-from ccat.screening import ADJ_CHILD_COLUMNS, first_family_children
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-    from polars._typing import PolarsDataType
 
 logger = logging.getLogger(__name__)
-
-#: adj_child fields displayed but never editable: ``age_at_xmas`` is
-#: computed by acquire (§5.5) and never overridden by the audit tool.
-ADJ_READ_ONLY = ("age_at_xmas",)
-
-#: Editable adjudicable fields (everything in adj_child except the key
-#: and read-only fields).
-ADJ_FIELDS = tuple(
-    column
-    for column in ADJ_CHILD_COLUMNS
-    if column not in ("zite_record_id",) + ADJ_READ_ONLY
-)
-
-#: Queue/API display order: editable fields with read-only fields placed
-#: beside the raw field they annotate (age_at_xmas after dob).
-_dob_index = ADJ_FIELDS.index("dob")
-ADJ_QUEUE_FIELDS = (
-    ADJ_FIELDS[: _dob_index + 1] + ADJ_READ_ONLY + ADJ_FIELDS[_dob_index + 1 :]
-)
-
-#: Control fields accepted in a PUT body alongside the adj fields (§7.2).
-CONTROL_FIELDS = ("special_needs", "audited", "require_clarification")
-
-#: Extra final_child columns beyond the raw_child columns (§7.3).
-FINAL_CHILD_EXTRA = (
-    "potential_anomoly",
-    "special_needs",
-    "audited",
-    "require_clarification",
-    "audited_at",
-    "generated_info_sheet",
-)
-
-#: Pre-filled clarification note for orphaned children (§7.2).
-ORPHAN_NOTE = "No matching family registration for this child's primary email"
-
-
-class AuditError(Exception):
-    """Raised when the audit tool cannot complete a request."""
-
-
-#: Prefix of the sibling-DOB-conflict note merged into
-#: ``potential_anomoly``; ``dob_conflict_log`` rows from acquire (§5.6)
-#: are surfaced to the auditor and preserved in ``final_child``.
-DOB_CONFLICT_PREFIX = "Sibling DOB conflict"
-
-
-def dob_conflict_notes(
-    log_rows: list[dict[str, Any]] | None, zite_record_id: str
-) -> str | None:
-    """Collect sibling DOB conflict notes for one child (§5.6, §7).
-
-    Args:
-        log_rows: Rows of the ``dob_conflict_log`` sheet (or None when
-            the sheet is absent).
-        zite_record_id: The child's join key.
-
-    Returns:
-        One note per conflicting sibling pair (child seen as either
-        side of the pair), joined with ``"; "``, or None when the child
-        has no conflicts.
-    """
-    notes: list[str] = []
-    seen_siblings: set[Any] = set()
-    for row in log_rows or []:
-        for side in ("a", "b"):
-            if row.get(f"child_{side}_zite_record_id") != zite_record_id:
-                continue
-            other = "b" if side == "a" else "a"
-            sibling_id = row.get(f"child_{other}_zite_record_id")
-            # One note per conflicting sibling, however the sheet was
-            # written (an older run could contain both directions).
-            if sibling_id in seen_siblings:
-                break
-            seen_siblings.add(sibling_id)
-            notes.append(
-                f"{DOB_CONFLICT_PREFIX}: born"
-                f" {row.get('gap_months')} month(s)"
-                f" ({row.get('gap_days')} day(s)) apart from sibling"
-                f" {row.get(f'child_{other}_first_name')}"
-                f" ({row.get(f'child_{other}_angel_id')},"
-                f" dob {row.get(f'child_{other}_dob')})"
-            )
-            break
-    return "; ".join(notes) if notes else None
-
-
-def merge_anomoly(existing: str | None, notes: str | None) -> str | None:
-    """Merge conflict notes into a ``potential_anomoly`` value.
-
-    Args:
-        existing: The current ``potential_anomoly`` text (may be null).
-        notes: Notes from :func:`dob_conflict_notes` (may be null).
-
-    Returns:
-        The merged text: notes are appended after any existing text
-        once (idempotent), or unchanged when there are no notes.
-    """
-    if not notes:
-        return existing
-    text = (existing or "").strip()
-    if not text:
-        return notes
-    if notes in text:
-        return text
-    return f"{text}; {notes}"
-
-
-class AuditClientError(Exception):
-    """Raised for client errors carrying an HTTP status code."""
-
-    def __init__(self, status: int, message: str) -> None:
-        """Store the HTTP status and message.
-
-        Args:
-            status: HTTP status code to return (400/404/409).
-            message: Human-readable explanation.
-        """
-        super().__init__(message)
-        self.status = status
-
-
-def _as_bool(value: Any) -> bool | None:
-    """Coerce a sheet/API value to bool, tolerating string booleans."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text == "true":
-        return True
-    if text == "false":
-        return False
-    return None
-
-
-class AuditState:
-    """Reads and writes the audit queue and final_child rows (§7)."""
-
-    def __init__(
-        self,
-        cfg: Config,
-        test_mode: bool = False,
-        overwrite: bool = False,
-        hide_completed: bool = False,
-    ) -> None:
-        """Bind the state to one pipeline configuration.
-
-        Args:
-            cfg: Pipeline configuration.
-            test_mode: Limit the queue to the first family's children and
-                fire ``on_complete`` once that family is fully audited.
-            overwrite: Ignore the ``audited`` column of ``final_child``:
-                audited children re-enter the queue and frozen rows may
-                be re-saved (§7).
-            hide_completed: Queue only children with no ``final_child``
-                row at all; children already saved (audited or not) are
-                hidden, even with ``overwrite`` set.
-        """
-        self.cfg = cfg
-        self.test_mode = test_mode
-        self.overwrite = overwrite
-        self.hide_completed = hide_completed
-        self.on_complete: Callable[[], None] | None = None
-
-    def _load_sheets(
-        self,
-    ) -> tuple[
-        pl.DataFrame,
-        pl.DataFrame | None,
-        pl.DataFrame | None,
-        pl.DataFrame | None,
-    ]:
-        """Load raw_child, adj_child, final_child, and dob_conflict_log.
-
-        Returns:
-            A tuple of (raw_child rows, adj_child rows keyed lookup is
-            done by callers, final_child frame, dob_conflict_log frame --
-            None when the sheet is absent).
-
-        Raises:
-            AuditError: If raw_child is missing (run `ccat acquire` first).
-        """
-        raw_child = read_sheet(self.cfg.excel_file, "raw_child")
-        if raw_child is None or raw_child.is_empty():
-            raise AuditError(
-                "raw_child sheet is missing or empty; run `ccat acquire` first"
-            )
-        adj_child = read_sheet(self.cfg.excel_file, "adj_child")
-        final_child = read_sheet(self.cfg.excel_file, "final_child")
-        dob_conflict_log = read_sheet(self.cfg.excel_file, "dob_conflict_log")
-        return raw_child, adj_child, final_child, dob_conflict_log
-
-    def queue(self) -> list[dict[str, Any]]:
-        """Children needing review (§7.1).
-
-        Every child in raw_child whose zite_record_id has no final_child
-        row, or has one with ``audited == false``.  With ``overwrite``
-        set, every child is queued regardless of the ``audited`` column.
-        With ``hide_completed`` set, only children with no
-        ``final_child`` row at all are queued.  In test mode the queue
-        is limited to the first family's children.
-
-        Returns:
-            Queue items: ``{zite_record_id, angel_id, raw, adj, final,
-            require_clarification, special_needs}`` where ``adj`` is
-            the adj_child row (all-null fields when screened with no
-            changes) or the null object when not screened yet, ``final``
-            is the child's existing final_child adjudicated fields (or
-            null when never saved), and the last two are the child's
-            existing ``final_child`` control values.
-        """
-        raw_child, adj_child, final_child, dob_conflict_log = (
-            self._load_sheets()
-        )
-        log_rows = (
-            dob_conflict_log.to_dicts() if dob_conflict_log is not None else []
-        )
-        adj_by_id: dict[Any, dict[str, Any]] = {}
-        if adj_child is not None:
-            for row in adj_child.to_dicts():
-                adj_by_id[row.get("zite_record_id")] = row
-        final_by_id: dict[Any, dict[str, Any]] = {}
-        if final_child is not None:
-            for row in final_child.to_dicts():
-                final_by_id[row.get("zite_record_id")] = row
-        items: list[dict[str, Any]] = []
-        for raw_row in raw_child.to_dicts():
-            record_id = raw_row.get("zite_record_id")
-            final_row = final_by_id.get(record_id)
-            if self.hide_completed and final_row is not None:
-                continue
-            if not self.overwrite and (
-                final_row is not None
-                and _as_bool(final_row.get("audited")) is True
-            ):
-                continue
-            adj_row = adj_by_id.get(record_id)
-            if adj_row is not None:
-                adj = {field: adj_row.get(field) for field in ADJ_QUEUE_FIELDS}
-                adj["zite_record_id"] = record_id
-            else:
-                adj = None
-            # The child's existing final_child row: an audited=false
-            # child's saved edits must reappear on the next load.
-            final_fields: dict[str, Any] | None = None
-            if final_row is not None:
-                final_fields = {
-                    field: final_row.get(field) for field in ADJ_QUEUE_FIELDS
-                }
-            notes = dob_conflict_notes(log_rows, str(record_id))
-            if notes:
-                if adj is None:
-                    adj = {field: None for field in ADJ_QUEUE_FIELDS}
-                    adj["zite_record_id"] = record_id
-                adj["potential_anomoly"] = merge_anomoly(
-                    adj.get("potential_anomoly"), notes
-                )
-            items.append(
-                {
-                    "zite_record_id": record_id,
-                    "angel_id": raw_row.get("angel_id"),
-                    "raw": raw_row,
-                    "adj": adj,
-                    "final": final_fields,
-                    # Existing audit-trail values from final_child, so
-                    # the UI restores the child's saved notes (and
-                    # clears them when there are none).
-                    "require_clarification": (
-                        final_row.get("require_clarification")
-                        if final_row is not None
-                        else None
-                    ),
-                    "special_needs": (
-                        _as_bool(final_row.get("special_needs")) is True
-                        if final_row is not None
-                        else False
-                    ),
-                }
-            )
-        if self.test_mode:
-            allowed = {
-                child["zite_record_id"]
-                for child in first_family_children(raw_child.to_dicts())
-            }
-            items = [
-                item for item in items if item["zite_record_id"] in allowed
-            ]
-        return items
-
-    def save(self, zite_record_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        """Write one child's final_child row (§7.1, §7.3).
-
-        Args:
-            zite_record_id: The child's join key.
-            body: The edited adj JSON plus control fields.
-
-        Returns:
-            The written final_child row.
-
-        Raises:
-            AuditClientError: With status 400 for invalid bodies, 404 for
-                unknown children, and 409 for frozen (already audited)
-                rows or audit attempts on orphaned children.  Frozen-row
-                409s are bypassed when the state was created with
-                ``overwrite`` set.
-        """
-        unknown = [
-            key for key in body if key not in ADJ_FIELDS + CONTROL_FIELDS
-        ]
-        if unknown:
-            raise AuditClientError(400, f"unknown keys: {sorted(unknown)}")
-        raw_child, _adj_child, final_child, dob_conflict_log = (
-            self._load_sheets()
-        )
-        raw_rows = raw_child.to_dicts()
-        raw_row = next(
-            (
-                row
-                for row in raw_rows
-                if row.get("zite_record_id") == zite_record_id
-            ),
-            None,
-        )
-        if raw_row is None:
-            raise AuditClientError(404, f"unknown child {zite_record_id!r}")
-        audited = _as_bool(body.get("audited"))
-        if audited is None:
-            raise AuditClientError(400, "audited must be a boolean")
-        special_needs = _as_bool(body.get("special_needs"))
-        if special_needs is None:
-            raise AuditClientError(400, "special_needs must be a boolean")
-        require_clarification = body.get("require_clarification")
-        if require_clarification is not None and not isinstance(
-            require_clarification, str
-        ):
-            raise AuditClientError(
-                400, "require_clarification must be a string"
-            )
-        if (
-            require_clarification is not None
-            and require_clarification.strip() == ""
-        ):
-            require_clarification = None
-        if raw_row.get("angel_id") is None and audited:
-            raise AuditClientError(
-                400,
-                "orphaned child cannot be marked audited before a matching"
-                " family registration exists (§7.2)",
-            )
-        final_rows: list[dict[str, Any]] = []
-        if final_child is not None:
-            final_rows = final_child.to_dicts()
-        existing = next(
-            (
-                row
-                for row in final_rows
-                if row.get("zite_record_id") == zite_record_id
-            ),
-            None,
-        )
-        if (
-            existing is not None
-            and not self.overwrite
-            and (_as_bool(existing.get("audited")) is True)
-        ):
-            raise AuditClientError(
-                409,
-                f"child {zite_record_id!r} is already audited and frozen (§7.3)",
-            )
-        final_row = build_final_child_row(
-            raw_row,
-            body,
-            special_needs,
-            audited,
-            require_clarification,
-            generated_info_sheet=(
-                _as_bool(existing.get("generated_info_sheet")) is True
-                if existing is not None
-                else False
-            ),
-        )
-        log_rows = (
-            dob_conflict_log.to_dicts() if dob_conflict_log is not None else []
-        )
-        notes = dob_conflict_notes(log_rows, zite_record_id)
-        if notes:
-            final_row["potential_anomoly"] = merge_anomoly(
-                final_row["potential_anomoly"], notes
-            )
-        if existing is None:
-            final_rows.append(final_row)
-        else:
-            final_rows[final_rows.index(existing)] = final_row
-        frame = _final_child_frame(final_rows, raw_child)
-        write_sheets(
-            self.cfg.excel_file,
-            "audit",
-            {"final_child": frame},
-            xmas=self.cfg.xmas,
-        )
-        logger.info(
-            "saved final_child row for %s (audited=%s)", zite_record_id, audited
-        )
-        if self.test_mode and not self.queue():
-            logger.info(
-                "test mode: first family fully audited; stopping audit tool"
-            )
-            if self.on_complete is not None:
-                self.on_complete()
-        return final_row
-
-
-def build_final_child_row(
-    raw_row: dict[str, Any],
-    adj_body: dict[str, Any],
-    special_needs: bool,
-    audited: bool,
-    require_clarification: str | None,
-    generated_info_sheet: bool = False,
-) -> dict[str, Any]:
-    """Join raw_child with the edited adj JSON into one final_child row (§7.3).
-
-    Starts from the full raw_child row and replaces any adjudicable field
-    whose adj value is non-null, then always sets the control fields.
-
-    Args:
-        raw_row: The full raw_child row.
-        adj_body: The edited adj JSON from the audit UI.
-        special_needs: The special-needs checkbox value.
-        audited: Whether the row is being marked audited.
-        require_clarification: Optional free-text clarification note.
-        generated_info_sheet: Whether a child info sheet PDF was already
-            generated for this child (module 5); preserved across audit
-            re-saves, ``False`` for new rows.
-
-    Returns:
-        The complete final_child row.
-    """
-    row = dict(raw_row)
-    for field in ADJ_FIELDS:
-        value = adj_body.get(field)
-        if value is not None:
-            row[field] = value
-    row["zite_record_id"] = raw_row["zite_record_id"]
-    row["angel_id"] = raw_row.get("angel_id")
-    row["potential_anomoly"] = adj_body.get("potential_anomoly")
-    row["special_needs"] = special_needs
-    row["audited"] = audited
-    row["require_clarification"] = require_clarification
-    row["audited_at"] = datetime.now(UTC).isoformat()
-    row["generated_info_sheet"] = generated_info_sheet
-    return row
-
-
-def _final_child_frame(
-    rows: list[dict[str, Any]], raw_child: pl.DataFrame
-) -> pl.DataFrame:
-    """Build the final_child DataFrame preserving column order and dtypes.
-
-    Boolean columns tolerate the workbook round-trip: another module's
-    rewrite can leave ``audited``/``special_needs``/
-    ``generated_info_sheet`` reading back as strings ("true"/"false"),
-    which would poison the Boolean-typed builder.
-    """
-    schema: dict[str, PolarsDataType] = dict(raw_child.schema)
-    schema.update(
-        {
-            "potential_anomoly": pl.String,
-            "special_needs": pl.Boolean,
-            "audited": pl.Boolean,
-            "require_clarification": pl.String,
-            "audited_at": pl.String,
-            "generated_info_sheet": pl.Boolean,
-        }
-    )
-    boolean_columns = ("special_needs", "audited", "generated_info_sheet")
-    normalized: list[dict[str, Any]] = []
-    for row in rows:
-        row = {key: row.get(key) for key in schema}
-        for column in boolean_columns:
-            row[column] = _as_bool(row.get(column))
-        normalized.append(row)
-    frame = pl.DataFrame(normalized, schema=schema)
-    frame = frame.with_columns(pl.col("generated_info_sheet").fill_null(False))
-    return frame.select(list(schema))
-
-
-def make_handler(state: AuditState) -> type[BaseHTTPRequestHandler]:
-    """Build the request handler bound to one audit state."""
-
-    class AuditHandler(BaseHTTPRequestHandler):
-        """HTTP handler for the audit UI and JSON API."""
-
-        server_version = "CCATAudit/1.0"
-
-        def _send_json(self, status: int, payload: object) -> None:
-            """Write a JSON response."""
-            data = json.dumps(payload).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def do_GET(self) -> None:  # noqa: N802 - http.server API
-            """Serve the UI page and the queue API."""
-            path = urlsplit(self.path).path
-            if path == "/":
-                index_path = Path(__file__).parent / "static" / "index.html"
-                if not index_path.is_file():
-                    self._send_json(500, {"error": "index.html missing"})
-                    return
-                data = index_path.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-                return
-            if path == "/api/queue":
-                try:
-                    items = state.queue()
-                except AuditError as error:
-                    self._send_json(500, {"error": str(error)})
-                    return
-                self._send_json(200, items)
-                return
-            self._send_json(404, {"error": "not found"})
-
-        def do_PUT(self) -> None:  # noqa: N802 - http.server API
-            """Save one child's edited adj JSON to final_child."""
-            match = re.fullmatch(
-                r"/api/children/([^/]+)", urlsplit(self.path).path
-            )
-            if match is None:
-                self._send_json(404, {"error": "not found"})
-                return
-            length = int(self.headers.get("Content-Length", "0"))
-            try:
-                body = json.loads(self.rfile.read(length))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                self._send_json(400, {"error": "body is not valid JSON"})
-                return
-            if not isinstance(body, dict):
-                self._send_json(400, {"error": "body must be a JSON object"})
-                return
-            try:
-                row = state.save(match.group(1), body)
-            except AuditClientError as error:
-                self._send_json(error.status, {"error": str(error)})
-                return
-            except AuditError as error:
-                self._send_json(500, {"error": str(error)})
-                return
-            self._send_json(200, {"ok": True, "row": row})
-
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-            """Route http.server access logs to the pipeline logger."""
-            logger.info("%s - %s", self.address_string(), format % args)
-
-    return AuditHandler
 
 
 def _is_audit_command(arguments: list[bytes]) -> bool:
@@ -720,29 +144,22 @@ def stop_audit_processes(
 def run(
     cfg: Config,
     test: bool = False,
-    overwrite: bool = False,
     restart: bool = False,
-    hide_completed: bool = False,
+    **_unused: Any,
 ) -> None:
-    """Run module 3: serve the audit tool until interrupted (§7).
+    """Run module 3: serve the audit tool until interrupted (§9.3).
 
     Args:
         cfg: Pipeline configuration.
-        test: Stop after the first full family: the queue only contains
-            the first family's children and the server shuts itself down
-            once that family is fully audited.  Exits immediately when the
-            first family is already audited.
-        overwrite: Ignore the ``audited`` column of ``final_child``:
-            audited children re-enter the queue and frozen rows may be
-            re-saved (§7).
+        test: Limit every list to the first family (lowest
+            ``family_id``), its children, and the first sponsor; the
+            dashboard reflects the reduced scope (§10.2).
         restart: Stop any currently running audit tool process before
             starting, so a stale server does not block the port.
-        hide_completed: Queue only children with no ``final_child`` row
-            at all; children saved earlier (audited or not) are hidden.
 
     Raises:
-        AuditError: If the configured port cannot be bound even after a
-            restart attempt.
+        AuditError: If the raw sheets are missing (run ``ccat acquire``
+            first) or the configured port cannot be bound.
     """
     if restart:
         stale = find_audit_processes()
@@ -750,20 +167,21 @@ def run(
             stop_audit_processes(stale)
         else:
             logger.info("restart: no running audit tool process found")
-    state = AuditState(
-        cfg,
-        test_mode=test,
-        overwrite=overwrite,
-        hide_completed=hide_completed,
+    ensure_final_sheets(cfg)
+    pages.set_state(pages.AuditState(cfg, test_mode=test))
+    logger.info(
+        "audit tool listening on http://%s:%d (Ctrl-C to stop%s)",
+        cfg.audit.host,
+        cfg.audit.port,
+        "; test mode: first family + first sponsor scope" if test else "",
     )
-    if test and not state.queue():
-        logger.info(
-            "test mode: first family already audited; nothing to review"
-        )
-        return
     try:
-        server = ThreadingHTTPServer(
-            (cfg.audit.host, cfg.audit.port), make_handler(state)
+        ui.run(
+            host=cfg.audit.host,
+            port=cfg.audit.port,
+            title=f"Human Audit — {cfg.season}",
+            reload=False,
+            show=True,
         )
     except OSError as error:
         raise AuditError(
@@ -772,16 +190,3 @@ def run(
             " to stop a running audit tool, or change audit.port in the"
             " config)"
         ) from error
-    state.on_complete = server.shutdown
-    logger.info(
-        "audit tool listening on http://%s:%d (Ctrl-C to stop%s)",
-        cfg.audit.host,
-        cfg.audit.port,
-        "; test mode: stops after the first family is audited" if test else "",
-    )
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        logger.info("audit tool stopped")
-    finally:
-        server.server_close()

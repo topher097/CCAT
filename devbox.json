@@ -13,7 +13,8 @@
     "tabiew@latest",
     "frogmouth@latest",
     "pandoc@latest",
-    "ugrep@latest"
+    "ugrep@latest",
+    "mdterm@latest"
   ],
   "shell": {
     "init_hook": [

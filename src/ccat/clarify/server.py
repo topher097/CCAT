@@ -2,7 +2,7 @@
 
 Serves a single-user local page listing every family with flagged
 Angels.  Each family card shows the Angels and their
-``require_clarification`` notes, the family's contact-status
+``clarification_notes`` notes, the family's contact-status
 ("Mark contacted" stamps the time; a "Reply received" switch records
 the answer), and two draft actions:
 
@@ -569,7 +569,7 @@ def _family_card(state: ClarifyState, family: FamilyEntry) -> None:
                         ("angel_id", "Angel"),
                         ("first_name", "First name"),
                         ("raw_dob", "Date of birth"),
-                        ("require_clarification", "Clarification needed"),
+                        ("clarification_notes", "Clarification needed"),
                         ("needs", "Needs"),
                         ("desires", "Wishes"),
                     )
@@ -579,7 +579,7 @@ def _family_card(state: ClarifyState, family: FamilyEntry) -> None:
                         "angel_id": angel.angel_id,
                         "first_name": angel.first_name,
                         "raw_dob": angel.raw_dob or "—",
-                        "require_clarification": angel.require_clarification,
+                        "clarification_notes": angel.clarification_notes,
                         "needs": " | ".join(
                             part
                             for part in (angel.need_1, angel.need_2)

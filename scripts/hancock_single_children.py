@@ -33,12 +33,16 @@ def build_table(excel_file: Path) -> pl.DataFrame:
     if not excel_file.exists():
         raise FileNotFoundError(f"Excel file not found: {excel_file}")
 
-    children = pl.read_excel(excel_file, sheet_name="final_child")
+    children = pl.read_excel(excel_file, sheet_name="final_child").filter(
+        ~pl.col("ignore").fill_null(False) & pl.col("family_id").is_not_null()
+    )
     if children.is_empty():
         raise ValueError("final_child sheet is missing or empty")
 
-    families = pl.read_excel(excel_file, sheet_name="final_family").select(
-        "family_id", "gift_pickup_location"
+    families = (
+        pl.read_excel(excel_file, sheet_name="final_family")
+        .filter(~pl.col("ignore").fill_null(False))
+        .select("family_id", "gift_pickup_location")
     )
     if families.is_empty():
         raise ValueError("final_family sheet is missing or empty")

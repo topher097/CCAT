@@ -34,7 +34,7 @@ def clarification_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
 
     Args:
         rows: Row dicts with at least ``family_id``, ``angel_id``,
-            ``first_name``, and ``require_clarification``.
+            ``first_name``, and ``clarification_notes``.
 
     Returns:
         A frame with every column ``group_families`` consumes.
@@ -61,7 +61,7 @@ def families() -> Any:
                     "family_id": 2,
                     "angel_id": "2B",
                     "first_name": "Birch",
-                    "require_clarification": "shoe size?",
+                    "clarification_notes": "shoe size?",
                     "raw_dob": "2020-05-05",
                     "family_first_name": "Istiak",
                     "family_last_name": "Ahammed",
@@ -72,19 +72,19 @@ def families() -> Any:
                     "family_id": 1,
                     "angel_id": "1A",
                     "first_name": "Aspen",
-                    "require_clarification": "mattress size?",
+                    "clarification_notes": "mattress size?",
                 },
                 {
                     "family_id": 1,
                     "angel_id": "1B",
                     "first_name": "Cedar",
-                    "require_clarification": "pant size?",
+                    "clarification_notes": "pant size?",
                 },
                 {
                     "family_id": None,
                     "angel_id": "9A",
                     "first_name": "Orphan",
-                    "require_clarification": "no family?",
+                    "clarification_notes": "no family?",
                 },
             ]
         )

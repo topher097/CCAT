@@ -34,6 +34,18 @@ def load_test_cfg(**updates: object) -> Config:
     return config.model_copy(update=updates)
 
 
+@pytest.fixture(autouse=True)
+def _pin_default_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests on the original season config.
+
+    The user's ``.envrc`` exports ``DEFAULT_CONFIG`` pointing at the v2
+    config; the test suite builds its fixtures from the original
+    config's table specs, so tests pin the variable to the repo
+    fallback regardless of the environment they run in.
+    """
+    monkeypatch.setenv("DEFAULT_CONFIG", str(CONFIG_PATH))
+
+
 @pytest.fixture
 def cfg(tmp_path: Path) -> Config:
     """Config with all file paths redirected into a temp directory."""
@@ -41,6 +53,36 @@ def cfg(tmp_path: Path) -> Config:
         excel_file=str(tmp_path / "wb.xlsx"),
         log_file=str(tmp_path / "ccat.log"),
         match_report_csv=str(tmp_path / "report.csv"),
+    )
+
+
+def load_output_cfg(tmp_path: Path) -> Config:
+    """Config redirecting every generated-output path into ``tmp_path``.
+
+    Like :func:`load_test_cfg` but also redirects the clarify,
+    info-sheet, and sponsor-packet output directories, so no test ever
+    writes into the real ``output/`` tree.
+    """
+    base = load_test_cfg(
+        excel_file=str(tmp_path / "wb.xlsx"),
+        log_file=str(tmp_path / "ccat.log"),
+        match_report_csv=str(tmp_path / "report.csv"),
+    )
+    return base.model_copy(
+        update={
+            "clarify": base.clarify.model_copy(
+                update={
+                    "output_dir": str(tmp_path / "clarify_emails"),
+                    "clarifications_csv": str(tmp_path / "clarifications.csv"),
+                }
+            ),
+            "info_sheet": base.info_sheet.model_copy(
+                update={"output_dir": str(tmp_path / "child_info_sheets")}
+            ),
+            "sponsor_packets": base.sponsor_packets.model_copy(
+                update={"output_dir": str(tmp_path / "sponsor_packets")}
+            ),
+        }
     )
 
 
