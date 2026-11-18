@@ -1,0 +1,16 @@
+{
+  "providers": {
+    "opencode": {
+      "mainModel": "opencode/gpt-6.2-sol",
+      "mainVariant": "high",
+      "workerModel": "opencode/glm-3.5-flash",
+      "workerVariant": "high"
+    },
+    "opencode-go": {
+      "mainModel": "opencode-go/qwen4-max",
+      "mainVariant": "high",
+      "workerModel": "opencode-go/glm-3.5-flash",
+      "workerVariant": "high"
+    }
+  }
+}
