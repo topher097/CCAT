@@ -522,7 +522,16 @@ def compute_status(
 def status_of(
     row: dict[str, Any], baseline: dict[str, Any], entity: str
 ) -> str:
-    """Compute one final row's status, using status as audit authority."""
+    """Compute one final row's status, using status as audit authority.
+
+    Precedence is the persisted rule (decision D11): a truthy
+    ``ignore`` returns ``ignored`` before the stored-status audited
+    check, so a row just marked ignored shows ``ignored`` live as
+    well — previously a sticky stored ``audited`` could outrank a
+    newly selected ignore flag while saves always forced ``ignored``.
+    """
+    if as_bool(row.get("ignore")):
+        return STATUS_IGNORED
     if _as_text(row.get("status")) == STATUS_AUDITED:
         return STATUS_AUDITED
     editable = ENTITY_SPECS[entity]["status_editable"]

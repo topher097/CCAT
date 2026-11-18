@@ -117,6 +117,43 @@ def test_status_of_counts_data_edits_and_notes() -> None:
     assert status_of(row, baseline, "child") == STATUS_NEEDS_CLARIFICATION
 
 
+def test_status_of_ignore_outranks_stored_audited() -> None:
+    """D11: a live pseudo-row just marked ignored shows ignored.
+
+    The live evaluator previously returned ``audited`` before testing
+    the ignore flag while persisted saves forced ``ignored``; the
+    evaluator is unified toward the persisted rule.
+    """
+    baseline = {"need_1": "raw"}
+    row = _row(status=STATUS_AUDITED, ignore=True, need_1="raw")
+    assert status_of(row, baseline, "child") == STATUS_IGNORED
+
+
+def test_status_of_stored_audited_and_ignored_row_reads_ignored(
+    cfg: Config,
+) -> None:
+    """D11: legacy stored audited+ignored rows read back as ignored."""
+    seed_final_sheets(cfg)
+    rows = read_final(cfg, "child")
+    for row in rows:
+        if row["zite_record_id"] == "c1":
+            row["status"] = STATUS_AUDITED
+            row["ignore"] = True
+    write_sheets(
+        cfg.excel_file,
+        "audit",
+        {"final_child": build_final_frame("child", rows)},
+        xmas=cfg.xmas,
+    )
+    stored = next(
+        row for row in read_final(cfg, "child") if row["zite_record_id"] == "c1"
+    )
+    assert stored["status"] == STATUS_AUDITED
+    assert status_of(stored, {"need_1": stored["need_1"]}, "child") == (
+        STATUS_IGNORED
+    )
+
+
 def test_coalesce_family_group_first_non_null_wins() -> None:
     """Family groups coalesce by created ascending (§6.1, D8)."""
     older = {"created": "2026-01-01", "first_name": "Ann", "phone": None}

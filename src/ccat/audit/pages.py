@@ -40,6 +40,12 @@ from ccat.audit.store import (
     status_of,
 )
 from ccat.config import Config
+from ccat.services.special_needs import (
+    SPECIAL_NEEDS_OPTIONS,
+    SpecialNeeds,
+    parse_special_needs,
+    serialize_special_needs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -387,32 +393,22 @@ def special_needs_selector(
     """Render the special-needs checkbox list + custom input (§8.6, D4).
 
     Stored as the semicolon-joined list, e.g. ``"ADHD; other: speech
-    delay"``; an empty selection means none.
+    delay"``; an empty selection means none. Parsing and serialization
+    live in :mod:`ccat.services.special_needs` (moved here so the
+    future API shares one owner).
     """
-    current = _norm(values.get("special_needs")) or ""
-    parts = [part.strip() for part in current.split(";") if part.strip()]
-    other_text = ""
-    fixed = []
-    for part in parts:
-        if part.lower().startswith("other"):
-            remainder = part[5:].strip(": ")
-            other_text = remainder
-        else:
-            fixed.append(part)
-    state: dict[str, Any] = {"fixed": set(fixed), "other": other_text}
+    parsed = parse_special_needs(_norm(values.get("special_needs")))
+    state: dict[str, Any] = {"fixed": parsed.fixed, "other": parsed.other}
 
     def serialize() -> None:
-        pieces = sorted(state["fixed"])
-        if "other" in pieces:
-            pieces = [piece for piece in pieces if piece != "other"]
-            custom = str(state["other"]).strip()
-            pieces.append(f"other: {custom}" if custom else "other")
-        values["special_needs"] = "; ".join(pieces) if pieces else None
+        values["special_needs"] = serialize_special_needs(
+            SpecialNeeds(fixed=state["fixed"], other=str(state["other"]))
+        )
         on_change()
 
     with ui.card().classes("w-full"):
         ui.label("Special needs").classes("font-medium")
-        for option in ("ADHD", "Autism", "Down Syndrome", "other"):
+        for option in SPECIAL_NEEDS_OPTIONS:
             checkbox = ui.checkbox(option, value=option in state["fixed"])
 
             def toggle(event: Any, option: str = option) -> None:
@@ -423,7 +419,7 @@ def special_needs_selector(
                 serialize()
 
             checkbox.on_value_change(toggle)
-        custom = ui.input("Custom value for 'other'", value=other_text)
+        custom = ui.input("Custom value for 'other'", value=parsed.other)
 
         def set_other(event: Any) -> None:
             state["other"] = event.value

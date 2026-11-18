@@ -52,6 +52,7 @@ include = [
     "test/test_audit_server.py",
     "test/test_consolidate.py",
     "test/test_remediation.py",
+    "test/test_services.py",
 ]
 rules = { unresolved-import = "ignore" }
 
