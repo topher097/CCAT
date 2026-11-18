@@ -15,9 +15,10 @@ from typing import Any
 import polars as pl
 from polars._typing import PolarsDataType
 
-from ccat.acquire import (
+from ccat.acquire import PL_DTYPES
+from ccat.config import Config
+from ccat.domain import (
     DERIVED_COLUMNS,
-    PL_DTYPES,
     _created_value,
     _cross_check_created,
     _parse_reported_age,
@@ -28,7 +29,6 @@ from ccat.acquire import (
     index_to_letters,
     sibling_dob_conflicts,
 )
-from ccat.config import Config
 from ccat.io import read_sheet
 
 logger = logging.getLogger(__name__)

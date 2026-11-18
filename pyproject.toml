@@ -43,19 +43,6 @@ build-backend = "uv_build"
 [tool.ty.src]
 include = ["src", "scripts", "test"]
 
-# The bulk script imports its sibling via sys.path manipulation, which ty
-# cannot statically resolve.
-[[tool.ty.overrides]]
-include = ["scripts/zerobounce_bulk_check.py"]
-rules = { unresolved-import = "ignore" }
-
-# The screening stage imports the ZeroBounce/Nominatim engines from
-# scripts/ via sys.path manipulation at runtime; ty cannot statically
-# resolve those imports.
-[[tool.ty.overrides]]
-include = ["src/ccat/screening.py"]
-rules = { unresolved-import = "ignore" }
-
 # Test files import sibling modules flat (pytest inserts test/ on sys.path);
 # ty resolves first-party only from src/, so these cannot be resolved.
 [[tool.ty.overrides]]

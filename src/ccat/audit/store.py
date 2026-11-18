@@ -20,9 +20,9 @@ import polars as pl
 from polars._typing import PolarsDataType
 from pydantic import BaseModel, Field
 
-from ccat.acquire import AGE_PREF_BOUNDS, _created_value, compute_age_at_xmas
 from ccat.audit import AuditError
 from ccat.config import Config
+from ccat.domain import AGE_PREF_BOUNDS, _created_value, compute_age_at_xmas
 from ccat.io import list_sheets, read_sheet, write_sheets
 from ccat.preparation import (
     Preparation,

@@ -23,7 +23,6 @@ import json
 import logging
 import re
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -168,85 +167,66 @@ ADDRESS_VALIDATION_LOG_SCHEMA: dict[str, PolarsDataType] = {
 # ---------------------------------------------------------------------------
 
 
-def _scripts_dir() -> Path:
-    """Locate the repo's ``scripts/`` directory."""
-    candidate = Path(__file__).resolve().parents[2] / "scripts"
-    if candidate.is_dir():
-        return candidate
-    return Path.cwd() / "scripts"
-
-
 def _email_engine() -> tuple[Callable[..., Any], type[Exception]]:
-    """Import the ZeroBounce engine from ``scripts/`` (§6.7).
+    """Import the ZeroBounce engine (§6.7).
 
     Returns:
-        A tuple of (:func:`scripts.zerobounce_email_check.validate_email`,
+        A tuple of
+        (:func:`ccat.engines.zerobounce_email_check.validate_email`,
         its ``OutOfCreditsError``).
 
     Raises:
-        ScreeningError: If the scripts directory or the zerobouncesdk
-            package is unavailable.
+        ScreeningError: If the zerobouncesdk package is unavailable.
     """
-    scripts = _scripts_dir()
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
     try:
-        from zerobounce_email_check import (  # type: ignore[import-not-found]
+        from ccat.engines.zerobounce_email_check import (
             OutOfCreditsError,
             validate_email,
         )
     except ImportError as error:
         raise ScreeningError(
             "could not import the ZeroBounce engine"
-            f" ({scripts}/zerobounce_email_check.py): {error}; install"
+            f" (ccat/engines/zerobounce_email_check.py): {error}; install"
             " zerobouncesdk or set config.email_check.enabled = false"
         ) from error
     return validate_email, OutOfCreditsError
 
 
 def _email_batch_engine() -> Callable[..., Any] | None:
-    """Import the ZeroBounce batch (bulk) engine from ``scripts/`` (§6.7).
+    """Import the ZeroBounce batch (bulk) engine (§6.7).
 
     Returns:
-        :func:`scripts.zerobounce_email_check.bulk_validate_emails`, or
-        None when the engine cannot be imported -- the email check then
-        falls back to threaded per-email calls.
+        :func:`ccat.engines.zerobounce_email_check.bulk_validate_emails`,
+        or None when the engine cannot be imported -- the email check
+        then falls back to threaded per-email calls.
     """
-    scripts = _scripts_dir()
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
     try:
-        from zerobounce_email_check import (  # type: ignore[import-not-found]
-            bulk_validate_emails,
-        )
+        from ccat.engines.zerobounce_email_check import bulk_validate_emails
     except ImportError:
         return None
     return bulk_validate_emails
 
 
 def _address_engine() -> tuple[Callable[..., Any], Callable[..., str]]:
-    """Import the Nominatim engine from ``scripts/`` (§6.8).
+    """Import the Nominatim engine (§6.8).
 
     Returns:
         A tuple of
-        (:func:`scripts.nominatim_address_check.check_address`,
-        :func:`scripts.nominatim_address_check.build_query`).
+        (:func:`ccat.engines.nominatim_address_check.check_address`,
+        :func:`ccat.engines.nominatim_address_check.build_query`).
 
     Raises:
-        ScreeningError: If the scripts directory is unavailable.
+        ScreeningError: If the requests package is unavailable.
     """
-    scripts = _scripts_dir()
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
     try:
-        from nominatim_address_check import (  # type: ignore[import-not-found]
+        from ccat.engines.nominatim_address_check import (
             build_query,
             check_address,
         )
     except ImportError as error:
         raise ScreeningError(
             "could not import the Nominatim engine"
-            f" ({scripts}/nominatim_address_check.py): {error}"
+            f" (ccat/engines/nominatim_address_check.py): {error}"
         ) from error
     return check_address, build_query
 

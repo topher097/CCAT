@@ -21,7 +21,6 @@ from typing import Any
 
 import polars as pl
 
-from ccat.acquire import SPECIAL_NEEDS_LABEL
 from ccat.audit.store import (
     FAMILY_ASSIGNMENT_COLUMNS,
     SPONSOR_ASSIGNMENT_COLUMNS,
@@ -33,6 +32,7 @@ from ccat.audit.store import (
     read_final,
 )
 from ccat.config import Config
+from ccat.domain import SPECIAL_NEEDS_LABEL
 from ccat.io import list_sheets, write_sheets
 
 logger = logging.getLogger(__name__)

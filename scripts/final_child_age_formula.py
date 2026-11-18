@@ -26,8 +26,8 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
 
-from ccat.acquire import compute_age_at_xmas
 from ccat.config import ConfigError, load_config
+from ccat.domain import compute_age_at_xmas
 from ccat.io import (
     AGE_COLUMN,
     DOB_COLUMN,

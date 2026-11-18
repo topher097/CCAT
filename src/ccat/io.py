@@ -28,6 +28,8 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 from polars._typing import PolarsDataType
 
+from ccat.domain import compute_age_at_xmas
+
 logger = logging.getLogger(__name__)
 
 
@@ -552,9 +554,6 @@ def _final_child_age_formulas(
             " configured Christmas date): pass xmas=cfg.xmas so"
             f" {AGE_COLUMN} stays a live DATEDIF formula (§4)"
         )
-    # Imported lazily: ccat.acquire imports this module at load time.
-    from ccat.acquire import compute_age_at_xmas
-
     columns = list(frame.columns)
     missing = [
         column for column in (DOB_COLUMN, AGE_COLUMN) if column not in columns

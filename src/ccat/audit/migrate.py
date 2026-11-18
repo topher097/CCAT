@@ -16,7 +16,6 @@ from typing import Any
 
 import polars as pl
 
-from ccat.acquire import AGE_PREF_BOUNDS
 from ccat.audit import AuditError
 from ccat.audit.store import (
     CHILD_EDITABLE_COLUMNS,
@@ -42,6 +41,7 @@ from ccat.audit.store import (
     status_of,
 )
 from ccat.config import Config
+from ccat.domain import AGE_PREF_BOUNDS
 from ccat.io import list_sheets, read_sheet, write_sheets
 
 logger = logging.getLogger(__name__)

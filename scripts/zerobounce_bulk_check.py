@@ -17,9 +17,19 @@ from pathlib import Path
 
 import fire
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from zerobounce_email_check import OutOfCreditsError, validate_email  # noqa: E402
+try:
+    from ccat.engines.zerobounce_email_check import (
+        OutOfCreditsError,
+        validate_email,
+    )
+except ImportError:
+    # ccat is not installed (e.g. run from a bare scripts/ checkout):
+    # bootstrap the package source tree onto sys.path and retry.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from ccat.engines.zerobounce_email_check import (
+        OutOfCreditsError,
+        validate_email,
+    )
 
 NEW_COLUMNS = [
     "zerobounce_status",

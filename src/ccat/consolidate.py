@@ -23,7 +23,6 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 import polars as pl
 
-from ccat.acquire import compute_age_at_xmas
 from ccat.audit.store import (
     ENTITY_SPECS,
     as_bool,
@@ -32,6 +31,7 @@ from ccat.audit.store import (
     read_final,
 )
 from ccat.config import Config
+from ccat.domain import compute_age_at_xmas
 from ccat.io import list_sheets, read_sheet, write_sheets
 
 logger = logging.getLogger(__name__)
