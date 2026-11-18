@@ -4,8 +4,18 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 
-from ccat.config import ColumnSpec, Config, ConfigError, load_config
+from ccat.config import (
+    ApiSpec,
+    ColumnSpec,
+    Config,
+    ConfigError,
+    ReportSpec,
+    StorageSpec,
+    WorkerSpec,
+    load_config,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config" / "ccat_2026.json"
@@ -156,3 +166,71 @@ def test_has_default_semantics() -> None:
     without_default = ColumnSpec(type="string")
     assert with_default.has_default is True
     assert without_default.has_default is False
+
+
+def test_storage_api_worker_defaults_on_real_config() -> None:
+    """The refactor sections load with defaults on the real config."""
+    config = load_config(CONFIG_PATH)
+    assert config.storage.mode == "workbook"
+    assert config.storage.database_url == (
+        "sqlite+aiosqlite:///./output/ccat.sqlite3"
+    )
+    assert config.api.host == "127.0.0.1"
+    assert config.api.port == 8650
+    assert config.api.auth_mode == "dev"
+    assert config.api.session_secret_env == "CCAT_SESSION_SECRET"
+    assert config.api.session_ttl_hours == 12
+    assert config.api.dev_users == ("cmendres", "lmboswell")
+    assert config.worker.poll_interval_seconds == 2.0
+    assert config.worker.heartbeat_seconds == 30.0
+    assert config.worker.lease_seconds == 120.0
+    assert config.worker.max_attempts == 3
+    assert config.worker.progress_throttle_seconds == 1.0
+    assert config.report.timezone == "local"
+
+
+def test_storage_mode_vocabulary() -> None:
+    """Only the two storage modes are accepted."""
+    assert StorageSpec().mode == "workbook"
+    assert StorageSpec(mode="db").mode == "db"
+    with pytest.raises(ValueError, match="mode"):
+        StorageSpec.model_validate({"mode": "excel"})
+
+
+@pytest.mark.parametrize(
+    ("spec", "field", "bad"),
+    [
+        (ApiSpec, "port", 0),
+        (ApiSpec, "port", 70000),
+        (ApiSpec, "session_ttl_hours", 0),
+        (WorkerSpec, "poll_interval_seconds", 0),
+        (WorkerSpec, "heartbeat_seconds", -1),
+        (WorkerSpec, "lease_seconds", 0),
+        (WorkerSpec, "max_attempts", 0),
+        (WorkerSpec, "progress_throttle_seconds", -0.5),
+    ],
+)
+def test_api_worker_invalid_values_rejected(
+    spec: type[BaseModel], field: str, bad: object
+) -> None:
+    """Out-of-range API/worker settings fail fast."""
+    with pytest.raises(ValueError, match=field):
+        spec.model_validate({field: bad})
+
+
+def test_report_timezone_validation() -> None:
+    """report.timezone is 'local' or a valid IANA key."""
+    assert ReportSpec().timezone == "local"
+    assert ReportSpec(timezone="America/Detroit").timezone == (
+        "America/Detroit"
+    )
+    with pytest.raises(ValueError, match="timezone"):
+        ReportSpec(timezone="Mars/Olympus_Mons")
+
+
+def test_report_timezone_invalid_fails_config_load(tmp_path: Path) -> None:
+    """A bad timezone in the config JSON surfaces as ConfigError."""
+    good = json.loads(CONFIG_PATH.read_text())
+    good["report"]["timezone"] = "Mars/Olympus_Mons"
+    with pytest.raises(ConfigError, match="timezone"):
+        load_config(_write(tmp_path, good))

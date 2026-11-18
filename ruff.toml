@@ -88,6 +88,8 @@ convention = "google"
 "test/**" = ["INP001", "ANN001"]
 # Standalone scripts are an implicit namespace package.
 "scripts/**" = ["INP001"]
+# Alembic environment/versions are implicit namespace packages.
+"alembic/**" = ["INP001"]
 
 [lint.flake8-quotes]
 # Make all docstrings double-quoted

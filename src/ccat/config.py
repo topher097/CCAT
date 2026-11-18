@@ -10,7 +10,8 @@ import json
 import logging
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
     BaseModel,
@@ -356,12 +357,31 @@ class ReportSpec(BaseModel):
             and ``.pdf`` report files.
         filename_prefix: Report filename prefix; the current date is
             appended (e.g. ``report_2026-11-10``).
+        timezone: ``local`` (server local time, today's behavior) or an
+            IANA zone key (e.g. ``America/Detroit``) used to date-stamp
+            report filenames and content.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     output_dir: str = "output/reports"
     filename_prefix: str = "report"
+    timezone: str = "local"
+
+    @field_validator("timezone")
+    @classmethod
+    def _check_timezone(cls, value: str) -> str:
+        """Require ``local`` or a resolvable IANA zone key."""
+        if value == "local":
+            return value
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError(
+                f"report.timezone must be 'local' or a valid IANA zone"
+                f" key, got {value!r}"
+            ) from error
+        return value
 
 
 class SponsorPacketSpec(BaseModel):
@@ -393,6 +413,113 @@ class SponsorPacketSpec(BaseModel):
     bcc_emails: list[str] = []
 
 
+class StorageSpec(BaseModel):
+    """Active season-storage selection (refactor decision D12).
+
+    Attributes:
+        mode: ``workbook`` keeps the legacy Excel path active; ``db``
+            switches to the SQLite repositories (after import and
+            rehearsal).  Both modes run the same services through the
+            ``SeasonStore`` port.
+        database_url: Async SQLAlchemy URL for the DB mode.  The sync
+            URL used by Alembic and the CLI importer is derived in
+            :mod:`ccat.db.engine`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["workbook", "db"] = "workbook"
+    database_url: str = "sqlite+aiosqlite:///./output/ccat.sqlite3"
+
+
+class ApiSpec(BaseModel):
+    """Web API server settings (refactor §5).
+
+    Attributes:
+        host: Bind address of the FastAPI server.
+        port: Bind port of the FastAPI server.
+        auth_mode: ``dev`` enables the no-password bootstrap accounts
+            (loopback development only); ``oidc`` defers to the real
+            identity adapter.
+        session_secret_env: Environment variable holding the cookie
+            session signing secret.
+        session_ttl_hours: Server-side session lifetime in hours.
+        dev_users: No-password bootstrap usernames created in dev mode.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = "127.0.0.1"
+    port: int = 8650
+    auth_mode: Literal["dev", "oidc"] = "dev"
+    session_secret_env: str = "CCAT_SESSION_SECRET"
+    session_ttl_hours: int = 12
+    dev_users: tuple[str, ...] = ("cmendres", "lmboswell")
+
+    @field_validator("port")
+    @classmethod
+    def _check_port(cls, value: int) -> int:
+        """Require a bindable TCP port."""
+        if not 1 <= value <= 65535:
+            raise ValueError("api.port must be between 1 and 65535")
+        return value
+
+    @field_validator("session_ttl_hours")
+    @classmethod
+    def _check_ttl(cls, value: int) -> int:
+        """Require a positive session lifetime."""
+        if value <= 0:
+            raise ValueError("api.session_ttl_hours must be positive")
+        return value
+
+
+class WorkerSpec(BaseModel):
+    """Durable-job worker settings (refactor §6, decision D7).
+
+    Attributes:
+        poll_interval_seconds: Delay between job-table polls when idle.
+        heartbeat_seconds: Worker heartbeat cadence on running jobs.
+        lease_seconds: Job lease duration before recovery may reclaim.
+        max_attempts: Default per-job attempt ceiling.
+        progress_throttle_seconds: Minimum delay between persisted
+            progress updates (zero disables throttling).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    poll_interval_seconds: float = 2.0
+    heartbeat_seconds: float = 30.0
+    lease_seconds: float = 120.0
+    max_attempts: int = 3
+    progress_throttle_seconds: float = 1.0
+
+    @field_validator(
+        "poll_interval_seconds", "heartbeat_seconds", "lease_seconds"
+    )
+    @classmethod
+    def _check_positive(cls, value: float) -> float:
+        """Require a positive interval."""
+        if value <= 0:
+            raise ValueError("worker intervals must be positive")
+        return value
+
+    @field_validator("max_attempts")
+    @classmethod
+    def _check_attempts(cls, value: int) -> int:
+        """Require a positive attempt ceiling."""
+        if value <= 0:
+            raise ValueError("worker.max_attempts must be positive")
+        return value
+
+    @field_validator("progress_throttle_seconds")
+    @classmethod
+    def _check_throttle(cls, value: float) -> float:
+        """Require a non-negative throttle."""
+        if value < 0:
+            raise ValueError("worker.progress_throttle_seconds must be >= 0")
+        return value
+
+
 class Config(BaseModel):
     """Root configuration model for one pipeline run."""
 
@@ -416,6 +543,9 @@ class Config(BaseModel):
     info_sheet: InfoSheetSpec
     report: ReportSpec = ReportSpec()
     sponsor_packets: SponsorPacketSpec = SponsorPacketSpec()
+    storage: StorageSpec = StorageSpec()
+    api: ApiSpec = ApiSpec()
+    worker: WorkerSpec = WorkerSpec()
     log_file: str
     match_report_csv: str
 
