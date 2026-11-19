@@ -1093,18 +1093,24 @@ def test_screen_db_cancel_preserves_completed(
 ) -> None:
     """Cancel between children: completed children stay committed (§6.2)."""
     cfg = _prepare(tmp_path)
+    # Sequential AI workers make the cancel boundary deterministic.
+    cfg = cfg.model_copy(
+        update={
+            "ai_screening": cfg.ai_screening.model_copy(
+                update={"max_workers": 1}
+            )
+        }
+    )
     unblock = threading.Event()
     cancel_flag = threading.Event()
 
     def hook(record_id: str) -> None:
+        # Block c2's AI call until the test has observed c1 committed
+        # and armed the cancel flag; with sequential workers the
+        # inter-child check then raises before c3 ever starts.
         if record_id == "c2":
-            # Wait until the test observed c1 committed, i.e. until the
-            # cancel flag is armed; then finish normally.
             unblock.wait(timeout=10)
             KeyedFakeOpencode.hook = None
-
-    def make_hook() -> Any:
-        return hook
 
     _use_fake_ai(monkeypatch, {"c1": "null", "c2": "null", "c3": "null"})
     KeyedFakeOpencode.hook = hook
@@ -1143,7 +1149,9 @@ def test_screen_db_cancel_preserves_completed(
                     cfg, "topher", options, lambda *a, **k: None, cancel
                 )
             )
-            # Wait until c1 is committed, then request cancellation.
+            # Wait until c1 is committed, then arm cancellation and
+            # release c2; with sequential workers persist(c2) raises
+            # at the next boundary before c3 ever starts (§6.2).
             for _ in range(3000):
                 rows = _sql_retry(
                     cfg,
@@ -1166,7 +1174,7 @@ def test_screen_db_cancel_preserves_completed(
             )
             screened = dict(rows)
             assert screened["c1"] == 1
-            assert screened["c2"] == 1  # completed before the check
+            assert screened["c2"] == 1
             assert screened["c3"] == 0  # never attempted
         finally:
             unblock.set()

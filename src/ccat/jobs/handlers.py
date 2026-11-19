@@ -1,23 +1,31 @@
 """Worker handlers: job types -> DB-mode pipeline services (§6.1).
 
 Each handler adapts one :class:`JobContext` onto the corresponding
-:mod:`ccat.services.db_pipeline` service and converts typed domain
-errors into job error JSON ``{code, message, retryable}``.  Per plan
-§6.1: network/provider failures (Zite transport) are retryable;
-validation, ownership, and conflict failures are not.  Handlers not
-yet implemented (generate/stats/clarify_*) are simply absent — the
-worker fails such jobs with a clear non-retryable error instead of
-guessing at semantics.
+DB-mode service (:mod:`ccat.services.db_pipeline`, :mod:`...`.
+db_generate, :mod:`...db_stats`, :mod:`...db_clarify`) and converts
+typed domain errors into job error JSON ``{code, message, retryable}``.
+Per plan §6.1: network/provider failures (Zite transport, OpenCode
+connect) are retryable; validation, ownership, malformed-output, and
+conflict failures are not.
+
+Handlers not yet implemented are simply absent — the worker fails such
+jobs with a clear non-retryable error instead of guessing at
+semantics.
 """
 
 import logging
 from typing import TYPE_CHECKING, Any
 
 from ccat.acquire import AcquisitionError
+from ccat.child_info_generate import InfoSheetError
+from ccat.clarify.extract import ClarifyError
 from ccat.match import MatchError
 from ccat.preparation import PreparationError
 from ccat.screening import ScreeningError
-from ccat.services import db_pipeline
+from ccat.services import db_clarify, db_generate, db_pipeline, db_stats
+from ccat.services.db_clarify import OpencodeTransportError
+from ccat.sponsor_packets import SponsorPacketError
+from ccat.stats import StatsError
 from ccat.zite import ZiteError
 from ccat.jobs.errors import JobCancelRequested
 from ccat.jobs.registry import JobContext
@@ -25,18 +33,23 @@ from ccat.jobs.registry import JobContext
 if TYPE_CHECKING:
     from ccat.services.results import (
         AcquireResult,
+        ClarifyExportResult,
+        ClarifyGenerateResult,
+        GenerateResult,
         MatchResult,
         ReconcileResult,
         ScreenResult,
+        StatsResult,
     )
 
 logger = logging.getLogger(__name__)
 
 #: Errors worth another attempt (plan §6.1 retry budgets): provider
-#: transport failures.  Everything else — malformed input, ownership,
-#: conflicts, config errors — fails the job immediately.
+#: transport failures.  Everything else — malformed input/output,
+#: ownership, conflicts, config errors — fails the job immediately.
 RETRYABLE_ERRORS: tuple[type[BaseException], ...] = (
     ZiteError,
+    OpencodeTransportError,
     ConnectionError,
     TimeoutError,
 )
@@ -122,6 +135,60 @@ async def reconcile(ctx: JobContext) -> "ReconcileResult":
     )
 
 
+async def generate(ctx: JobContext) -> "GenerateResult":
+    """Generate job: info sheets, then sponsor packets (§9.5).
+
+    Args:
+        ctx: The job context.
+
+    Returns:
+        The typed generation result.
+    """
+    return await db_generate.generate(
+        ctx.cfg, ctx.actor, _options(ctx), ctx.progress, ctx.cancel_check
+    )
+
+
+async def stats(ctx: JobContext) -> "StatsResult":
+    """Stats job: dated statistics report artifact (§9.6).
+
+    Args:
+        ctx: The job context.
+
+    Returns:
+        The typed stats result.
+    """
+    return await db_stats.stats(
+        ctx.cfg, ctx.actor, _options(ctx), ctx.progress, ctx.cancel_check
+    )
+
+
+async def clarify_generate(ctx: JobContext) -> "ClarifyGenerateResult":
+    """Clarify-generate job: missing email drafts, never sending (§9.6).
+
+    Args:
+        ctx: The job context.
+
+    Returns:
+        The typed clarify-generation result.
+    """
+    return await db_clarify.generate_drafts(
+        ctx.cfg, ctx.actor, _options(ctx), ctx.progress, ctx.cancel_check
+    )
+
+
+async def clarify_export(ctx: JobContext) -> "ClarifyExportResult":
+    """Clarify-export job: tracked CSV artifact (§9.6, D16).
+
+    Args:
+        ctx: The job context.
+
+    Returns:
+        The typed clarify-export result.
+    """
+    return await db_clarify.export_csv(ctx.cfg, ctx.actor)
+
+
 #: job_type -> async handler(ctx).  Missing types fail non-retryably
 #: in the worker ("no handler registered").
 HANDLERS: dict[str, Any] = {
@@ -129,6 +196,10 @@ HANDLERS: dict[str, Any] = {
     "screen": screen,
     "match": match,
     "reconcile": reconcile,
+    "generate": generate,
+    "stats": stats,
+    "clarify_generate": clarify_generate,
+    "clarify_export": clarify_export,
 }
 
 #: Domain errors carried through job error JSON without re-mapping
@@ -138,6 +209,10 @@ DOMAIN_ERRORS: tuple[type[BaseException], ...] = (
     PreparationError,
     ScreeningError,
     MatchError,
+    InfoSheetError,
+    SponsorPacketError,
+    StatsError,
+    ClarifyError,
     JobCancelRequested,
 )
 
@@ -146,8 +221,12 @@ __all__ = [
     "HANDLERS",
     "RETRYABLE_ERRORS",
     "acquire",
+    "clarify_export",
+    "clarify_generate",
     "error_json",
+    "generate",
     "match",
     "reconcile",
     "screen",
+    "stats",
 ]

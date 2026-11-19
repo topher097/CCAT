@@ -301,6 +301,9 @@ class InfoSheetSpec(BaseModel):
             LibreOffice conversion); each worker thread gets its own
             temporary LibreOffice profile.  Values above the number of
             pending children are clamped.
+        conversion_timeout_seconds: Hard ceiling for one headless
+            LibreOffice conversion (DB-mode worker; the legacy module
+            keeps its identical built-in constant).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -312,6 +315,7 @@ class InfoSheetSpec(BaseModel):
     contact_placeholder_affiliations: tuple[str, ...] = ()
     mappings: dict[str, str]
     max_workers: int = 4
+    conversion_timeout_seconds: float = 300.0
 
     @field_validator("max_workers")
     @classmethod
@@ -319,6 +323,16 @@ class InfoSheetSpec(BaseModel):
         """Require a positive worker count."""
         if value <= 0:
             raise ValueError("info_sheet.max_workers must be positive")
+        return value
+
+    @field_validator("conversion_timeout_seconds")
+    @classmethod
+    def _check_conversion_timeout(cls, value: float) -> float:
+        """Require a positive conversion deadline."""
+        if value <= 0:
+            raise ValueError(
+                "info_sheet.conversion_timeout_seconds must be positive"
+            )
         return value
 
     @model_validator(mode="after")

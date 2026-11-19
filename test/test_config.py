@@ -234,3 +234,22 @@ def test_report_timezone_invalid_fails_config_load(tmp_path: Path) -> None:
     good["report"]["timezone"] = "Mars/Olympus_Mons"
     with pytest.raises(ConfigError, match="timezone"):
         load_config(_write(tmp_path, good))
+
+
+def test_info_sheet_conversion_timeout_default_and_validation() -> None:
+    """conversion_timeout_seconds defaults to the legacy 300s and is > 0."""
+    from ccat.config import InfoSheetSpec
+
+    plain = InfoSheetSpec(
+        template_file="t.ott", output_dir="o", mappings={"a.b": "c"}
+    )
+    assert plain.conversion_timeout_seconds == 300.0
+    config = load_config(CONFIG_PATH)
+    assert config.info_sheet.conversion_timeout_seconds == 300.0
+    with pytest.raises(ValueError, match="conversion_timeout_seconds"):
+        InfoSheetSpec(
+            template_file="t.ott",
+            output_dir="o",
+            mappings={"a.b": "c"},
+            conversion_timeout_seconds=0,
+        )
