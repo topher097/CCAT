@@ -165,6 +165,11 @@ ALLOWED_CHANGES: dict[str, dict[str, frozenset[str] | None]] = {
 #: entities and audit backfills; match/generate only patch stored rows.
 MAY_CREATE_ROWS: frozenset[str] = frozenset({"screen", "audit", "migrate"})
 
+#: Modules allowed to replace the active raw snapshot.  ``acquire`` is
+#: the ordinary path; ``migrate`` imports a verbatim workbook snapshot
+#: during ``ccat db-import`` (plan §10).  Anything else is refused.
+RAW_SNAPSHOT_MODULES: frozenset[str] = frozenset({"acquire", "migrate"})
+
 #: Diagnostic sheet names accepted by :meth:`sheet_rows`.
 _SHEET_TABLES: dict[str, str] = {
     "duplicate_log": "duplicate_log",
@@ -916,7 +921,7 @@ class SeasonStoreRepository:
         never touches final rows (§1.2 rule 1).
 
         Args:
-            module: Must be "acquire".
+            module: Writing module identity ("acquire" or "migrate").
             raw: Mapping of table name ("sponsor"/"family"/"child") to
                 its complete verbatim rows.
             actor: Requesting user/job identity.
@@ -925,12 +930,12 @@ class SeasonStoreRepository:
             Inserted row counts per table.
 
         Raises:
-            OwnershipError: When any module other than "acquire" is
-                supplied.
+            OwnershipError: When any module outside
+                :data:`RAW_SNAPSHOT_MODULES` is supplied.
             DbStoreError: For unknown tables.
             KeyValidationError: For unknown columns.
         """
-        if module != "acquire":
+        if module not in RAW_SNAPSHOT_MODULES:
             raise OwnershipError(module, "raw_snapshot")
         async with self._transaction():
             now = datetime.now(UTC)
@@ -1814,6 +1819,7 @@ __all__ = [
     "ALLOWED_CHANGES",
     "LEGACY_COLUMN_RENAMES",
     "MAY_CREATE_ROWS",
+    "RAW_SNAPSHOT_MODULES",
     "MatchCommitResult",
     "RAW_LEGACY_RENAMES",
     "SeasonStoreRepository",

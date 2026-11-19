@@ -19,6 +19,9 @@ Commands (all accept ``--config`` where applicable)::
     ccat audit-migrate --from PATH [--force]
     ccat consolidate-migrate --from PATH --output PATH
                              [--force --backup PATH] [--report PATH]
+    ccat db-import --from PATH [--db URL] [--force] [--backup PATH]
+                   [--report PATH]
+    ccat workbook-export --output PATH [--db URL] [--report PATH] [--force]
 
 ``acquire`` replaces only raw sheets. ``screen`` cleans all raw records in
 memory, appends new persistent entities, refreshes global diagnostics and
@@ -45,6 +48,10 @@ all fields/controls, logs, reports, and age formulas/caches, then writes a JSON
 migration report. Existing output is refused unless ``--force`` is paired with
 an explicit readable ``--backup``. Production config cutover is always manual;
 rollback restores the original config and immutable input workbook.
+
+``db-import`` (new) imports a persistent-final (v2) workbook into a migrated
+SQLite database as one validated migration batch; ``workbook-export`` (new)
+writes the read-only reverse export used as rollback evidence (plan §10).
 """
 
 import importlib
@@ -74,6 +81,8 @@ def _typed_errors() -> tuple[type[BaseException], ...]:
     from ccat.child_info_generate import InfoSheetError
     from ccat.clarify import ClarifyError
     from ccat.consolidate import ConsolidationError
+    from ccat.db.migration_io import ExportError
+    from ccat.db.migration_io import ImportError as DbImportError
     from ccat.match import MatchError
     from ccat.preparation import PreparationError
     from ccat.screening import ScreeningError
@@ -88,6 +97,8 @@ def _typed_errors() -> tuple[type[BaseException], ...]:
         ClarifyError,
         MatchError,
         ConsolidationError,
+        DbImportError,
+        ExportError,
         PreparationError,
         SheetSchemaError,
         InfoSheetError,
@@ -258,6 +269,73 @@ def _consolidate_migrate_cmd(
     )
 
 
+def _db_import_cmd(config: str = DEFAULT_CONFIG, **kwargs: object) -> None:
+    """Import a persistent-final workbook into SQLite (plan §10).
+
+    Args:
+        config: Season configuration; ``storage.database_url`` is the
+            default target database.
+        kwargs: Required ``from`` (passed as ``--from``; the v2 source
+            workbook, opened read-only), optional ``db`` (target URL
+            override), ``force`` + ``backup`` (required together against
+            a nonempty target), and ``report`` (JSON report path).
+
+    Raises:
+        SystemExit: On unknown flags or any typed import failure.
+    """
+    from_path = kwargs.pop("from", kwargs.pop("from_path", None))
+    db_url = kwargs.pop("db", kwargs.pop("db_url", None))
+    force = bool(kwargs.pop("force", False))
+    backup_path = kwargs.pop("backup", kwargs.pop("backup_path", None))
+    report_path = kwargs.pop("report", kwargs.pop("report_path", None))
+    if kwargs:
+        raise SystemExit(f"unknown flags: {sorted(kwargs)}")
+    if not from_path:
+        raise SystemExit("db-import requires --from PATH (the v2 workbook)")
+    _dispatch(
+        "db-import",
+        "db.migration_io:run",
+        config,
+        from_path=str(from_path),
+        db_url=str(db_url) if db_url else None,
+        force=force,
+        backup_path=str(backup_path) if backup_path else None,
+        report_path=str(report_path) if report_path else None,
+    )
+
+
+def _workbook_export_cmd(
+    config: str = DEFAULT_CONFIG, **kwargs: object
+) -> None:
+    """Export the database back into a fresh workbook (read-only, D6).
+
+    Args:
+        config: Season configuration.
+        kwargs: Required ``output`` path, optional ``db`` (source URL
+            override), ``report`` path, and ``force`` overwrite flag.
+
+    Raises:
+        SystemExit: On unknown flags or any typed export failure.
+    """
+    output_path = kwargs.pop("output", kwargs.pop("output_path", None))
+    db_url = kwargs.pop("db", kwargs.pop("db_url", None))
+    report_path = kwargs.pop("report", kwargs.pop("report_path", None))
+    force = bool(kwargs.pop("force", False))
+    if kwargs:
+        raise SystemExit(f"unknown flags: {sorted(kwargs)}")
+    if not output_path:
+        raise SystemExit("workbook-export requires --output PATH")
+    _dispatch(
+        "workbook-export",
+        "db.migration_io:workbook_export_run",
+        config,
+        output_path=str(output_path),
+        db_url=str(db_url) if db_url else None,
+        report_path=str(report_path) if report_path else None,
+        force=force,
+    )
+
+
 def _match_cmd(
     config: str = DEFAULT_CONFIG,
     test: bool = False,
@@ -393,6 +471,8 @@ def main() -> None:
             "stats": _stats_cmd,
             "clarify": _clarify_cmd,
             "clarify-export": _clarify_export_cmd,
+            "db-import": _db_import_cmd,
+            "workbook-export": _workbook_export_cmd,
         }
     )
 
