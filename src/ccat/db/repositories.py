@@ -493,6 +493,11 @@ class SeasonStoreRepository:
                 f" {xmas_date!r}"
             ) from error
 
+    @property
+    def season_id(self) -> int:
+        """The bound season's id (read-only accessor for API routes)."""
+        return self._season_id
+
     # ------------------------------------------------------------------
     # Final stores.
     # ------------------------------------------------------------------

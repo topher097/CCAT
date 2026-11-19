@@ -44,13 +44,16 @@ class SavePatch(BaseModel):
 
     Every field is optional and ``X | None``: a field absent from
     ``model_fields_set`` is omitted (keep the stored value), while an
-    explicit ``None`` clears it. ``status`` and ``ignore`` are not
-    patchable — they are separate confirmed actions. Fields belonging
-    to another entity are accepted by the model but rejected by
-    :func:`save_entity` against the store's editable list.
+    explicit ``None`` clears it. ``status`` is accepted as a control
+    (the legacy form always sends it) but the final status is always
+    derived server-side; ``ignore`` is never patchable — it is a
+    separate confirmed action. Fields belonging to another entity are
+    accepted by the model but rejected by :func:`save_entity` against
+    the store's editable list.
 
     Attributes:
         clarification_notes: The audit note control.
+        status: The requested status control (server re-derives).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -101,6 +104,7 @@ class SavePatch(BaseModel):
     gender_preference: str | None = None
     dropoff_location: str | None = None
     clarification_notes: str | None = None
+    status: str | None = None
 
 
 def save_entity(

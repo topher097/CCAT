@@ -170,6 +170,8 @@ async def save_entity_db(
     key: str | int,
     patch: SavePatch,
     actor: str,
+    *,
+    expected_version: int | None = None,
 ) -> SaveResult:
     """Apply one tri-state partial save against the DB final store (§9.3).
 
@@ -181,6 +183,9 @@ async def save_entity_db(
         patch: The partial edit; fields outside the entity's editable
             set raise :class:`AuditError`.
         actor: Requesting user identity.
+        expected_version: Caller's ``If-Match`` row version; when
+            given, the commit checks it explicitly (§4.4 optimistic
+            concurrency) instead of trusting the just-read version.
 
     Returns:
         The save result with the persisted row's status and timestamp.
@@ -200,7 +205,8 @@ async def save_entity_db(
     unknown = sorted(
         field
         for field in provided
-        if field != "clarification_notes" and field not in set(spec["editable"])
+        if field not in {"clarification_notes", "status"}
+        and field not in set(spec["editable"])
     )
     if unknown:
         raise AuditError(f"unknown {entity} fields: {unknown}")
@@ -238,7 +244,9 @@ async def save_entity_db(
     row = await _apply_save(
         repo, cfg, entity, key, payload, existing, raw_for_seed, baseline
     )
-    await _commit_save(repo, entity, rows, row, existing, actor)
+    await _commit_save(
+        repo, entity, rows, row, existing, actor, expected_version
+    )
     return SaveResult(
         entity=entity,
         key=key,
@@ -340,12 +348,15 @@ async def _commit_save(
     row: dict[str, Any],
     existing: dict[str, Any] | None,
     actor: str,
+    expected_version: int | None = None,
 ) -> None:
     """Upsert the saved row and commit the complete store (§4.4)."""
     key_column = ENTITY_SPECS[entity]["key"]
     _upsert_row(rows, row, key_column)
     expected = None
-    if existing is not None and existing.get("_row_version") is not None:
+    if expected_version is not None:
+        expected = {_stored_key(row, entity): expected_version}
+    elif existing is not None and existing.get("_row_version") is not None:
         expected = {_stored_key(row, entity): existing["_row_version"]}
     await repo.commit_finals(
         "audit", entity, rows, actor, expected_versions=expected
@@ -360,6 +371,7 @@ async def ignore_entity_db(
     actor: str,
     *,
     confirm: bool,
+    expected_version: int | None = None,
 ) -> SaveResult:
     """Ignore one entity (destructive skeleton reset, §5.5).
 
@@ -370,6 +382,7 @@ async def ignore_entity_db(
         key: The entity's key.
         actor: Requesting user identity.
         confirm: Must be True; anything else refuses the action.
+        expected_version: Caller's ``If-Match`` row version (§4.4).
 
     Returns:
         The save result (status ``ignored``).
@@ -379,7 +392,15 @@ async def ignore_entity_db(
     """
     if not confirm:
         raise AuditError(f"ignoring {entity} {key!r} requires confirm=True")
-    return await _control_save(repo, cfg, entity, key, actor, ignore=True)
+    return await _control_save(
+        repo,
+        cfg,
+        entity,
+        key,
+        actor,
+        ignore=True,
+        expected_version=expected_version,
+    )
 
 
 async def unignore_entity_db(
@@ -390,6 +411,7 @@ async def unignore_entity_db(
     actor: str,
     *,
     confirm: bool,
+    expected_version: int | None = None,
 ) -> SaveResult:
     """Un-ignore one entity (reseed from the raw baseline, §5.5).
 
@@ -400,6 +422,7 @@ async def unignore_entity_db(
         key: The entity's key.
         actor: Requesting user identity.
         confirm: Must be True; anything else refuses the action.
+        expected_version: Caller's ``If-Match`` row version (§4.4).
 
     Returns:
         The save result with the recomputed status.
@@ -417,7 +440,15 @@ async def unignore_entity_db(
     )
     if existing is None or not as_bool(existing.get("ignore")):
         raise AuditError(f"{entity} {key!r} is not ignored")
-    return await _control_save(repo, cfg, entity, key, actor, ignore=False)
+    return await _control_save(
+        repo,
+        cfg,
+        entity,
+        key,
+        actor,
+        ignore=False,
+        expected_version=expected_version,
+    )
 
 
 async def _control_save(
@@ -428,6 +459,7 @@ async def _control_save(
     actor: str,
     *,
     ignore: bool,
+    expected_version: int | None = None,
 ) -> SaveResult:
     """Save one ignore/unignore action with the stored values."""
     spec = ENTITY_SPECS[entity]
@@ -452,7 +484,9 @@ async def _control_save(
     row = await _apply_save(
         repo, cfg, entity, key, payload, existing, seed, baseline
     )
-    await _commit_save(repo, entity, rows, row, existing, actor)
+    await _commit_save(
+        repo, entity, rows, row, existing, actor, expected_version
+    )
     return SaveResult(
         entity=entity,
         key=key,

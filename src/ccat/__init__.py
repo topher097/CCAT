@@ -22,6 +22,7 @@ Commands (all accept ``--config`` where applicable)::
     ccat db-import --from PATH [--db URL] [--force] [--backup PATH]
                    [--report PATH]
     ccat workbook-export --output PATH [--db URL] [--report PATH] [--force]
+    ccat serve [--config PATH]
 
 ``acquire`` replaces only raw sheets. ``screen`` cleans all raw records in
 memory, appends new persistent entities, refreshes global diagnostics and
@@ -460,6 +461,25 @@ def _clarify_export_cmd(
     )
 
 
+def _serve_cmd(config: str = DEFAULT_CONFIG) -> None:
+    """Run the FastAPI server (plan §5; replaces both NiceGUI apps).
+
+    Args:
+        config: Path to the JSON configuration file.
+
+    Raises:
+        SystemExit: When the server fails to start with a typed error.
+    """
+    from ccat.api import serve
+
+    try:
+        cfg = load_config(config)
+        setup_logging(cfg.log_file)
+        serve(cfg)
+    except _typed_errors() as error:
+        raise SystemExit(f"ccat serve failed: {error}") from error
+
+
 def _worker_cmd(config: str = DEFAULT_CONFIG) -> None:
     """Run the durable-job worker loop (plan §6.1, decision D7).
 
@@ -500,6 +520,7 @@ def main() -> None:
             "clarify-export": _clarify_export_cmd,
             "db-import": _db_import_cmd,
             "workbook-export": _workbook_export_cmd,
+            "serve": _serve_cmd,
             "worker": _worker_cmd,
         }
     )

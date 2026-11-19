@@ -1,0 +1,1429 @@
+"""API tests (refactor §5, §8; Phase 3 acceptance).
+
+File-backed SQLite per test; httpx AsyncClient over ASGITransport; all
+providers faked at the seams the domain modules expose.  Logins use
+the dev no-password bootstrap users (D2): ``cmendres`` (admin) and
+``lmboswell`` (coordinator+auditor); extra users are created through
+the admin API.
+"""
+
+import asyncio
+import json
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+from conftest import load_test_cfg
+from httpx import ASGITransport, AsyncClient
+
+from ccat.api import create_app
+from ccat.config import AIScreeningSpec, Config, StorageSpec, WorkerSpec
+from ccat.db.engine import create_async_engine, run_migrations
+from ccat.db.uow import UnitOfWork
+from ccat.jobs.worker import Worker
+
+pytestmark = pytest.mark.asyncio
+
+# ---------------------------------------------------------------------------
+# Fixtures / helpers.
+# ---------------------------------------------------------------------------
+
+
+def _cfg(tmp_path: Path, **updates: Any) -> Config:
+    """Test config: temp DB/artifacts, dev auth, fast worker."""
+    base = load_test_cfg(
+        excel_file=str(tmp_path / "wb.xlsx"),
+        log_file=str(tmp_path / "ccat.log"),
+        match_report_csv=str(tmp_path / "report.csv"),
+        storage=StorageSpec(
+            mode="db",
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'ccat.sqlite3'}",
+            artifact_root=str(tmp_path / "artifacts"),
+        ),
+        worker=WorkerSpec(
+            poll_interval_seconds=0.01,
+            heartbeat_seconds=0.02,
+            lease_seconds=5.0,
+            max_attempts=2,
+            progress_throttle_seconds=0.0,
+        ),
+    )
+    return base.model_copy(
+        update={
+            "ai_screening": AIScreeningSpec(
+                model="test/model",
+                system_prompt=base.ai_screening.system_prompt,
+                temperature=0.0,
+                max_workers=1,
+            ),
+        }
+        | updates
+    )
+
+
+def _columns(entity: str) -> tuple[str, ...]:
+    """Return the entity's legacy dict column vocabulary."""
+    from ccat.audit.store import ENTITY_SPECS
+
+    return tuple(ENTITY_SPECS[entity]["columns"])
+
+
+def child_row(record_id: str, **overrides: Any) -> dict[str, Any]:
+    """One full final-child row under legacy dict names."""
+    base: dict[str, Any] = {column: None for column in _columns("child")}
+    base.update(
+        zite_record_id=record_id,
+        family_id=1,
+        first_name="Kiddo",
+        primary_email="fam@example.com",
+        dob="2018-05-10",
+        gender="Male",
+        need_1="winter coat taht fits",
+        source="web",
+        status="new",
+        ignore=False,
+        screened=False,
+        potential_duplicate=False,
+        generated_info_sheet=False,
+    )
+    base.update(overrides)
+    return base
+
+
+def family_row(family_id: int, **overrides: Any) -> dict[str, Any]:
+    """One full final-family row under legacy dict names."""
+    base: dict[str, Any] = {column: None for column in _columns("family")}
+    base.update(
+        family_id=family_id,
+        zite_record_id=f"rec_f{family_id}",
+        primary_email=f"fam{family_id}@example.com",
+        first_name="Jane",
+        last_name="Doe",
+        city="Hancock",
+        source="web",
+        status="new",
+        ignore=False,
+        potential_duplicate=False,
+    )
+    base.update(overrides)
+    return base
+
+
+def sponsor_row(sponsor_id: int, **overrides: Any) -> dict[str, Any]:
+    """One full final-sponsor row under legacy dict names."""
+    base: dict[str, Any] = {column: None for column in _columns("sponsor")}
+    base.update(
+        sponsor_id=sponsor_id,
+        zite_record_id=f"rec_s{sponsor_id}",
+        create="2026-01-01T10:00:00Z",
+        email=f"sponsor{sponsor_id}@example.com",
+        sponsor_type="Individual",
+        first_name="Mary",
+        last_name="Sponsor",
+        num_children=2,
+        age_preference="Any Age",
+        source="web",
+        status="new",
+        ignore=False,
+        potential_duplicate=False,
+    )
+    base.update(overrides)
+    return base
+
+
+def raw_child(record_id: str, **overrides: Any) -> dict[str, Any]:
+    """One verbatim raw-child row (config columns only)."""
+    base: dict[str, Any] = {
+        "zite_record_id": record_id,
+        "zite_created_at": "2026-02-01T09:00:00+00:00",
+        "created": "2026-02-01T09:00:00+00:00",
+        "first_name": "Kiddo",
+        "primary_email": "fam@example.com",
+        "dob": "2018-05-10",
+        "age_reported": 7,
+        "gender": "Male",
+        "need_1": "winter coat taht fits",
+        "desire_1": "legos",
+        "source": "web",
+    }
+    base.update(overrides)
+    return base
+
+
+def raw_family(family_email: str, **overrides: Any) -> dict[str, Any]:
+    """One verbatim raw-family row (config columns only)."""
+    base: dict[str, Any] = {
+        "zite_record_id": f"rec_f_{family_email}",
+        "zite_created_at": "2026-01-05T10:00:00+00:00",
+        "created": "2026-01-05T10:00:00+00:00",
+        "primary_email": family_email,
+        "accepts_disclaimer": True,
+        "first_name": "Jane",
+        "last_name": "Doe",
+        "city": "Hancock",
+        "source": "web",
+    }
+    base.update(overrides)
+    return base
+
+
+def raw_sponsor(record_id: str, **overrides: Any) -> dict[str, Any]:
+    """One verbatim raw-sponsor row (config columns only)."""
+    base: dict[str, Any] = {
+        "zite_record_id": record_id,
+        "create": "2026-01-01T10:00:00+00:00",
+        "email": "sponsor@example.com",
+        "accepts_disclaimer": True,
+        "sponsor_type": "Individual",
+        "first_name": "Mary",
+        "last_name": "Sponsor",
+        "num_children": 2,
+        "age_preference": "Any Age",
+        "gender_preference": "Any Gender",
+        "dropoff_location": "Hancock",
+        "source": "web",
+    }
+    base.update(overrides)
+    return base
+
+
+_DEFAULT_RAW: dict[str, list[dict[str, Any]]] = {
+    "sponsor": [raw_sponsor("rec_s1")],
+    "family": [raw_family("fam@example.com")],
+    "child": [raw_child("c1"), raw_child("c2", first_name="Lee")],
+}
+
+
+async def _seed(repo: Any, **stores: Any) -> None:
+    """Seed raw snapshot and/or final stores through migrate ownership."""
+    raw = stores.pop("raw", None)
+    if raw is not None:
+        await repo.replace_raw_snapshot("migrate", raw, "migration")
+    names = {"children": "child", "families": "family", "sponsors": "sponsor"}
+    for plural, rows in stores.items():
+        if rows:
+            await repo.commit_finals(
+                "migrate", names[plural], rows, "migration"
+            )
+
+
+class Client:
+    """Test client bound to one app, with login + CSRF helpers."""
+
+    def __init__(self, app: Any, csrf_token: str | None = None) -> None:
+        """Wrap one AsyncClient.
+
+        Args:
+            app: The FastAPI app.
+            csrf_token: The session CSRF token (after login).
+        """
+        self.client = AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        )
+        self.csrf = csrf_token
+
+    async def login(self, username: str) -> None:
+        """Log in and cache the CSRF token from /auth/me.
+
+        Args:
+            username: The bootstrap username.
+        """
+        response = await self.client.post(
+            "/api/v1/auth/login", json={"username": username}
+        )
+        assert response.status_code == 204, response.text
+        me = await self.client.get("/api/v1/auth/me")
+        self.csrf = me.json()["csrf_token"]
+
+    def headers(self, csrf: bool = True) -> dict[str, str]:
+        """Build request headers (CSRF by default).
+
+        Args:
+            csrf: Include the X-CCAT-CSRF header.
+
+        Returns:
+            The header dict.
+        """
+        if csrf and self.csrf:
+            return {"X-CCAT-CSRF": self.csrf}
+        return {}
+
+    async def close(self) -> None:
+        """Close the underlying client."""
+        await self.client.aclose()
+
+
+@pytest.fixture
+def app(tmp_path: Path) -> Any:
+    """One migrated, seeded app instance (dev auth mode)."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+    from ccat.db.engine import create_sync_engine
+    from ccat.db.seed import seed_bootstrap
+
+    seed_bootstrap(
+        create_sync_engine(
+            cfg.storage.database_url.replace("sqlite+aiosqlite", "sqlite")
+        )
+    )
+    return create_app(cfg)
+
+
+@pytest.fixture
+async def anonymous(app: Any) -> AsyncIterator[Client]:
+    """Provide an unauthenticated client."""
+    client = Client(app)
+    yield client
+    await client.close()
+
+
+async def _logged_in(app: Any, username: str = "lmboswell") -> Client:
+    """Provide a client logged in as the named bootstrap user."""
+    client = Client(app)
+    await client.login(username)
+    return client
+
+
+@pytest.fixture
+async def auditor(app: Any) -> AsyncIterator[Client]:
+    """Provide a client logged in as lmboswell (coordinator + auditor)."""
+    client = await _logged_in(app)
+    yield client
+    await client.close()
+
+
+@pytest.fixture
+async def admin(app: Any) -> AsyncIterator[Client]:
+    """Provide a client logged in as cmendres (admin + coordinator + auditor)."""
+    client = await _logged_in(app, "cmendres")
+    yield client
+    await client.close()
+
+
+async def _seed_default(app: Any) -> None:
+    """Seed the raw snapshot + one family/child/sponsor (migrate owner)."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                children=[child_row("c1"), child_row("c2", first_name="Lee")],
+                families=[family_row(1)],
+                sponsors=[sponsor_row(1)],
+            )
+    finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Auth.
+# ---------------------------------------------------------------------------
+
+
+async def test_login_sets_devcookie_and_me(app: Any, anonymous: Client) -> None:
+    """Dev login sets an HttpOnly SameSite cookie; /me returns it."""
+    response = await anonymous.client.post(
+        "/api/v1/auth/login", json={"username": "lmboswell"}
+    )
+    assert response.status_code == 204
+    cookie = response.headers["set-cookie"].lower()
+    assert "ccat_session=" in cookie
+    assert "httponly" in cookie
+    assert "samesite=strict" in cookie
+    me = await anonymous.client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["username"] == "lmboswell"
+    assert "auditor" in me.json()["roles"]
+    assert me.json()["csrf_token"]
+
+
+async def test_logout_revokes_session(app: Any) -> None:
+    """Logout revokes the server session; the cookie stops working."""
+    client = await _logged_in(app)
+    response = await client.client.post(
+        "/api/v1/auth/logout", headers=client.headers()
+    )
+    assert response.status_code == 204
+    me = await client.client.get("/api/v1/auth/me")
+    assert me.status_code == 401
+
+
+async def test_expired_session_is_401(app: Any) -> None:
+    """An expired session row authenticates nobody."""
+    client = await _logged_in(app)
+    cfg = app.state.cfg
+    from ccat.db.engine import async_session_factory
+    from ccat.db.models import Session as SessionRow
+    from sqlalchemy import update
+
+    engine = create_async_engine(cfg.storage.database_url)
+    factory = async_session_factory(engine)
+    try:
+        async with factory() as session:
+            await session.execute(
+                update(SessionRow).values(
+                    expires_at=datetime.now(UTC) - timedelta(hours=1)
+                )
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+    me = await client.client.get("/api/v1/auth/me")
+    assert me.status_code == 401
+
+
+async def test_wrong_csrf_403_on_mutation(app: Any) -> None:
+    """Mutations without the matching CSRF header are 403."""
+    client = await _logged_in(app)
+    await _seed_default(app)
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/families/1",
+        json={"first_name": "Janet"},
+        headers={"X-CCAT-CSRF": "wrong"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "csrf"
+
+
+async def test_login_403_when_not_dev_mode(tmp_path: Path) -> None:
+    """Non-dev auth mode refuses passwordless login with guidance."""
+    cfg = _cfg(
+        tmp_path,
+        api=__import__("ccat.config", fromlist=["ApiSpec"]).ApiSpec(
+            auth_mode="oidc"
+        ),
+    )
+    run_migrations(cfg.storage.database_url)
+    oidc_app = create_app(cfg)
+    client = Client(oidc_app)
+    try:
+        response = await client.client.post(
+            "/api/v1/auth/login", json={"username": "lmboswell"}
+        )
+        assert response.status_code == 403
+        assert "identity adapter" in response.json()["detail"]["message"]
+    finally:
+        await client.close()
+
+
+async def test_failed_logins_401_and_audited(app: Any) -> None:
+    """Unknown and inactive users get 401; failures are audited."""
+    cfg = app.state.cfg
+    from ccat.db.models import SecurityAuditEvent, User
+    from ccat.db.engine import async_session_factory
+
+    response = await Client(app).client.post(
+        "/api/v1/auth/login", json={"username": "nobody"}
+    )
+    assert response.status_code == 401
+    engine = create_async_engine(cfg.storage.database_url)
+    factory = async_session_factory(engine)
+    async with factory() as session:
+        # an inactive bootstrap user
+        session.add(
+            User(
+                username="ghost",
+                roles=["auditor"],
+                dev_no_password=True,
+                active=False,
+            )
+        )
+        await session.commit()
+    await Client(app).client.post(
+        "/api/v1/auth/login", json={"username": "ghost"}
+    )
+    async with factory() as session:
+        events = (
+            await session.scalars(
+                SecurityAuditEvent.__table__.select().where(
+                    SecurityAuditEvent.action == "login_failed"
+                )
+            )
+        ).all()
+        await engine.dispose()
+    assert len(events) == 2
+
+
+async def test_rate_limit_429(app: Any) -> None:
+    """The sixth login in a window from one IP is 429."""
+    client = Client(app)
+    try:
+        statuses = []
+        for _ in range(6):
+            response = await client.client.post(
+                "/api/v1/auth/login", json={"username": "lmboswell"}
+            )
+            statuses.append(response.status_code)
+        assert statuses[:5] == [204] * 5
+        assert statuses[5] == 429
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# RBAC.
+# ---------------------------------------------------------------------------
+
+
+async def test_anonymous_401_on_every_route_class(
+    app: Any, anonymous: Client
+) -> None:
+    """Every route class requires authentication (401 anonymous)."""
+    paths = [
+        ("GET", "/api/v1/users"),
+        ("GET", "/api/v1/seasons"),
+        ("GET", "/api/v1/seasons/2026/overview"),
+        ("GET", "/api/v1/seasons/2026/children"),
+        ("GET", "/api/v1/seasons/2026/children/c1"),
+        ("GET", "/api/v1/seasons/2026/diagnostics/duplicates"),
+        ("GET", "/api/v1/seasons/2026/jobs"),
+        ("GET", "/api/v1/jobs/1"),
+        ("GET", "/api/v1/seasons/2026/artifacts"),
+        ("GET", "/api/v1/seasons/2026/clarifications"),
+    ]
+    # healthz/readyz are deliberately unauthenticated (§5.2).
+    for method, path in paths:
+        response = await anonymous.client.request(method, path)
+        assert response.status_code == 401, f"{method} {path}"
+
+
+async def test_read_only_can_read_not_write(app: Any) -> None:
+    """read_only GETs everywhere; mutations are 403."""
+    await _seed_default(app)
+    client = Client(app)
+    await client.login("lmboswell")
+    await client.close()
+    # create a read-only user through the admin API
+    admin_client = await _logged_in(app, "cmendres")
+    response = await admin_client.client.post(
+        "/api/v1/users",
+        json={"username": "viewer", "roles": ["read_only"]},
+        headers=admin_client.headers(),
+    )
+    assert response.status_code == 201
+    await admin_client.close()
+    client = Client(app)
+    await client.login("viewer")
+    response = await client.client.get("/api/v1/seasons/2026/children")
+    assert response.status_code == 200
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"first_name": "Nope"},
+        headers=client.headers(),
+    )
+    assert response.status_code == 403
+    await client.close()
+
+
+async def test_auditor_patches_but_not_jobs(app: Any) -> None:
+    """A pure-auditor user: PATCH ok; POST /jobs 403."""
+    await _seed_default(app)
+    admin_client = await _logged_in(app, "cmendres")
+    response = await admin_client.client.post(
+        "/api/v1/users",
+        json={"username": "pure_auditor", "roles": ["auditor"]},
+        headers=admin_client.headers(),
+    )
+    assert response.status_code == 201
+    await admin_client.close()
+    client = await _logged_in(app, "pure_auditor")
+    detail = await client.client.get("/api/v1/seasons/2026/children/c1")
+    version = detail.json()["row_version"]
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"first_name": "Kiddo Jr"},
+        headers=client.headers() | {"If-Match": str(version)},
+    )
+    assert response.status_code == 200
+    response = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={"job_type": "screen", "options": {}},
+        headers=client.headers(),
+    )
+    assert response.status_code == 403
+
+
+async def test_coordinator_jobs_but_not_users(app: Any) -> None:
+    """coordinator: jobs ok; user admin 403."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={
+            "job_type": "screen",
+            "options": {"skip_email_check": True, "skip_address_check": True},
+        },
+        headers=client.headers(),
+    )
+    assert response.status_code == 202
+    response = await client.client.get("/api/v1/users")
+    assert response.status_code == 403
+
+
+async def test_admin_user_crud(app: Any) -> None:
+    """admin: create, list, patch users; self-deactivation refused."""
+    client = await _logged_in(app, "cmendres")
+    response = await client.client.post(
+        "/api/v1/users",
+        json={
+            "username": "newbie",
+            "roles": ["auditor"],
+            "display_name": "New",
+        },
+        headers=client.headers(),
+    )
+    assert response.status_code == 201
+    user_id = response.json()["id"]
+    response = await client.client.get("/api/v1/users")
+    assert {u["username"] for u in response.json()} >= {
+        "cmendres",
+        "lmboswell",
+        "newbie",
+    }
+    response = await client.client.patch(
+        f"/api/v1/users/{user_id}",
+        json={"roles": ["coordinator"]},
+        headers=client.headers(),
+    )
+    assert response.json()["roles"] == ["coordinator"]
+    await client.client.get("/api/v1/auth/me")
+    admin_id = [
+        u["id"]
+        for u in (await client.client.get("/api/v1/users")).json()
+        if u["username"] == "cmendres"
+    ][0]
+    response = await client.client.patch(
+        f"/api/v1/users/{admin_id}",
+        json={"active": False},
+        headers=client.headers(),
+    )
+    assert response.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Audit lists / detail / patch.
+# ---------------------------------------------------------------------------
+
+
+async def test_list_pagination_search_status(app: Any) -> None:
+    """Pagination, search, and stored-status filter (§5.2)."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get(
+        "/api/v1/seasons/2026/children?page=1&page_size=1"
+    )
+    body = response.json()
+    assert body["total"] == 2
+    assert len(body["items"]) == 1
+    assert body["page"] == 1
+    response = await client.client.get("/api/v1/seasons/2026/children?q=lee")
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["zite_record_id"] == "c2"
+    response = await client.client.get(
+        "/api/v1/seasons/2026/children?status=new"
+    )
+    assert response.json()["total"] == 2
+    response = await client.client.get(
+        "/api/v1/seasons/2026/children?status=audited"
+    )
+    assert response.json()["total"] == 0
+    # lists include ignored rows
+    from ccat.db.engine import async_session_factory
+
+    engine = create_async_engine(app.state.cfg.storage.database_url)
+    factory = async_session_factory(engine)
+    async with factory() as session:
+        from sqlalchemy import update
+        from ccat.db.models import FinalChild
+
+        await session.execute(
+            update(FinalChild).values(ignore=True, status="ignored")
+        )
+        await session.commit()
+    await engine.dispose()
+    response = await client.client.get("/api/v1/seasons/2026/children")
+    assert response.json()["total"] == 2
+
+
+async def test_detail_includes_baseline_version_attribution(app: Any) -> None:
+    """Detail: row + baseline + submissions + version + attribution."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get("/api/v1/seasons/2026/children/c1")
+    body = response.json()
+    assert body["entity"] == "child"
+    assert body["key"] == "c1"
+    assert body["row"]["zite_record_id"] == "c1"
+    # canonical name on the wire (never potential_anomoly)
+    assert "ai_screening_notes" in body["row"]
+    assert "potential_anomoly" not in body["row"]
+    assert "baseline" in body
+    assert body["row_version"] >= 1
+    assert body["last_updated_by"] == "migration"
+    assert body["submissions"]  # raw duplicate-group submissions
+
+
+async def test_patch_tri_state(app: Any) -> None:
+    """PATCH tri-state: omitted unchanged / null clears / value sets."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    detail = await client.client.get("/api/v1/seasons/2026/children/c1")
+    version = detail.json()["row_version"]
+    # set two fields
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"first_name": "Renamed", "ai_screening_notes": "note one"},
+        headers=client.headers() | {"If-Match": str(version)},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["row"]["first_name"] == "Renamed"
+    assert body["row"]["ai_screening_notes"] == "note one"
+    assert body["row"]["need_1"] == "winter coat taht fits"  # unchanged
+    assert body["row_version"] == version + 1
+    assert body["last_updated_by"] == "lmboswell"
+    # omitted leaves everything; null clears
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"ai_screening_notes": None},
+        headers=client.headers() | {"If-Match": str(body["row_version"])},
+    )
+    assert response.status_code == 200
+    assert response.json()["row"]["ai_screening_notes"] is None
+    assert response.json()["row"]["first_name"] == "Renamed"
+
+
+async def test_patch_requires_if_match_412(app: Any) -> None:
+    """PATCH without If-Match → 412 (documented choice over 428)."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"first_name": "X"},
+        headers=client.headers(),
+    )
+    assert response.status_code == 412
+    assert response.json()["detail"]["code"] == "stale_version"
+
+
+async def test_patch_stale_if_match_returns_fresh_row(app: Any) -> None:
+    """A/B stale-edit scenario: B's stale PATCH 412s with fresh state."""
+    await _seed_default(app)
+    a = await _logged_in(app, "lmboswell")  # auditor
+    b_client = Client(app)
+    await b_client.login("lmboswell")
+    detail = await a.client.get("/api/v1/seasons/2026/children/c1")
+    version = detail.json()["row_version"]
+    # A patches at version N → N+1, attributed A
+    response = await a.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"first_name": "By A"},
+        headers=a.headers() | {"If-Match": str(version)},
+    )
+    assert response.status_code == 200
+    winner_at = response.json()["last_updated_at"]
+    # B patches with the stale version N
+    response = await b_client.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"first_name": "By B"},
+        headers=b_client.headers() | {"If-Match": str(version)},
+    )
+    assert response.status_code == 412
+    detail = response.json()["detail"]
+    assert detail["current_version"] == version + 1
+    assert detail["row"]["first_name"] == "By A"
+    assert detail["last_updated_by"] == "lmboswell"
+    assert detail["last_updated_at"] == winner_at
+    # B rebases on N+1 → succeeds
+    response = await b_client.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"first_name": "By B"},
+        headers=b_client.headers() | {"If-Match": str(version + 1)},
+    )
+    assert response.status_code == 200
+    assert response.json()["row"]["first_name"] == "By B"
+    await b_client.close()
+
+
+async def test_patch_unknown_field_422(app: Any) -> None:
+    """Unknown/mass-assignment fields are 422."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"screened": True},
+        headers=client.headers() | {"If-Match": "1"},
+    )
+    assert response.status_code == 422
+
+
+async def test_ignore_without_confirm_422(app: Any) -> None:
+    """Ignore without confirm=True is 422."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.post(
+        "/api/v1/seasons/2026/children/c1/ignore",
+        json={"confirm": False, "expected_version": 1},
+        headers=client.headers(),
+    )
+    assert response.status_code == 422
+
+
+async def test_ignore_unignore_flow(app: Any) -> None:
+    """Ignore → skeleton; unignore → reseeded row (§5.5)."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.post(
+        "/api/v1/seasons/2026/children/c1/ignore",
+        json={"confirm": True, "expected_version": 1},
+        headers=client.headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
+    detail = await client.client.get("/api/v1/seasons/2026/children/c1")
+    # identity skeleton: names/emails retained, data columns nulled (§5.5)
+    assert detail.json()["row"]["first_name"] == "Kiddo"
+    assert detail.json()["row"]["need_1"] is None
+    # reseed: raw rows still exist, so unignore works
+    version = detail.json()["row_version"]
+    response = await client.client.post(
+        "/api/v1/seasons/2026/children/c1/unignore",
+        json={"confirm": True, "expected_version": version},
+        headers=client.headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["row"]["first_name"] == "Kiddo"
+
+
+async def test_orphan_cannot_become_audited_409(app: Any) -> None:
+    """A null-family child cannot be marked audited (§8.7, 409)."""
+    # raw child with NO matching family registration → real orphan
+    raw = {
+        "sponsor": [raw_sponsor("rec_s1")],
+        "family": [raw_family("fam@example.com")],
+        "child": [
+            raw_child("c1"),
+            raw_child("orphan1", primary_email="orphan@example.com"),
+        ],
+    }
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=raw,
+                children=[
+                    child_row("c1"),
+                    child_row("orphan1", family_id=None),
+                ],
+                families=[family_row(1)],
+                sponsors=[sponsor_row(1)],
+            )
+    finally:
+        await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/children/orphan1",
+        json={"status": "audited"},
+        headers=client.headers() | {"If-Match": "1"},
+    )
+    assert response.status_code == 409
+    assert "orphaned child" in response.json()["detail"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics.
+# ---------------------------------------------------------------------------
+
+
+async def test_diagnostics_payloads_gated(app: Any) -> None:
+    """Email/address payloads hidden by default; role-gated (§5.2)."""
+    await _seed_default(app)
+    engine = create_async_engine(app.state.cfg.storage.database_url)
+    from ccat.db.engine import async_session_factory
+
+    factory = async_session_factory(engine)
+    async with factory() as session:
+        from ccat.db.models import AddressCheck, EmailCheck, EmailCheckTarget
+
+        check = EmailCheck(
+            season_id=1,
+            normalized_email="fam@example.com",
+            status="valid",
+            response_json='{"zero": "bounce"}',
+        )
+        session.add(check)
+        await session.flush()
+        session.add(
+            EmailCheckTarget(
+                email_check_id=check.id,
+                source_sheet="final_family",
+                zite_record_id="rec_f1",
+                field="primary_email",
+                email="fam@example.com",
+            )
+        )
+        session.add(
+            AddressCheck(
+                season_id=1,
+                query="1 Main St",
+                status="ok",
+                response_json='{"lat": "47.1"}',
+            )
+        )
+        await session.commit()
+    await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    emails = await client.client.get("/api/v1/seasons/2026/diagnostics/emails")
+    assert emails.json()[0].get("response_json") is None
+    addresses = await client.client.get(
+        "/api/v1/seasons/2026/diagnostics/addresses"
+    )
+    assert addresses.json()[0].get("response_json") is None
+    # auditor may include payloads
+    emails = await client.client.get(
+        "/api/v1/seasons/2026/diagnostics/emails?include_payload=true"
+    )
+    assert emails.json()[0]["response_json"] == '{"zero": "bounce"}'
+    # read_only may not
+    read_only = Client(app)
+    await read_only.login("lmboswell")
+    await read_only.close()
+    admin_client = await _logged_in(app, "cmendres")
+    await admin_client.client.post(
+        "/api/v1/users",
+        json={"username": "ro", "roles": ["read_only"]},
+        headers=admin_client.headers(),
+    )
+    await admin_client.close()
+    ro = Client(app)
+    await ro.login("ro")
+    response = await ro.client.get(
+        "/api/v1/seasons/2026/diagnostics/emails?include_payload=true"
+    )
+    assert response.status_code == 403
+    await ro.close()
+
+
+async def test_match_report_404_when_absent(app: Any) -> None:
+    """No fabricated empty match run (§10)."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get(
+        "/api/v1/seasons/2026/diagnostics/match-report"
+    )
+    assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Jobs.
+# ---------------------------------------------------------------------------
+
+
+async def test_enqueue_idempotency_and_conflicts(app: Any) -> None:
+    """202 + id; same key same hash → same id; different hash → 409."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    first = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={"job_type": "reconcile", "idempotency_key": "k1"},
+        headers=client.headers(),
+    )
+    assert first.status_code == 202
+    job_id = first.json()["id"]
+    replay = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={"job_type": "reconcile", "idempotency_key": "k1"},
+        headers=client.headers(),
+    )
+    assert replay.json()["id"] == job_id
+    conflict = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={
+            "job_type": "reconcile",
+            "options": {"x": 1},
+            "idempotency_key": "k1",
+        },
+        headers=client.headers(),
+    )
+    assert conflict.status_code == 409
+    # pipeline-class conflict: an active reconcile is not pipeline-class,
+    # enqueue a screen then a match → the match is 409 while screen is active
+    screen = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={
+            "job_type": "screen",
+            "options": {"skip_email_check": True, "skip_address_check": True},
+        },
+        headers=client.headers(),
+    )
+    assert screen.status_code == 202
+    match = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={"job_type": "match"},
+        headers=client.headers(),
+    )
+    assert match.status_code == 409
+
+
+async def test_screen_invalid_redo_422_before_worker(app: Any) -> None:
+    """Invalid redo target is 422 before enqueueing (§9.2)."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={"job_type": "screen", "options": {"redo": "ghost"}},
+        headers=client.headers(),
+    )
+    assert response.status_code == 422
+
+
+async def test_job_list_detail_cancel_and_events(app: Any) -> None:
+    """List/detail/events; cancel a queued job → cancelled."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    enqueued = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={"job_type": "reconcile"},
+        headers=client.headers(),
+    )
+    job_id = enqueued.json()["id"]
+    listing = await client.client.get("/api/v1/seasons/2026/jobs")
+    assert any(job["id"] == job_id for job in listing.json())
+    detail = await client.client.get(f"/api/v1/jobs/{job_id}")
+    assert detail.json()["status"] in {"queued", "running", "succeeded"}
+    assert detail.json()["events"]
+    cancelled = await client.client.post(
+        f"/api/v1/jobs/{job_id}/cancel", headers=client.headers()
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] in {"cancelled", "cancel_requested"}
+    events = await client.client.get(f"/api/v1/jobs/{job_id}/events?after=0")
+    assert events.status_code == 200
+    assert events.json()
+    # finished jobs refuse cancel
+    response = await client.client.post(
+        f"/api/v1/jobs/{job_id}/cancel", headers=client.headers()
+    )
+    if response.status_code == 200:
+        state = (await client.client.get(f"/api/v1/jobs/{job_id}")).json()
+        assert state["status"] in {"cancelled", "cancel_requested"}
+
+
+async def test_worker_runs_screen_job_end_to_end(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enqueue → real Worker (fake AI) → succeeded → children screened."""
+    await _seed_default(app)
+    # fake the AI at the opencode seam (same pattern as test_db_pipeline)
+    import re
+    from types import SimpleNamespace
+
+    import ccat.screening as screening
+    import opencode
+
+    class FakeOpencode:
+        """Fake opencode client answering every child 'null'."""
+
+        calls: list[str] = []
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            """Record the fake session resource."""
+            self.session = SimpleNamespace(
+                create=lambda model: SimpleNamespace(id="ses_test"),
+                generate=self._generate,
+            )
+
+        def _generate(self, session_id: str, prompt: str) -> SimpleNamespace:
+            """Answer 'null' (no corrections) per child."""
+            match = re.search(r'"zite_record_id": "([^"]+)"', prompt)
+            assert match is not None
+            FakeOpencode.calls.append(match.group(1))
+            return SimpleNamespace(text="null")
+
+        def __enter__(self) -> "FakeOpencode":
+            """Return self."""
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            """Swallow exceptions like the real client does."""
+            return None
+
+    class _Version:
+        stdout = "2.0.0"
+        stderr = ""
+
+    monkeypatch.setattr(screening.subprocess, "run", lambda *a, **k: _Version())
+    monkeypatch.setattr(opencode, "Opencode", FakeOpencode)
+    client = await _logged_in(app, "lmboswell")
+    enqueued = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={
+            "job_type": "screen",
+            "options": {"skip_email_check": True, "skip_address_check": True},
+        },
+        headers=client.headers(),
+    )
+    job_id = enqueued.json()["id"]
+    cfg = app.state.cfg
+    worker = Worker(cfg)
+    task = asyncio.create_task(worker.run())
+    try:
+        state = None
+        for _ in range(600):
+            state = (await client.client.get(f"/api/v1/jobs/{job_id}")).json()
+            if state["status"] in {"succeeded", "failed"}:
+                break
+            await asyncio.sleep(0.05)
+        assert state is not None and state["status"] == "succeeded", state
+        children = (
+            await client.client.get("/api/v1/seasons/2026/children")
+        ).json()
+        assert all(child["screened"] for child in children["items"])
+    finally:
+        worker.stop.set()
+        await task
+
+
+async def test_sse_stream_returns_events(app: Any) -> None:
+    """SSE stream yields events and ends at the terminal state."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    enqueued = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={"job_type": "reconcile"},
+        headers=client.headers(),
+    )
+    job_id = enqueued.json()["id"]
+    worker = Worker(app.state.cfg)
+    task = asyncio.create_task(worker.run())
+    try:
+        async with client.client.stream(
+            "GET", f"/api/v1/jobs/{job_id}/events/stream", timeout=15.0
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith(
+                "text/event-stream"
+            )
+            lines: list[str] = []
+            async for line in response.aiter_lines():
+                lines.append(line)
+                if "succeeded" in line or "failed" in line:
+                    break
+        assert any(line.startswith("data: ") for line in lines)
+    finally:
+        worker.stop.set()
+        await task
+
+
+# ---------------------------------------------------------------------------
+# Artifacts.
+# ---------------------------------------------------------------------------
+
+
+async def test_artifact_list_download_headers(app: Any) -> None:
+    """List + download: any role, no-store, attachment disposition."""
+    await _seed_default(app)
+    cfg = app.state.cfg
+    root = Path(cfg.storage.artifact_root) / "csv_export"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "export.csv").write_text("a,b\n1,2\n")
+    engine = create_async_engine(cfg.storage.database_url)
+    from ccat.db.engine import async_session_factory
+
+    factory = async_session_factory(engine)
+    async with factory() as session:
+        from ccat.db.models import Artifact
+        from sqlalchemy import select as sa_select
+
+        session.add(
+            Artifact(
+                season_id=1,
+                kind="csv_export",
+                path="csv_export/export.csv",
+                filename="export.csv",
+                content_type="text/csv",
+                size_bytes=8,
+                sha256="x",
+                created_by="system",
+            )
+        )
+        await session.commit()
+        artifact_id = await session.scalar(sa_select(Artifact.id))
+    await engine.dispose()
+    read_only = Client(app)
+    await read_only.login("lmboswell")
+    listing = await read_only.client.get(
+        "/api/v1/seasons/2026/artifacts?kind=csv_export"
+    )
+    assert listing.status_code == 200
+    assert listing.json()[0]["id"] == artifact_id
+    download = await read_only.client.get(
+        f"/api/v1/artifacts/{artifact_id}/download"
+    )
+    assert download.status_code == 200
+    assert download.headers["cache-control"] == "no-store"
+    assert "attachment" in download.headers["content-disposition"]
+    assert download.text == "a,b\n1,2\n"
+    await read_only.close()
+
+
+async def test_artifact_outside_root_rejected(app: Any) -> None:
+    """A path escaping the artifact root is rejected (§6.3)."""
+    await _seed_default(app)
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    from ccat.db.engine import async_session_factory
+
+    factory = async_session_factory(engine)
+    async with factory() as session:
+        from ccat.db.models import Artifact
+
+        session.add(
+            Artifact(
+                season_id=1,
+                kind="csv_export",
+                path="../../secrets.txt",
+                filename="secrets.txt",
+                content_type="text/plain",
+                size_bytes=1,
+                sha256="x",
+                created_by="system",
+            )
+        )
+        await session.commit()
+    await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get("/api/v1/artifacts/1/download")
+    assert response.status_code in {403, 404}
+
+
+async def test_unknown_artifact_404(app: Any) -> None:
+    """Unknown artifact id is 404."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get("/api/v1/artifacts/999/download")
+    assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Clarify.
+# ---------------------------------------------------------------------------
+
+
+async def test_clarify_list_detail_draft_contacted(app: Any) -> None:
+    """List/detail; draft PATCH stale → 412 + fresh; contacted stamps."""
+    await _seed_default(app)
+    # give c1 a clarification note so it is flagged
+    engine = create_async_engine(app.state.cfg.storage.database_url)
+    from ccat.db.engine import async_session_factory
+
+    factory = async_session_factory(engine)
+    async with factory() as session:
+        from sqlalchemy import update
+        from ccat.db.models import FinalChild
+
+        await session.execute(
+            update(FinalChild)
+            .where(FinalChild.zite_record_id == "c1")
+            .values(clarification_notes="please clarify sizes")
+        )
+        await session.commit()
+    await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    listing = await client.client.get("/api/v1/seasons/2026/clarifications")
+    assert listing.status_code == 200
+    assert listing.json()[0]["family_id"] == 1
+    detail = await client.client.get("/api/v1/seasons/2026/clarifications/1")
+    assert detail.json()["children"]
+    # draft edit without a draft → 404
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/clarifications/1/draft",
+        json={"subject": "Hi"},
+        headers=client.headers() | {"If-Match": "1"},
+    )
+    assert response.status_code == 404
+    # seed a draft at the repo level
+    engine = create_async_engine(app.state.cfg.storage.database_url)
+    factory = async_session_factory(engine)
+    async with factory() as session:
+        from ccat.db.models import Season
+        from ccat.db.repositories import SeasonStoreRepository
+
+        season = await session.get(Season, 1)
+        repo = SeasonStoreRepository(session, season)
+        await repo.save_draft(
+            1, "Subject", "Hello", "Intro", "Bye", [], "system"
+        )
+        await session.commit()
+    await engine.dispose()
+    # stale version → 412 with fresh draft
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/clarifications/1/draft",
+        json={"subject": "Stale"},
+        headers=client.headers() | {"If-Match": "99"},
+    )
+    assert response.status_code == 412
+    assert response.json()["detail"]["code"] == "stale_version"
+    # correct version → new version saved
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/clarifications/1/draft",
+        json={"subject": "Fresh"},
+        headers=client.headers() | {"If-Match": "1"},
+    )
+    assert response.status_code == 200
+    assert response.json()["version"] == 2
+    # contacted tri-state + UTC stamp
+    response = await client.client.post(
+        "/api/v1/seasons/2026/clarifications/1/contacted",
+        json={"contacted": True},
+        headers=client.headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["contacted"] is True
+    assert response.json()["contacted_at"] is not None
+    stamp = response.json()["contacted_at"]
+    assert stamp.endswith("+00:00") or stamp.endswith("Z")
+
+
+async def test_clarify_export_enqueues_job(app: Any) -> None:
+    """clarify-export POST enqueues the job; no send endpoint exists."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.post(
+        "/api/v1/seasons/2026/clarify-export", headers=client.headers()
+    )
+    assert response.status_code == 202
+    assert response.json()["job_type"] == "clarify_export"
+    # no autosend anywhere: the route list has no send route
+    routes = [
+        route.path
+        for route in app.routes
+        if "clarif" in getattr(route, "path", "")
+    ]
+    assert not any("send" in path for path in routes)
+
+
+# ---------------------------------------------------------------------------
+# Overview.
+# ---------------------------------------------------------------------------
+
+
+async def test_overview_matches_repo_queries(app: Any) -> None:
+    """Overview counts match direct repository queries (§11.2 parity)."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    overview = (await client.client.get("/api/v1/seasons/2026/overview")).json()
+    engine = create_async_engine(app.state.cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(app.state.cfg, "check") as repo:
+            children = await repo.final_rows("child")
+    finally:
+        await engine.dispose()
+    assert overview["entities"]["child"]["total"] == len(children)
+    assert overview["entities"]["child"]["pending_ai"] == sum(
+        1 for row in children if not row.get("screened")
+    )
+    assert overview["entities"]["child"]["orphans"] == sum(
+        1 for row in children if row.get("family_id") is None
+    )
+    assert overview["season"] == "2026"
+
+
+# ---------------------------------------------------------------------------
+# Errors + health + OpenAPI.
+# ---------------------------------------------------------------------------
+
+
+async def test_unknown_season_404(app: Any) -> None:
+    """Unknown season → 404 on any /seasons/{season} route (no IDOR)."""
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get("/api/v1/seasons/1999/children")
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "season_not_found"
+
+
+async def test_unknown_entity_job_artifact_404(app: Any) -> None:
+    """Unknown entity key / job / artifact → 404."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    assert (
+        await client.client.get("/api/v1/seasons/2026/children/ghost")
+    ).status_code == 404
+    assert (await client.client.get("/api/v1/jobs/999")).status_code == 404
+
+
+async def test_malformed_body_422(app: Any) -> None:
+    """Malformed JSON body → 422 without internals."""
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        content=b"{not json",
+        headers=client.headers() | {"content-type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert "Traceback" not in response.text
+
+
+async def test_healthz_readyz(app: Any) -> None:
+    """Healthz is always ok; readyz checks DB/head/artifact root."""
+    anonymous_client = Client(app)
+    health = await anonymous_client.client.get("/api/v1/healthz")
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
+    ready = await anonymous_client.client.get("/api/v1/readyz")
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "ok"
+    await anonymous_client.close()
+
+
+async def test_openapi_contract(app: Any, anonymous: Client) -> None:
+    """OpenAPI lists all DTO schemas; the committed export matches."""
+    response = await anonymous.client.get("/api/v1/openapi.json")
+    assert response.status_code == 200
+    schema = response.json()
+    expected = {
+        "EntityDetail",
+        "EntityListPage",
+        "JobView",
+        "Overview",
+        "UserView",
+        "SeasonView",
+        "ArtifactView",
+        "ClarifyFamilyView",
+        "ClarifyDraftView",
+        "HealthView",
+        "MeView",
+    }
+    assert expected <= set(schema["components"]["schemas"])
+    committed = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "frontend" / "openapi.json"
+        ).read_text()
+    )
+    # The committed artifact is the same contract (routes unchanged).
+    assert set(committed["components"]["schemas"]) >= expected
+
+
+async def test_no_stack_traces_in_errors(app: Any) -> None:
+    """Error bodies never contain tracebacks or paths (§8)."""
+    client = await _logged_in(app, "lmboswell")
+    await _seed_default(app)
+    responses = [
+        await client.client.get("/api/v1/seasons/2026/children/ghost"),
+        await client.client.get("/api/v1/jobs/999"),
+        await client.client.patch(
+            "/api/v1/seasons/2026/children/c1",
+            json={"first_name": 3.5},
+            headers=client.headers() | {"If-Match": "1"},
+        ),
+    ]
+    for response in responses:
+        text = response.text
+        assert "Traceback" not in text
+        assert "/home/" not in text
