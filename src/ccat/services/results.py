@@ -39,11 +39,12 @@ class AcquireResult(StrictResult):
     Attributes:
         raw_rows: Raw table name ("sponsor"/"family"/"child") -> row
             count written verbatim to ``raw_<table>``.
-        workbook: Path of the workbook that was written.
+        workbook: Path of the workbook that was written (empty in DB
+            mode, where acquire writes no workbook).
     """
 
     raw_rows: dict[str, int] = Field(default_factory=dict)
-    workbook: str
+    workbook: str = ""
 
 
 class ScreenResult(StrictResult):
@@ -86,7 +87,11 @@ class MatchResult(StrictResult):
         report_rows: match_report sheet row count (0 when absent).
         archived: True when this run created timestamped archive
             sheets.
-        csv_path: Configured match-report CSV path.
+        csv_path: Configured match-report CSV path (DB mode: the
+            tracked artifact's path).
+        run_id: The committed match run's id (DB mode only).
+        csv_export_ok: False when the DB-mode CSV artifact failed after
+            the assignment commit (explicit partial state, plan §9.4).
     """
 
     matched_families: int = 0
@@ -97,6 +102,8 @@ class MatchResult(StrictResult):
     report_rows: int = 0
     archived: bool = False
     csv_path: str = ""
+    run_id: int | None = None
+    csv_export_ok: bool = True
 
 
 class GenerateResult(StrictResult):

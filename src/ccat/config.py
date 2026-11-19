@@ -424,12 +424,16 @@ class StorageSpec(BaseModel):
         database_url: Async SQLAlchemy URL for the DB mode.  The sync
             URL used by Alembic and the CLI importer is derived in
             :mod:`ccat.db.engine`.
+        artifact_root: Private server-side directory holding generated
+            artifacts (plan §6.3); paths are registered relative to it
+            and downloads are contained within it.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["workbook", "db"] = "workbook"
     database_url: str = "sqlite+aiosqlite:///./output/ccat.sqlite3"
+    artifact_root: str = "output/artifacts"
 
 
 class ApiSpec(BaseModel):

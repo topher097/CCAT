@@ -52,6 +52,9 @@ rollback restores the original config and immutable input workbook.
 ``db-import`` (new) imports a persistent-final (v2) workbook into a migrated
 SQLite database as one validated migration batch; ``workbook-export`` (new)
 writes the read-only reverse export used as rollback evidence (plan §10).
+``worker`` (new) runs the durable-job worker loop (plan §6.1) against the
+configured SQLite database; Ctrl-C/SIGTERM stop claiming and finish the
+current job gracefully.
 """
 
 import importlib
@@ -457,6 +460,30 @@ def _clarify_export_cmd(
     )
 
 
+def _worker_cmd(config: str = DEFAULT_CONFIG) -> None:
+    """Run the durable-job worker loop (plan §6.1, decision D7).
+
+    Polls the configured job database, claims queued jobs, and runs
+    their handlers with heartbeat/lease/recovery semantics.  SIGTERM
+    or Ctrl-C stops claiming and finishes the current job gracefully.
+
+    Args:
+        config: Path to the JSON configuration file.
+    """
+
+    def _run() -> None:
+        from ccat.jobs import run_worker
+
+        try:
+            cfg = load_config(config)
+            setup_logging(cfg.log_file)
+            run_worker(cfg)
+        except _typed_errors() as error:
+            raise SystemExit(f"ccat worker failed: {error}") from error
+
+    _run()
+
+
 def main() -> None:
     """Entry point for the ``ccat`` CLI."""
     fire.Fire(
@@ -473,6 +500,7 @@ def main() -> None:
             "clarify-export": _clarify_export_cmd,
             "db-import": _db_import_cmd,
             "workbook-export": _workbook_export_cmd,
+            "worker": _worker_cmd,
         }
     )
 
