@@ -23,6 +23,8 @@ Commands (all accept ``--config`` where applicable)::
                    [--report PATH]
     ccat workbook-export --output PATH [--db URL] [--report PATH] [--force]
     ccat serve [--config PATH]
+    ccat worker [--config PATH]
+    ccat db-upgrade [--config PATH]
 
 ``acquire`` replaces only raw sheets. ``screen`` cleans all raw records in
 memory, appends new persistent entities, refreshes global diagnostics and
@@ -55,7 +57,9 @@ SQLite database as one validated migration batch; ``workbook-export`` (new)
 writes the read-only reverse export used as rollback evidence (plan §10).
 ``worker`` (new) runs the durable-job worker loop (plan §6.1) against the
 configured SQLite database; Ctrl-C/SIGTERM stop claiming and finish the
-current job gracefully.
+current job gracefully.  ``db-upgrade`` (new) is the controlled one-shot
+schema-migration step (plan §13); it is idempotent and never touches
+season data.
 """
 
 import importlib
@@ -480,6 +484,18 @@ def _serve_cmd(config: str = DEFAULT_CONFIG) -> None:
         raise SystemExit(f"ccat serve failed: {error}") from error
 
 
+def _db_upgrade_cmd(config: str = DEFAULT_CONFIG) -> None:
+    """Upgrade the configured SQLite database to the Alembic head.
+
+    The controlled release step for schema migrations (plan §13).  It is
+    idempotent and never touches season data.
+
+    Args:
+        config: Path to the JSON configuration file.
+    """
+    _dispatch("db-upgrade", "db.cli:run", config)
+
+
 def _worker_cmd(config: str = DEFAULT_CONFIG) -> None:
     """Run the durable-job worker loop (plan §6.1, decision D7).
 
@@ -522,6 +538,7 @@ def main() -> None:
             "workbook-export": _workbook_export_cmd,
             "serve": _serve_cmd,
             "worker": _worker_cmd,
+            "db-upgrade": _db_upgrade_cmd,
         }
     )
 

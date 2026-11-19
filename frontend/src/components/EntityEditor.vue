@@ -1,0 +1,483 @@
+<script setup lang="ts">
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+
+import { ApiError } from '../api/client'
+import {
+  getEntity,
+  patchEntity,
+  setIgnored,
+  type Entity,
+  type EntityDetail,
+  type EntityPatch,
+} from '../api/audit'
+import { useSessionStore } from '../stores/session'
+import { useDirtyGuard } from '../composables/useDirtyGuard'
+import { ENTITY_FIELDS, formatTime, type FieldSpec } from '../utils/format'
+import { differs, normalizeValue, toAge } from '../utils/diff'
+import { conflictFromError, type ConflictInfo } from '../utils/conflict'
+import StatusBadge from './StatusBadge.vue'
+import SpecialNeedsEditor from './SpecialNeedsEditor.vue'
+import ConflictPanel from './ConflictPanel.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
+
+const props = defineProps<{ entity: Entity; entityKey: string }>()
+
+const session = useSessionStore()
+const detail = ref<EntityDetail | null>(null)
+const draft = reactive<Record<string, unknown>>({})
+const touched = ref<Set<string>>(new Set())
+const loading = ref(false)
+const saving = ref(false)
+const loadError = ref<string | null>(null)
+const submitError = ref<string | null>(null)
+const notice = ref<string | null>(null)
+const conflict = ref<ConflictInfo | null>(null)
+const confirmAction = ref<'ignore' | 'unignore' | null>(null)
+
+const NUMERIC_FIELDS = new Set(['age_reported', 'num_children'])
+const ENTITY_LABEL: Record<Entity, string> = {
+  sponsor: 'Sponsor',
+  family: 'Family',
+  child: 'Child',
+}
+
+const seasonName = computed(() => session.season?.name ?? '')
+const fieldSpecs = computed<FieldSpec[]>(() => ENTITY_FIELDS[props.entity])
+const labels = computed<Record<string, string>>(() =>
+  Object.fromEntries(
+    [...fieldSpecs.value, { field: 'clarification_notes', label: 'Clarification notes' }].map(
+      (spec) => [spec.field, spec.label],
+    ),
+  ),
+)
+const neutralFields = computed(() =>
+  fieldSpecs.value.filter((spec) => spec.neutral).map((spec) => spec.field),
+)
+const isDirty = computed(() => touched.value.size > 0)
+const isIgnored = computed(() => detail.value?.row.ignore === true)
+const submissions = computed<Record<string, unknown>[]>(
+  () => (detail.value?.submissions ?? []) as Record<string, unknown>[],
+)
+const title = computed(
+  () => `${ENTITY_LABEL[props.entity]} ${detail.value?.key ?? props.entityKey}`,
+)
+
+const isOrphan = computed(
+  () =>
+    props.entity === 'child' &&
+    detail.value !== null &&
+    detail.value.row.family_id === null,
+)
+
+const ageMismatch = computed<string | null>(() => {
+  if (props.entity !== 'child' || !detail.value) return null
+  const reported = detail.value.row.age_reported
+  const atXmas = detail.value.row.age_at_xmas
+  if (reported === null || atXmas === null || reported === undefined) return null
+  if (Number(reported) === Number(atXmas)) return null
+  return `Age reported (${String(reported)}) differs from age at Christmas (${String(atXmas)}); verify DOB and age.`
+})
+
+useDirtyGuard(isDirty)
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : 'request failed'
+}
+
+function show(value: unknown): string {
+  return normalizeValue(value) || '—'
+}
+
+function resetDraft(): void {
+  const current = detail.value
+  if (!current) return
+  for (const key of Object.keys(draft)) delete draft[key]
+  for (const spec of fieldSpecs.value) {
+    draft[spec.field] = current.row[spec.field] ?? ''
+  }
+  draft.clarification_notes = current.row.clarification_notes ?? ''
+  touched.value = new Set()
+}
+
+function apply(updated: EntityDetail): void {
+  detail.value = updated
+  resetDraft()
+}
+
+function setField(field: string, value: unknown): void {
+  draft[field] = value
+  const next = new Set(touched.value)
+  next.add(field)
+  touched.value = next
+  notice.value = null
+}
+
+function payload(): EntityPatch {
+  const body: Record<string, unknown> = {}
+  for (const field of touched.value) {
+    body[field] = NUMERIC_FIELDS.has(field)
+      ? toAge(draft[field])
+      : normalizeValue(draft[field])
+        ? String(draft[field])
+        : null
+  }
+  return body as EntityPatch
+}
+
+function diffClass(spec: FieldSpec): string {
+  if (!detail.value) return ''
+  if (!differs(draft[spec.field], detail.value.baseline[spec.field])) return ''
+  return spec.neutral ? 'diff-neutral' : 'diff-changed'
+}
+
+async function load(): Promise<void> {
+  if (!seasonName.value) {
+    loadError.value = 'No active season loaded.'
+    return
+  }
+  loading.value = true
+  loadError.value = null
+  conflict.value = null
+  submitError.value = null
+  notice.value = null
+  try {
+    apply(
+      await getEntity(seasonName.value, props.entity, props.entityKey),
+    )
+  } catch (failure) {
+    loadError.value = messageOf(failure)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function persist(version: number): Promise<void> {
+  if (!detail.value || touched.value.size === 0) return
+  saving.value = true
+  submitError.value = null
+  try {
+    apply(
+      await patchEntity(
+        seasonName.value,
+        props.entity,
+        props.entityKey,
+        payload(),
+        version,
+      ),
+    )
+    notice.value = 'Saved.'
+  } catch (failure) {
+    const next =
+      failure instanceof ApiError
+        ? conflictFromError(failure, 'edit')
+        : null
+    if (next) conflict.value = next
+    else submitError.value = messageOf(failure)
+  } finally {
+    saving.value = false
+  }
+}
+
+function save(): void {
+  if (detail.value) void persist(detail.value.row_version)
+}
+
+function reloadConflict(): void {
+  conflict.value = null
+  void load()
+}
+
+/** Keep the user's touched values, apply them to the fresh row, resubmit. */
+async function rebase(): Promise<void> {
+  const info = conflict.value
+  const current = detail.value
+  if (!info || !current) return
+  for (const spec of fieldSpecs.value) {
+    if (!touched.value.has(spec.field)) {
+      draft[spec.field] = info.row[spec.field] ?? ''
+    }
+  }
+  if (!touched.value.has('clarification_notes')) {
+    draft.clarification_notes = info.row.clarification_notes ?? ''
+  }
+  detail.value = {
+    ...current,
+    row: info.row,
+    row_version: info.currentVersion,
+    last_updated_by: info.lastUpdatedBy,
+    last_updated_at: info.lastUpdatedAt,
+  }
+  conflict.value = null
+  await persist(info.currentVersion)
+}
+
+function askIgnore(): void {
+  confirmAction.value = isIgnored.value ? 'unignore' : 'ignore'
+}
+
+async function confirmIgnore(): Promise<void> {
+  const action = confirmAction.value
+  const current = detail.value
+  confirmAction.value = null
+  if (!action || !current) return
+  saving.value = true
+  submitError.value = null
+  try {
+    apply(
+      await setIgnored(
+        seasonName.value,
+        props.entity,
+        props.entityKey,
+        action,
+        current.row_version,
+      ),
+    )
+    notice.value = action === 'ignore' ? 'Row ignored.' : 'Row un-ignored.'
+  } catch (failure) {
+    const next =
+      failure instanceof ApiError
+        ? conflictFromError(failure, 'ignore')
+        : null
+    if (next) conflict.value = next
+    else submitError.value = messageOf(failure)
+  } finally {
+    saving.value = false
+  }
+}
+
+watch(() => [props.entity, props.entityKey], () => void load())
+onMounted(() => void load())
+</script>
+
+<template>
+  <section data-testid="entity-editor">
+    <p v-if="loading && !detail" role="status">Loading {{ entity }}…</p>
+    <p
+      v-else-if="loadError"
+      class="error-text"
+      role="alert"
+      data-testid="detail-error"
+    >
+      {{ loadError }} <button type="button" @click="load">Retry</button>
+    </p>
+
+    <template v-else-if="detail">
+      <div class="status-line" style="justify-content: space-between">
+        <div class="status-line">
+          <h1 style="margin: 0">{{ title }}</h1>
+          <StatusBadge :status="detail.status" />
+          <span class="muted">row version {{ detail.row_version }}</span>
+        </div>
+        <button type="button" :disabled="saving || !isDirty" @click="save">
+          Save changes
+        </button>
+      </div>
+      <p class="muted">
+        Last updated by
+        <strong>{{ detail.last_updated_by ?? 'never' }}</strong>
+        at {{ formatTime(detail.last_updated_at) }} · audited at
+        {{ formatTime(detail.audited_at) }}
+      </p>
+
+      <p v-if="isOrphan" class="card" data-testid="orphan-warning">
+        <strong>Orphaned child:</strong> no matching family registration.
+        Audited status stays disabled (legacy behavior); fix the family link
+        before auditing.
+      </p>
+      <p v-if="ageMismatch" class="card diff-changed" data-testid="age-warning">
+        <strong>Age mismatch:</strong> {{ ageMismatch }}
+      </p>
+
+      <ConflictPanel
+        v-if="conflict"
+        :conflict="conflict"
+        :draft="draft"
+        :labels="labels"
+        :neutral-fields="neutralFields"
+        @reload="reloadConflict"
+        @rebase="rebase"
+      />
+
+      <p
+        v-if="submitError"
+        class="error-text"
+        role="alert"
+        data-testid="save-error"
+      >
+        {{ submitError }}
+      </p>
+      <p v-if="notice" class="notice" data-testid="save-notice">{{ notice }}</p>
+
+      <h2>Baseline vs current</h2>
+      <p class="muted">
+        Prepared baseline on the left, editable current values on the right.
+        Only touched fields are sent; an empty value clears the field.
+      </p>
+      <div style="overflow-x: auto">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Prepared baseline</th>
+              <th>Current (editable)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="spec in fieldSpecs"
+              :key="spec.field"
+              :class="diffClass(spec)"
+              :data-field="spec.field"
+            >
+              <td>
+                {{ spec.label }}
+                <span v-if="spec.neutral" class="badge">control</span>
+                <span
+                  v-if="
+                    differs(draft[spec.field], detail.baseline[spec.field])
+                  "
+                  class="badge"
+                  data-testid="diff-marker"
+                >
+                  differs{{ spec.neutral ? ' (not status-relevant)' : '' }}
+                </span>
+              </td>
+              <td>{{ show(detail.baseline[spec.field]) }}</td>
+              <td>
+                <SpecialNeedsEditor
+                  v-if="spec.field === 'special_needs'"
+                  :model-value="(draft.special_needs as string | null)"
+                  @update:model-value="setField('special_needs', $event)"
+                />
+                <textarea
+                  v-else-if="spec.kind === 'textarea'"
+                  :name="spec.field"
+                  :value="(draft[spec.field] as string)"
+                  @input="
+                    setField(
+                      spec.field,
+                      ($event.target as HTMLTextAreaElement).value,
+                    )
+                  "
+                />
+                <input
+                  v-else
+                  :name="spec.field"
+                  :type="spec.kind === 'number' ? 'number' : spec.kind === 'date' ? 'date' : 'text'"
+                  :value="(draft[spec.field] as string)"
+                  @input="
+                    setField(spec.field, ($event.target as HTMLInputElement).value)
+                  "
+                />
+              </td>
+            </tr>
+            <tr :data-field="'clarification_notes'">
+              <td>Clarification notes</td>
+              <td>{{ show(detail.baseline.clarification_notes) }}</td>
+              <td>
+                <textarea
+                  name="clarification_notes"
+                  :value="(draft.clarification_notes as string)"
+                  @input="
+                    setField(
+                      'clarification_notes',
+                      ($event.target as HTMLTextAreaElement).value,
+                    )
+                  "
+                />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="status-line" style="margin-top: 0.75rem">
+        <button
+          type="button"
+          class="primary"
+          :disabled="saving || !isDirty"
+          data-testid="save"
+          @click="save"
+        >
+          Save
+        </button>
+        <button type="button" :disabled="saving || !isDirty" @click="resetDraft">
+          Reset local edits
+        </button>
+        <span v-if="isDirty" class="muted">
+          {{ touched.size }} field(s) changed but not saved
+        </span>
+      </div>
+
+      <section
+        v-if="submissions.length"
+        class="card"
+        style="margin-top: 1rem"
+        data-testid="submissions"
+      >
+        <h2 style="margin-top: 0">Duplicate submissions</h2>
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Record id</th>
+              <th>Name</th>
+              <th>Email</th>
+              <th>DOB</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, index) in submissions" :key="index">
+              <td>{{ row.zite_record_id ?? '—' }}</td>
+              <td>
+                {{ [row.first_name, row.last_name].filter(Boolean).join(' ') || '—' }}
+              </td>
+              <td>{{ row.primary_email ?? row.email ?? '—' }}</td>
+              <td>{{ row.dob ?? '—' }}</td>
+              <td>{{ row.created ?? '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="card" style="margin-top: 1rem">
+        <h2 style="margin-top: 0">Ignore controls</h2>
+        <p class="muted">
+          Ignoring destroys this row's adjudicated data — it is reduced to its
+          identity skeleton. Un-ignore later restores the raw baseline values
+          and loses the edits. Saves use row version
+          {{ detail.row_version }}; a stale version never overwrites silently.
+        </p>
+        <button
+          type="button"
+          :class="isIgnored ? '' : 'danger'"
+          :disabled="saving"
+          data-testid="ignore-toggle"
+          @click="askIgnore"
+        >
+          {{
+            isIgnored
+              ? 'Un-ignore (restores raw values)'
+              : 'Ignore (destructive)'
+          }}
+        </button>
+      </section>
+
+      <ConfirmDialog
+        :open="confirmAction !== null"
+        :title="confirmAction === 'ignore' ? 'Ignore this row?' : 'Un-ignore this row?'"
+        :message="
+          confirmAction === 'ignore'
+            ? 'Ignoring destroys this row\'s adjudicated data — it is reduced to its identity skeleton. Un-ignore later restores the raw baseline values and loses the edits.'
+            : 'Un-ignoring re-seeds the data columns from the raw baseline — previous adjudicated edits to this row are lost.'
+        "
+        :confirm-label="
+          confirmAction === 'ignore' ? 'Ignore and save' : 'Un-ignore and save'
+        "
+        :dangerous="confirmAction === 'ignore'"
+        @confirm="confirmIgnore"
+        @cancel="confirmAction = null"
+      />
+    </template>
+  </section>
+</template>

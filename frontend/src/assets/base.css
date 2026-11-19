@@ -1,0 +1,277 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: #1c2530;
+  background: #f5f7fa;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: #0b5cad;
+}
+
+button {
+  font: inherit;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid #9aa7b4;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button.danger {
+  border-color: #b3261e;
+  color: #8c1c16;
+}
+
+button.primary {
+  background: #0b5cad;
+  border-color: #0b5cad;
+  color: #fff;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 1.2rem;
+  background: #12324f;
+  color: #fff;
+}
+
+.app-header a,
+.app-header a:visited {
+  color: #fff;
+}
+
+.app-header .season {
+  margin-left: 0.75rem;
+  opacity: 0.85;
+}
+
+.app-header .identity {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.app-header .roles {
+  opacity: 0.8;
+  font-size: 0.85rem;
+}
+
+.app-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.4rem 1.2rem;
+  background: #fff;
+  border-bottom: 1px solid #d7dee6;
+}
+
+.app-nav a {
+  padding: 0.25rem 0.6rem;
+  border-radius: 4px;
+  text-decoration: none;
+}
+
+.app-nav a.router-link-exact-active {
+  background: #dbe8f5;
+  font-weight: 600;
+}
+
+.app-main {
+  padding: 1rem 1.2rem 3rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.banner {
+  padding: 0.5rem 1.2rem;
+  font-weight: 500;
+}
+
+.banner-offline,
+.banner-error {
+  background: #fbe9e7;
+  color: #8c1c16;
+}
+
+.banner-loading {
+  background: #e8f0fa;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  border: 1px solid #6b7a88;
+  background: #eef2f6;
+  white-space: nowrap;
+}
+
+.badge.status-new {
+  border-color: #4a78a8;
+}
+
+.badge.status-in-progress {
+  border-color: #9a7b12;
+  background: #fdf4d8;
+}
+
+.badge.status-needs-clarification {
+  border-color: #b05c12;
+  background: #fde8d2;
+}
+
+.badge.status-ignored {
+  border-color: #9e2b25;
+  background: #f8dedc;
+}
+
+.badge.status-audited {
+  border-color: #2e6b3a;
+  background: #dff0e2;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #d7dee6;
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+}
+
+.grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
+.muted {
+  color: #5c6b7a;
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+}
+
+table.data th,
+table.data td {
+  border-bottom: 1px solid #e2e8ee;
+  padding: 0.4rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+table.data th {
+  background: #eef2f6;
+  font-size: 0.85rem;
+}
+
+.diff-changed,
+tr.diff-changed > td {
+  background: #fdf4d8;
+}
+
+.diff-neutral {
+  background: #eef2f6;
+}
+
+mark.diff-neutral {
+  background: #eef2f6;
+  color: inherit;
+  outline: 1px dashed #6b7a88;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1.4fr) minmax(180px, 1.4fr) 6rem;
+  gap: 0.25rem 0.6rem;
+  align-items: center;
+}
+
+.chip {
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+}
+
+.chip[aria-pressed='true'] {
+  background: #12324f;
+  border-color: #12324f;
+  color: #fff;
+}
+
+.status-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 20, 30, 0.45);
+  display: grid;
+  place-items: center;
+  z-index: 20;
+}
+
+.dialog {
+  background: #fff;
+  border-radius: 6px;
+  padding: 1.1rem 1.2rem;
+  max-width: 34rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.error-text {
+  color: #8c1c16;
+}
+
+.notice {
+  color: #2e6b3a;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.filters input[type='search'] {
+  padding: 0.35rem 0.5rem;
+  min-width: 16rem;
+}
