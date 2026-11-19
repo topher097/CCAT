@@ -19,6 +19,17 @@ Method semantics follow the plan's ownership rules: ``commit_finals``
 validates the module's write rights (§5.1 table), diagnostics are
 current snapshots (replace) while external-validation logs append,
 and match commits assignments, report, and archive atomically (D8).
+
+The Phase 2b DB implementation
+(:class:`ccat.db.repositories.SeasonStoreRepository`) keeps these
+semantics with an adjusted surface: ``commit_finals`` additionally
+accepts ``expected_versions`` (or per-row ``_row_version``) for
+optimistic concurrency, ``commit_match`` takes ``overwrite`` /
+``test_mode`` instead of ``archive`` and returns a
+``MatchCommitResult``, and the diagnostics/log methods are spelled
+``replace_screen_diagnostics``, ``append_email_log`` /
+``append_address_log``, ``replace_raw_snapshot``, and
+``register_artifact``/clarification/artifact accessors.
 """
 
 from typing import Any, Protocol
@@ -85,6 +96,11 @@ class SeasonStore(Protocol):
 
         Raises:
             PermissionError: When ``module`` may not write ``entity``.
+
+        Note:
+            The DB implementation adds an ``expected_versions`` mapping
+            (and honors per-row ``_row_version`` keys) for optimistic
+            concurrency, and returns the count of changed rows.
         """
         ...
 
@@ -164,6 +180,12 @@ class SeasonStore(Protocol):
             archive: Archive the previous complete outputs as a match
                 run snapshot instead of replacing in place.
             actor: Requesting user/job identity for attribution.
+
+        Note:
+            The DB implementation takes ``overwrite`` / ``test_mode``
+            instead of ``archive`` (the snapshot is always captured),
+            returns a ``MatchCommitResult``, and commits with the
+            module-"match" ownership validation.
         """
         ...
 

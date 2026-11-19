@@ -55,6 +55,7 @@ include = [
     "test/test_audit_migrate.py",
     "test/test_audit_server.py",
     "test/test_consolidate.py",
+    "test/test_db_repo.py",
     "test/test_remediation.py",
     "test/test_services.py",
 ]
