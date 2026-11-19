@@ -1,0 +1,51 @@
+# Build context filter (plan §13).  Keep the context small and secrets out.
+
+# VCS / editor
+.git
+.gitignore
+.github
+.vscode
+.idea
+
+# Python envs, caches, build output
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+dist
+build
+
+# Node
+node_modules
+frontend/node_modules
+frontend/dist
+
+# Local/runtime data: never bake state or PII into an image
+output
+temp
+tmp
+*.log
+*.xlsx
+*.xls
+*.csv
+*.parquet
+
+# Secrets and local environment
+.env
+.env.*
+.envrc
+.envrc.private
+ccat_google_credentials.json
+ccat_google_token.json
+*.pem
+*.key
+
+# Not needed at build time
+test
+docs
+temp
+*.md
+!README.md

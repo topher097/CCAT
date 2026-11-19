@@ -1,0 +1,19 @@
+# Development ingress (plan §13): Vite dev server with HMR + the reload API,
+# both same-origin behind the internal CA.
+#
+#   docker compose --profile dev up
+#   open https://localhost:8443   (trust Caddy's local CA, or -k)
+#
+# Vite is proxied rather than served statically so HMR websockets work.
+{$CCAT_DEV_DOMAIN:localhost}:8443 {
+	encode zstd gzip
+	tls internal
+
+	handle /api/* {
+		reverse_proxy api-dev:8650
+	}
+
+	handle {
+		reverse_proxy web:5173
+	}
+}

@@ -8,6 +8,7 @@ engine; the FastAPI runtime uses the async engine — both must keep
 working against the same schema (see ``alembic/env.py``).
 """
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +26,12 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import Session, sessionmaker
 
-#: Repository root (``src/ccat/db/engine.py`` -> three levels up).
-ROOT = Path(__file__).resolve().parents[3]
+#: Deployment root holding ``alembic/`` and ``frontend/dist``.  A source
+#: checkout derives it from the module path; the Docker image installs the
+#: wheel into site-packages and sets ``CCAT_ROOT=/app`` instead.
+ROOT = Path(
+    os.environ.get("CCAT_ROOT") or Path(__file__).resolve().parents[3]
+).resolve()
 
 #: Location of the Alembic environment, relative to the repo root.
 ALEMBIC_DIR = ROOT / "alembic"

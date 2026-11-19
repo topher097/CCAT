@@ -13,7 +13,6 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from collections.abc import AsyncIterator, Callable
 
@@ -50,7 +49,7 @@ from ccat.api.routes import (
 from ccat.api.routes import (
     users as users_routes,
 )
-from ccat.db.engine import create_async_engine
+from ccat.db.engine import ROOT, create_async_engine
 from ccat.db.uow import UnitOfWork
 
 if TYPE_CHECKING:
@@ -58,8 +57,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("ccat.api")
 
-#: Repo-root frontend build directory (Phase 4 fills it).
-FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+#: Frontend build directory under the deployment root (Phase 4 fills it).
+FRONTEND_DIST = ROOT / "frontend" / "dist"
 
 API_PREFIX = "/api/v1"
 

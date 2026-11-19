@@ -1,0 +1,202 @@
+# CCAT deployment (plan §13).
+#
+#   docker compose --profile prod up -d --build   # production shape
+#   docker compose --profile dev  up --build      # live-reload shape
+#
+# Secrets come from the environment (compose interpolates .env); no secret is
+# stored in this file and none is passed as a build arg.  See docs/deployment.md.
+name: ccat
+
+x-app-env: &app-env
+  CCAT_CONFIG: /app/config/ccat_docker.json
+  CCAT_DB_DIR: /data
+  CCAT_RUN_MIGRATIONS: "0"
+  TZ: ${TZ:-America/Detroit}
+  ZITE_API_KEY: ${ZITE_API_KEY:-}
+  ZEROBOUNCE_API_KEY: ${ZEROBOUNCE_API_KEY:-}
+  CCAT_SESSION_SECRET: ${CCAT_SESSION_SECRET:-}
+  OIDC_ISSUER: ${OIDC_ISSUER:-}
+  OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+  OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+
+# State lives on named volumes; config + templates are read-only bind mounts.
+# The SQLite volume (ccat-db) must stay on local disk, never NFS.
+x-app-volumes: &app-volumes
+  - ccat-db:/data
+  - ccat-artifacts:/artifacts
+  - ccat-logs:/logs
+  - ./config/ccat_docker.json:/app/config/ccat_docker.json:ro
+  - ./data:/app/data:ro
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-app-image: &app-image
+  image: ccat:${CCAT_IMAGE_TAG:-local}
+  build:
+    context: .
+    target: runtime
+
+services:
+  # ------------------------------------------------------------------ prod
+  api:
+    <<: *app-image
+    profiles: ["prod"]
+    command:
+      - uvicorn
+      - ccat.api.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8650"
+      - --proxy-headers
+      - --forwarded-allow-ips=*
+    environment: *app-env
+    volumes: *app-volumes
+    depends_on:
+      db-upgrade:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8650/api/v1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+    logging: *logging
+
+  # Same image, no reload: jobs must not be interrupted by a code swap.
+  worker:
+    <<: *app-image
+    profiles: ["prod", "dev"]
+    command: ["ccat", "worker", "--config", "/app/config/ccat_docker.json"]
+    environment: *app-env
+    volumes: *app-volumes
+    depends_on:
+      db-upgrade:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: 150s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
+    logging: *logging
+
+  # Controlled one-shot migration.  api/worker wait for it to exit 0 so two
+  # replicas never race the schema (plan §13).
+  db-upgrade:
+    <<: *app-image
+    profiles: ["prod", "dev"]
+    command: ["ccat", "db-upgrade", "--config", "/app/config/ccat_docker.json"]
+    environment: *app-env
+    volumes: *app-volumes
+    restart: "no"
+    logging: *logging
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["prod"]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      CCAT_DOMAIN: ${CCAT_DOMAIN:-localhost}
+      # Empty/unset -> "internal" so Caddy's local CA is used and the
+      # Caddyfile's `tls` directive always gets an argument.
+      CCAT_ACME_EMAIL: ${CCAT_ACME_EMAIL:-internal}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Build the SPA first: `cd frontend && npm ci && npm run build`.
+      - ./frontend/dist:/srv/frontend:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+  # ------------------------------------------------------------------- dev
+  api-dev:
+    <<: *app-image
+    profiles: ["dev"]
+    command:
+      - uvicorn
+      - ccat.api.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8650"
+      - --reload
+      - --reload-dir
+      - /app/src
+    environment:
+      <<: *app-env
+      PYTHONPATH: /app/src
+    volumes:
+      - ccat-db:/data
+      - ccat-artifacts:/artifacts
+      - ccat-logs:/logs
+      - ./config/ccat_docker.json:/app/config/ccat_docker.json:ro
+      - ./data:/app/data:ro
+      - ./src:/app/src:ro
+    depends_on:
+      db-upgrade:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8650/api/v1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *logging
+
+  # Vite dev server with HMR; Caddy keeps it same-origin with the API.
+  web:
+    image: node:24-alpine
+    profiles: ["dev"]
+    working_dir: /app/frontend
+    command:
+      - sh
+      - -c
+      - npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 5173
+    volumes:
+      - ./frontend:/app/frontend
+    restart: unless-stopped
+    logging: *logging
+
+  caddy-dev:
+    image: caddy:2-alpine
+    profiles: ["dev"]
+    ports:
+      - "8443:8443"
+    environment:
+      CCAT_DEV_DOMAIN: ${CCAT_DEV_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api-dev
+      - web
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  ccat-db:
+  ccat-artifacts:
+  ccat-logs:
+  caddy-data:
+  caddy-config:
