@@ -1,6 +1,12 @@
 # Migration Plan: Persistent `final_*` Entity Sheets
 
-**Status:** Planned — no implementation performed by this document.
+> **Superseded.** The live store is SQLite; the workbook survives only as the
+> import/export format (`ccat db-import` reads it, `ccat workbook-export`
+> writes it). See `pipeline_architecture.md` Appendix A for the current
+> architecture. This document is the historical design record of the
+> workbook-era migration and is kept for provenance.
+
+**Status:** Implemented in the workbook era; superseded by the SQLite store.
 
 **Decision:** Implement **Option 1**: retain replaceable `raw_*` sheets, make
 the `final_*` sheets the single editable entity store, stop persisting

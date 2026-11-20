@@ -25,7 +25,8 @@ durable job worker (src/ccat/jobs/) ── Zite, ZeroBounce, Nominatim, OpenCode
 
 - **Domain logic** (`src/ccat/domain/`, `preparation.py`, `match.py`,
   `screening.py`, `child_info_generate.py`, `sponsor_packets.py`, `stats.py`)
-  is unchanged and reused by both the workbook path and the database path.
+  is unchanged and reused by the database path; the workbook survives only as
+  the import/export format.
 - **Storage** is season-scoped in SQLite: `raw_*` acquisition snapshots,
   complete `final_*` stores (ignored, orphaned, duplicate, raw-missing and
   pending entities all remain stored), diagnostics/logs, match runs, jobs,
@@ -50,6 +51,12 @@ cd frontend && npm install && npm run dev   # Vite on :5173, proxies /api
 ```
 
 ## Commands
+
+The live pipeline runs as jobs behind `ccat serve` and `ccat worker`. The
+commands below are the legacy workbook-era CLI: they read and write the
+deprecated `excel_file` workbook and refuse to run when that path is not
+configured. The database equivalents are the `acquire`, `screen`, `match`,
+`generate`, `stats` and `clarify_generate` jobs.
 
 ```sh
 ccat acquire       [--config PATH]  # fetch Zite tables verbatim -> raw_*

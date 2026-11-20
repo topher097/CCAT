@@ -79,6 +79,14 @@ decision before public deployment.
   resources. The workbook-mode `ccat audit` and `ccat clarify` commands no
   longer exist; the store/data logic in `src/ccat/audit/store.py` is
   unchanged.
+- **The legacy workbook CLI still exists.** `ccat acquire`, `ccat screen`,
+  `ccat match`, `ccat generate`, `ccat stats`, `ccat clarify-export` and
+  `ccat audit-migrate` read and write the deprecated `excel_file` workbook.
+  They refuse to run unless that path is configured, and the configuration
+  files no longer carry it, so the accidental-write path is closed. The
+  database equivalents are the jobs behind `ccat serve` and `ccat worker`.
+  `ccat db-import` and `ccat workbook-export` stay the supported way to move
+  data between the workbook and the database.
 - **Generated artifacts are local files.** Artifacts live under
   `storage.artifact_root` on local disk; there is no object store.
 - **The admin database console bypasses the domain rules.** A statement it

@@ -20,8 +20,8 @@ its removal; superseded dense-adj and projection descriptions are removed.
   children after normal startup reconciliation. It did not reduce writes.
 - `scripts/audit_ui_smoke.py` (removed) booted a throwaway redirected workbook
   and requested every page.
-- One controlling process owns workbook writes. Close Excel/LibreOffice and
-  other CLI processes before audit runs.
+- One controlling process owned the workbook writes. Close Excel/LibreOffice
+  and other CLI processes before audit runs.
 
 ## 2. Persistent Store
 
@@ -63,8 +63,9 @@ eligibility is an explicit reader filter, not storage deletion.
 - `read_eligible_final` applies the retired projection population:
   non-ignored families/sponsors; non-ignored children with non-null
   `family_id`. Audit UI intentionally reads the unfiltered full stores.
-- Writes use atomic workbook replacement. Child writes always receive
-  `xmas`; writes without `final_child` restore its formula caches.
+- The store rules survive unchanged; the workbook writes behind them are gone.
+  The database commits atomically instead, and the child writes that remain
+  (import/export) still receive `xmas`.
 
 ## 3. Status Machine
 
@@ -281,7 +282,7 @@ adjudication rules; this section describes how they are exposed.
 
 ### 10.4 Tests
 
-`test/test_audit_store.py` still characterizes the workbook-backed domain
-rules, `test/test_services.py` the tri-state save service, and
+`test/test_audit_store.py` still characterizes the store rules (now backed
+by SQLite), `test/test_services.py` the tri-state save service, and
 `test/test_api.py` the HTTP contract (role matrix, tri-state PATCH, the
 A/B stale-version scenario, ignore/unignore, IDOR and error mapping).

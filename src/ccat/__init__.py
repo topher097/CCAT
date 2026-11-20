@@ -116,7 +116,12 @@ def _typed_errors() -> tuple[type[BaseException], ...]:
 
 
 def _dispatch(
-    name: str, runner: str, config: str = DEFAULT_CONFIG, **kwargs: object
+    name: str,
+    runner: str,
+    config: str = DEFAULT_CONFIG,
+    *,
+    needs_workbook: bool = False,
+    **kwargs: object,
 ) -> None:
     """Load config, set up logging, and run one pipeline module.
 
@@ -126,13 +131,23 @@ def _dispatch(
         name: Module display name.
         runner: ``module:function`` target executed via fire.
         config: Path to the JSON configuration file.
+        needs_workbook: True for the legacy commands that read or write
+            the Excel workbook; they refuse to run when the deprecated
+            ``excel_file`` path is not configured.
         kwargs: Module-specific keyword arguments.
 
     Raises:
-        SystemExit: When a module raises one of the typed pipeline errors.
+        SystemExit: When a module raises one of the typed pipeline errors,
+            or when a workbook command has no configured workbook path.
     """
     try:
         cfg = load_config(config)
+        if needs_workbook and not cfg.excel_file:
+            raise SystemExit(
+                f"ccat {name} is a legacy workbook command and needs the"
+                " deprecated `excel_file` path in the config; the live store"
+                " is the database (run the equivalent job through the API)"
+            )
         setup_logging(cfg.log_file)
         module_name, _, function_name = runner.partition(":")
         module = importlib.import_module(f"ccat.{module_name}")
@@ -148,7 +163,7 @@ def _dispatch(
 
 def _acquire_cmd(config: str = DEFAULT_CONFIG) -> None:
     """Run module 1: data acquisition and validation (§5)."""
-    _dispatch("acquire", "acquire:run", config)
+    _dispatch("acquire", "acquire:run", config, needs_workbook=True)
 
 
 def _screen_cmd(
@@ -176,6 +191,7 @@ def _screen_cmd(
         "screen",
         "screening:run",
         config,
+        needs_workbook=True,
         redo=redo,
         test=test,
         overwrite=overwrite,
@@ -211,6 +227,7 @@ def _audit_migrate_cmd(config: str = DEFAULT_CONFIG, **kwargs: object) -> None:
         "audit-migrate",
         "audit.migrate:run",
         config,
+        needs_workbook=True,
         from_path=str(from_path),
         force=force,
     )
@@ -347,6 +364,7 @@ def _match_cmd(
         "match",
         "match:run",
         config,
+        needs_workbook=True,
         test=test,
         overwrite=overwrite,
         skip_match=skip_match,
@@ -379,6 +397,7 @@ def _generate_cmd(
         "generate",
         "child_info_generate:run",
         config,
+        needs_workbook=True,
         test=test,
         overwrite=overwrite,
         sponsor=sponsor,
@@ -395,7 +414,7 @@ def _stats_cmd(config: str = DEFAULT_CONFIG, raw: bool = False) -> None:
             instead of the eligible persistent-final population. No prepared
             submission sheets are persisted.
     """
-    _dispatch("stats", "stats:run", config, raw=raw)
+    _dispatch("stats", "stats:run", config, needs_workbook=True, raw=raw)
 
 
 def _clarify_export_cmd(
@@ -412,6 +431,7 @@ def _clarify_export_cmd(
         "clarify-export",
         "clarify.extract:write_csv",
         config,
+        needs_workbook=True,
         output=Path(output) if output else None,
     )
 

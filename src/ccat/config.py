@@ -25,6 +25,11 @@ from pydantic import (
 
 logger = logging.getLogger(__name__)
 
+#: Configuration keys kept only for the legacy workbook commands.  The
+#: configuration files do not carry them, and the settings tree must not
+#: write them back.
+DEPRECATED_CONFIG_KEYS = ("excel_file",)
+
 #: Allowed values for a column's ``type`` declaration (§3).
 COLUMN_TYPES = frozenset(
     {
@@ -430,10 +435,10 @@ class StorageSpec(BaseModel):
     """Active season-storage selection (refactor decision D12).
 
     Attributes:
-        mode: ``workbook`` keeps the legacy Excel path active; ``db``
-            switches to the SQLite repositories (after import and
-            rehearsal).  Both modes run the same services through the
-            ``SeasonStore`` port.
+        mode: Deprecated. ``workbook`` and ``db`` are accepted, but no
+            code reads it: the API and worker always use the SQLite
+            repositories.  The value only records what a config was
+            written for.
         database_url: Async SQLAlchemy URL for the DB mode.  The sync
             URL used by Alembic and the CLI importer is derived in
             :mod:`ccat.db.engine`.
@@ -444,7 +449,7 @@ class StorageSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["workbook", "db"] = "workbook"
+    mode: Literal["workbook", "db"] = "db"
     database_url: str = "sqlite+aiosqlite:///./output/ccat.sqlite3"
     artifact_root: str = "output/artifacts"
 
@@ -538,13 +543,28 @@ class WorkerSpec(BaseModel):
 
 
 class Config(BaseModel):
-    """Root configuration model for one pipeline run."""
+    """Root configuration model for one pipeline run.
+
+    Attributes:
+        season: Season identifier.
+        xmas_date: Christmas date, used to compute ``age_at_xmas``.
+        excel_file: Deprecated. Path of the legacy Excel workbook.  The
+            live store is the database; this path only reaches the
+            workbook-era commands (``ccat acquire``/``screen``/``match``/
+            ``generate``, ``ccat audit-migrate``) and the import/export
+            commands.  Kept until the database-to-Excel export replaces
+            the legacy path.
+        zite: Zite table references.
+        tables: Column schema per table.
+        vocabularies: Allowed values per vocabulary.
+        location_groups: Location groups for matching.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     season: str
     xmas_date: str
-    excel_file: str
+    excel_file: str = ""
     zite: ZiteSpec
     tables: dict[str, TableSpec]
     vocabularies: dict[str, list[str]]
@@ -713,6 +733,9 @@ def effective_config(
         cfg = fallback
     dropped: list[str] = []
     merged = _merge(cfg.model_dump(mode="json"), data, dropped)
+    for key in DEPRECATED_CONFIG_KEYS:
+        if key not in data:
+            merged.pop(key, None)
     return merged, dropped
 
 

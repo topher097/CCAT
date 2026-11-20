@@ -5,10 +5,18 @@
 > editors now live in the Vue SPA served by `ccat serve` (FastAPI). The data
 > logic in `src/ccat/audit/store.py`, `src/ccat/audit/migrate.py`, and the
 > `ccat.clarify` modules survives.
+>
+> **Storage note.** The Excel workbook is no longer the store. The pipeline
+> state lives in SQLite (`src/ccat/db/`, `alembic/`); the workbook survives
+> only as the import/export format that `ccat db-import` reads and
+> `ccat workbook-export` writes. The sections below still describe the
+> pipeline's behavior and its data contract; where they talk about "the
+> workbook" they mean that format, not the live store. See Appendix A for
+> the current layer and command mapping.
 
-Architecture guide for the CCAT gift-giving matching system. This document is the
-basis of all code in this codebase. No implementation exists yet; every section below
-is the contract that the implementation must satisfy.
+Architecture guide for the CCAT gift-giving matching system. This document
+describes the pipeline's data contract; Appendix A maps it onto the current
+implementation.
 
 ## 1. Purpose and Scope
 
@@ -30,7 +38,7 @@ giving program. The pipeline has independently runnable modules:
    generation markers after real PDF completion, and assemble sponsor packet
    directories.
 
-All workbook state lives in one Excel file. All configuration lives in one
+All pipeline state lives in SQLite. All configuration lives in one
 JSON file. Raw is source; final is truth; logs are process history.
 
 ## 2. System Overview
@@ -96,7 +104,10 @@ Structure:
   // Christmas date, MM/DD/YYYY. Used to compute age_at_xmas.
   "xmas_date": "12/25/2026",
 
-  // Excel workbook location.
+  // Deprecated. Path of the legacy Excel workbook: the format
+  // `ccat db-import` reads and `ccat workbook-export` writes, never the
+  // live store. Only the workbook-era commands need it
+  // (ccat acquire/screen/match/generate, ccat audit-migrate).
   "excel_file": "../IO/ccat_2026.xlsx",
 
   // Zite table references (dashboard URLs or DATABASE_ID::TABLE_ID/NAME),
@@ -353,11 +364,14 @@ Rules:
   `age_reported` for cross-checking only; the computed `age_at_xmas` (from
   `xmas_date`) is the value used downstream.
 
-## 4. Excel Workbook Contract
+## 4. Excel Import/Export Contract
 
-One workbook (`excel_file` from config). Active sheets:
+One import/export workbook (`excel_file` from config). The live store is
+SQLite (§A); these sheets are the format `ccat db-import` reads and
+`ccat workbook-export` writes. The writer column names the legacy
+pipeline's owner of each sheet.
 
-| Sheet | Contents | Written by |
+| Sheet | Contents | Legacy writer |
 |---|---|---|
 | `raw_sponsor` | **Verbatim** Zite sponsor records (config columns, no cleaning) | acquire |
 | `raw_family` | **Verbatim** Zite family records, every submission and duplicate | acquire |
@@ -381,9 +395,9 @@ controls (`status`, `ignore`, `clarification_notes`,
 sheets exist. Explicit migration commands may read legacy layers; ordinary
 modules may not.
 
-I/O lives in `src/ccat/io.py`. Writes are atomic (temp file + replace).
-Final writes validate complete schemas, non-null unique keys, and that no
-persisted final key disappears.
+The import/export I/O lives in `src/ccat/io.py`. Writes are atomic (temp file
++ replace). Final writes validate complete schemas, non-null unique keys, and
+that no persisted final key disappears.
 
 `final_child.age_at_xmas` is a live formula,
 `=DATEDIF(<dob cell>, DATE(Y,M,D), "y")`, with the age recomputed from the
@@ -435,7 +449,7 @@ Every run performs one side-effect-free preparation pass:
 5. Compute child ages, sponsor age bounds, sibling-DOB rows, and
    created-vs-system timestamp logs.
 
-No AI, external API, or workbook write occurs in this pass.
+No AI, external API, or storage write occurs in this pass.
 
 ### 6.2 Stable identity reconciliation
 
@@ -654,12 +668,12 @@ archive unless `--overwrite`; `match_report` remains untouched.
 | email/address logs | - | append unlogged checks | read | - | - | explicit conversion/bootstrap |
 | `match_report` | verify unchanged | - | - | write when produced | read | explicit conversion/bootstrap |
 
-Stats, clarify, and packet readers write no workbook. `migrate` is reserved
+Stats, clarify, and packet readers write no storage. `migrate` is reserved
 for explicit migration commands. Column ownership is enforced by each writer
 and tests; no writer sets process markers as an unrelated side effect.
 Final writes reject projected schemas, null/duplicate keys, and removal of a
 stored entity. Writes remain atomic. Concurrent CLI/editor access is still
-unsupported: close spreadsheet apps and run one controlling process.
+unsupported: run one controlling process at a time.
 
 ## 10. Code Layout
 
@@ -694,7 +708,7 @@ include `ConfigError`, `AcquisitionError`, `PreparationError`,
 `SheetOwnershipError`, and `SheetSchemaError`.
 
 Zite remains strictly read-only. Preparation completes before persistent
-writes; each workbook replacement is atomic; AI and generation successes
+writes; each database transaction is atomic; AI and generation successes
 persist individually. Legacy projected finals and malformed stores fail
 closed with migration guidance instead of being repaired by guessing.
 
@@ -881,14 +895,14 @@ retains its CLI name but means ephemeral cleaned/ID-assigned preparation from
 raw forms; no prepared submission sheet is created. Prepared mode does not
 apply output ignore/orphan filters and has no sponsor assignments.
 
-Clarification state is external to the workbook. Draft generation (moved from
+Clarification state is external to the database. Draft generation (moved from
 the removed `ccat clarify` server into `ccat.clarify.email_gen` and exposed
 through the API/service layer) reads eligible noted children/families and
 raw-child DOBs and writes family draft HTML plus editable JSON under
 `clarify.output_dir`; contacted/replied state lives in
 `clarification_status.json`. `ccat clarify-export` refreshes the CSV from those
 artifacts, and editing runs in the Vue SPA. None of these paths writes
-workbook sheets, and consolidation never moves or rewrites clarification
+storage, and consolidation never moves or rewrites clarification
 drafts/status.
 
 ## 15. Migration Commands

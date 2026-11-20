@@ -14,6 +14,7 @@ from ccat.config import (
     ReportSpec,
     StorageSpec,
     WorkerSpec,
+    effective_config,
     load_config,
     load_config_data,
     save_config,
@@ -173,7 +174,7 @@ def test_has_default_semantics() -> None:
 def test_storage_api_worker_defaults_on_real_config() -> None:
     """The refactor sections load with defaults on the real config."""
     config = load_config(CONFIG_PATH)
-    assert config.storage.mode == "workbook"
+    assert config.storage.mode == "db"
     assert config.storage.database_url == (
         "sqlite+aiosqlite:///./output/ccat.sqlite3"
     )
@@ -192,8 +193,9 @@ def test_storage_api_worker_defaults_on_real_config() -> None:
 
 
 def test_storage_mode_vocabulary() -> None:
-    """Only the two storage modes are accepted."""
-    assert StorageSpec().mode == "workbook"
+    """Only the two storage modes are accepted; the default is the store."""
+    assert StorageSpec().mode == "db"
+    assert StorageSpec(mode="workbook").mode == "workbook"
     assert StorageSpec(mode="db").mode == "db"
     with pytest.raises(ValueError, match="mode"):
         StorageSpec.model_validate({"mode": "excel"})
@@ -270,6 +272,31 @@ def test_load_config_data_returns_raw_mapping(tmp_path: Path) -> None:
     data["surprise"] = True
     path = _write(tmp_path, data)
     assert load_config_data(path) == data
+
+
+def test_settings_tree_omits_the_deprecated_workbook_path(
+    tmp_path: Path,
+) -> None:
+    """The settings tree does not offer the deprecated excel_file key."""
+    data = json.loads(CONFIG_PATH.read_text())
+    data.pop("excel_file", None)
+    path = _write(tmp_path, data)
+    tree, dropped = effective_config(path, load_config(CONFIG_PATH))
+    assert "excel_file" not in tree
+    assert dropped == []
+
+
+def test_legacy_workbook_command_refuses_without_a_workbook_path(
+    tmp_path: Path,
+) -> None:
+    """The workbook commands need the deprecated excel_file path."""
+    from ccat.__init__ import _acquire_cmd
+
+    data = json.loads(CONFIG_PATH.read_text())
+    data.pop("excel_file", None)
+    path = _write(tmp_path, data)
+    with pytest.raises(SystemExit, match="excel_file"):
+        _acquire_cmd(str(path))
 
 
 def test_info_sheet_conversion_timeout_default_and_validation() -> None:

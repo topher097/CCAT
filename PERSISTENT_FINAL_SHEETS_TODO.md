@@ -1,5 +1,10 @@
 # Persistent Final Sheets Migration — Implementation Checklist
 
+> **Superseded.** The live store is SQLite; the workbook survives only as the
+> import/export format. See `pipeline_architecture.md` Appendix A for the
+> current architecture. This checklist is the historical record of the
+> workbook-era migration.
+
 Implementation tracker for `PERSISTENT_FINAL_SHEETS_MIGRATION.md`. Complete in
 order; keep production workbooks and configs unchanged during development.
 

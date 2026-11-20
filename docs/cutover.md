@@ -1,5 +1,8 @@
 # Cutover runbook (Phase 5 rehearsal and production switch)
 
+> **Status.** Executed in November 2026; kept as the record of how the
+> workbook became an import/export format. The live store is SQLite.
+
 Two phases, both rehearsed: **import + operate against SQLite** using a copy
 of the workbook, then flip `storage.mode` from `workbook` to `db`. The Excel
 workbook stops being truth at the flip; it becomes an immutable snapshot and a
@@ -144,8 +147,9 @@ Make the config change explicit and reviewed:
 }
 ```
 
-`config/ccat_docker.json` already ships `mode: db`. For a workbook-mode host
-the same edit applies to `config/ccat_2026_v2.json`, then restart.
+`config/ccat_docker.json` already ships `mode: db`; the same storage block
+applies to every host. `mode` is informational only — the API and worker
+always use SQLite.
 
 Re-import for real (clean DB, same commands as §3), or keep the rehearsed DB
 if no rehearsal writes were made. Then:
