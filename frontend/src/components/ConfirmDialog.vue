@@ -10,6 +10,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ confirm: []; cancel: [] }>()
+const dialog = ref<HTMLDivElement | null>(null)
 const confirmButton = ref<HTMLButtonElement | null>(null)
 
 const confirmCss = computed(() => (props.dangerous ? 'danger' : 'primary'))
@@ -23,14 +24,34 @@ watch(
   },
 )
 
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') emit('cancel')
+/** Esc cancels; Tab stays inside the dialog (focus trap). */
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    emit('cancel')
+    return
+  }
+  if (event.key !== 'Tab' || !dialog.value) return
+  const focusable = dialog.value.querySelectorAll<HTMLElement>(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+  )
+  if (focusable.length === 0) return
+  const first = focusable[0]!
+  const last = focusable[focusable.length - 1]!
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 </script>
 
 <template>
   <div v-if="open" class="dialog-backdrop" @click.self="emit('cancel')">
     <div
+      ref="dialog"
       class="dialog"
       role="dialog"
       aria-modal="true"

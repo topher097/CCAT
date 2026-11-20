@@ -56,7 +56,7 @@ def decanonicalize_patch(values: dict[str, Any]) -> dict[str, Any]:
     return {_LEGACY_NAMES.get(key, key): value for key, value in values.items()}
 
 
-def _entity_patch_model() -> Any:
+def _entity_patch_model() -> type[BaseModel]:
     """Build :class:`EntityPatch` from :class:`SavePatch` (one source).
 
     The tri-state patch fields are SavePatch's, with the child AI
@@ -80,6 +80,8 @@ def _entity_patch_model() -> Any:
     )
 
 
+#: The patch model the audit routes accept.  It is built at runtime, so a
+#: type checker cannot treat the name as a class.
 EntityPatch = _entity_patch_model()
 
 
@@ -321,11 +323,56 @@ class HealthView(StrictModel):
     status: str
 
 
+class DbTableView(StrictModel):
+    """One database table with its columns and row count."""
+
+    name: str
+    columns: list[str] = Field(default_factory=list)
+    row_count: int = 0
+
+
+class DbQueryRequest(StrictModel):
+    """One SQL statement to run (admin only).
+
+    ``write`` must be true for anything that changes the database; the
+    server refuses a modifying statement without it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sql: str
+    write: bool = False
+
+
+class DbQueryResult(StrictModel):
+    """The outcome of one SQL statement.
+
+    Attributes:
+        columns: Result column names (empty for a statement with no
+            result set).
+        rows: The returned rows.
+        row_count: Number of rows returned.
+        truncated: Whether more rows existed than were returned.
+        affected_rows: Rows changed by a modifying statement.
+        duration_ms: Server-side execution time.
+    """
+
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    row_count: int = 0
+    truncated: bool = False
+    affected_rows: int = 0
+    duration_ms: float = 0.0
+
+
 __all__ = [
     "ArtifactView",
     "ClarifyDraftView",
     "ClarifyFamilyView",
     "ContactRequest",
+    "DbQueryRequest",
+    "DbQueryResult",
+    "DbTableView",
     "DraftPatch",
     "EntityDetail",
     "EntityListPage",

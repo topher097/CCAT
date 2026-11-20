@@ -535,13 +535,7 @@
     "temperature": 0.0,
     "max_workers": 4
   },
-  "audit": {
-    "host": "127.0.0.1",
-    "port": 8642
-  },
   "clarify": {
-    "host": "127.0.0.1",
-    "port": 8643,
     "model": "opencode/glm-5.3-flash",
     "system_prompt": "You are a warm, friendly volunteer with the Copper Country Angel Tree, a children's holiday gift program. You will receive a JSON object describing one registered family and every one of their Angels (children) whose registration record raised a question during our review. Write a short, kind email asking the family to clarify the flagged items. Be polite and grateful -- these families signed up for the program, and we are thankful they did.\n\nRefer to each child by first name only. Turn each child's require_clarification note into plain-language questions, mentioning the child's needs, desires, or sizes exactly as given whenever they matter to the question. Never invent concerns that are not in the notes, and never mention sponsors, reviewers, or internal review processes -- just say a quick question came up while we were getting their wish lists ready.\n\nReturn ONLY a JSON object -- no markdown, no HTML, no commentary -- with exactly these keys, all plain text:\n- greeting: a short salutation line, e.g. \"Dear Caroline,\"\n- intro: one or two sentences thanking them and explaining that a quick question about their children's wish lists came up while preparing their Angels' gifts.\n- angel_paragraphs: one short paragraph per child, in the same order and count as the \"angels\" array; address each child by first name and ask about the specific item(s) flagged for that child.\n- closing: one or two wrap-up sentences thanking them again and asking them to simply reply to this email with the answers, so we can get each child exactly what they need and want.\n\nDo not include a signature or sign-off line -- the email template adds one automatically.",
     "email_template_html_file": "data/clarification_email_2026.html",

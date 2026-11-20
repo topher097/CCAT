@@ -10,11 +10,9 @@ Commands (all accept ``--config`` where applicable)::
     ccat acquire
     ccat screen [--redo ID] [--test] [--overwrite]
                 [--skip-email-check] [--skip-address-check]
-    ccat audit [--test] [--restart]
     ccat match [--test] [--overwrite] [--skip-match]
     ccat generate [--test] [--overwrite] [--sponsor ID] [--max-workers N]
     ccat stats [--raw]
-    ccat clarify [--generate] [--overwrite]
     ccat clarify-export [--output PATH]
     ccat audit-migrate --from PATH [--force]
     ccat consolidate-migrate --from PATH --output PATH
@@ -32,7 +30,8 @@ validation logs, and AI-screens only uncompleted children. ``--redo`` and
 ``--overwrite`` are deliberate re-evaluation controls, not blanket data
 replacement: human edits and module-owned values retain their protections.
 
-``audit`` is the sole interactive entity editor. Full final rows retain
+The interactive editors live in the web application (``ccat serve``), which
+serves the Vue SPA and the FastAPI resources behind it. Full final rows retain
 ignored, orphaned, duplicate, and raw-missing entities; output eligibility is
 a separate in-memory filter. Match owns assignment fields, while generate
 owns ``generated_info_sheet`` after actual PDF completion. Timestamped match
@@ -182,30 +181,6 @@ def _screen_cmd(
         overwrite=overwrite,
         skip_email_check=skip_email_check,
         skip_address_check=skip_address_check,
-    )
-
-
-def _audit_cmd(
-    config: str = DEFAULT_CONFIG,
-    test: bool = False,
-    restart: bool = False,
-) -> None:
-    """Run module 3: local human audit web tool (§7 audit architecture).
-
-    Args:
-        config: Path to the JSON configuration file.
-        test: Limit every list to the first family (lowest family_id),
-            its children, and the first sponsor; the dashboard reflects
-            the reduced scope.
-        restart: Stop any currently running audit tool process before
-            starting.
-    """
-    _dispatch(
-        "audit",
-        "audit.server:run",
-        config,
-        test=test,
-        restart=restart,
     )
 
 
@@ -423,30 +398,6 @@ def _stats_cmd(config: str = DEFAULT_CONFIG, raw: bool = False) -> None:
     _dispatch("stats", "stats:run", config, raw=raw)
 
 
-def _clarify_cmd(
-    config: str = DEFAULT_CONFIG,
-    generate: bool = False,
-    overwrite: bool = False,
-) -> None:
-    """Run module 7: clarification email web app or headless generation.
-
-    Args:
-        config: Path to the JSON configuration file.
-        generate: Headless mode (no server): generate an email draft
-            for every family that does not have one yet, then exit.
-        overwrite: With ``generate``, regenerate even families that
-            already have a saved draft; without ``generate`` this
-            flag is ignored and the server starts normally.
-    """
-    _dispatch(
-        "clarify",
-        "clarify.server:run",
-        config,
-        generate=generate,
-        overwrite=overwrite,
-    )
-
-
 def _clarify_export_cmd(
     config: str = DEFAULT_CONFIG, output: str | None = None
 ) -> None:
@@ -466,7 +417,7 @@ def _clarify_export_cmd(
 
 
 def _serve_cmd(config: str = DEFAULT_CONFIG) -> None:
-    """Run the FastAPI server (plan §5; replaces both NiceGUI apps).
+    """Run the FastAPI server (plan §5), which serves the Vue SPA.
 
     Args:
         config: Path to the JSON configuration file.
@@ -479,7 +430,7 @@ def _serve_cmd(config: str = DEFAULT_CONFIG) -> None:
     try:
         cfg = load_config(config)
         setup_logging(cfg.log_file)
-        serve(cfg)
+        serve(cfg, config_path=config)
     except _typed_errors() as error:
         raise SystemExit(f"ccat serve failed: {error}") from error
 
@@ -513,7 +464,7 @@ def _worker_cmd(config: str = DEFAULT_CONFIG) -> None:
         try:
             cfg = load_config(config)
             setup_logging(cfg.log_file)
-            run_worker(cfg)
+            run_worker(cfg, config_path=config)
         except _typed_errors() as error:
             raise SystemExit(f"ccat worker failed: {error}") from error
 
@@ -526,13 +477,11 @@ def main() -> None:
         {
             "acquire": _acquire_cmd,
             "screen": _screen_cmd,
-            "audit": _audit_cmd,
             "audit-migrate": _audit_migrate_cmd,
             "consolidate-migrate": _consolidate_migrate_cmd,
             "match": _match_cmd,
             "generate": _generate_cmd,
             "stats": _stats_cmd,
-            "clarify": _clarify_cmd,
             "clarify-export": _clarify_export_cmd,
             "db-import": _db_import_cmd,
             "workbook-export": _workbook_export_cmd,

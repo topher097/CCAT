@@ -135,12 +135,13 @@ async def logout(
         An empty 204 response.
     """
     uow: UnitOfWork = request.app.state.uow
-    async with uow.session() as session:
-        row = await session.get(SessionRow, user.session_id)
-        if row is not None and row.revoked_at is None:
-            from datetime import UTC, datetime
+    if user.session_id is not None:
+        async with uow.session() as session:
+            row = await session.get(SessionRow, user.session_id)
+            if row is not None and row.revoked_at is None:
+                from datetime import UTC, datetime
 
-            row.revoked_at = datetime.now(UTC)
+                row.revoked_at = datetime.now(UTC)
     await record_event(
         uow.session_factory,
         "logout",

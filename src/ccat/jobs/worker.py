@@ -24,10 +24,12 @@ import signal
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select, update
 
+from ccat.config import ConfigError, load_config
 from ccat.db.engine import (
     async_session_factory,
     create_async_engine,
@@ -39,17 +41,21 @@ from ccat.jobs.errors import (
     JobError,
 )
 from ccat.jobs.handlers import HANDLERS, error_json
+from ccat.jobs.logs import JobLogHandler, LogBuffer
 from ccat.jobs.registry import JobContext
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from ccat.config import Config
     from ccat.db.repositories import SeasonStoreRepository
 logger = logging.getLogger(__name__)
+
+#: Log-buffer pump cadence (seconds).
+_LOG_PUMP_SECONDS = 0.25
 
 
 @dataclass
@@ -68,6 +74,7 @@ class Worker:
         session_factory: "async_sessionmaker | None" = None,
         handlers: "dict[str, Any] | None" = None,
         stop: asyncio.Event | None = None,
+        config_path: str | Path | None = None,
     ) -> None:
         """Initialize the worker.
 
@@ -80,6 +87,8 @@ class Worker:
             stop: Graceful-stop event; a fresh one is created when
                 omitted (set it from a signal handler or another
                 thread).
+            config_path: The configuration file to watch; an edited
+                file is picked up between jobs.
         """
         self.cfg = cfg
         self.spec = cfg.worker
@@ -94,6 +103,8 @@ class Worker:
         else:
             self._engine = None
             self._session_factory = session_factory
+        self._config_path = Path(config_path) if config_path else None
+        self._config_mtime = self._watched_mtime()
         self._cancel = CancelState()
         self._current: asyncio.Task[Any] | None = None
         self._pending: set[asyncio.Task[Any]] = set()
@@ -107,6 +118,7 @@ class Worker:
         try:
             await self._recover_leases()
             while not self.stop.is_set():
+                await self._reload_config()
                 job = await self._claim()
                 if job is None:
                     with suppress(TimeoutError):
@@ -140,6 +152,63 @@ class Worker:
                     pass
             if self._owns_engine and self._engine is not None:
                 await self._engine.dispose()
+
+    def _watched_mtime(self) -> float | None:
+        """Return the watched configuration file's mtime, if readable.
+
+        Returns:
+            The modification time, or None when there is no watched
+            file or it cannot be stat'ed.
+        """
+        if self._config_path is None:
+            return None
+        try:
+            return self._config_path.stat().st_mtime
+        except OSError:
+            return None
+
+    async def _reload_config(self) -> None:
+        """Pick up an edited configuration file between jobs.
+
+        Reloading between jobs (never mid-job) keeps a running pipeline
+        on one configuration.  A file that fails validation is ignored
+        and retried on the next change, so a bad edit never stops the
+        worker.
+        """
+        if self._config_path is None:
+            return
+        mtime = self._watched_mtime()
+        if mtime is None or mtime == self._config_mtime:
+            return
+        self._config_mtime = mtime
+        try:
+            cfg = load_config(self._config_path)
+        except ConfigError:
+            logger.warning(
+                "configuration reload failed; keeping the running config",
+                exc_info=True,
+            )
+            return
+        if (
+            self._owns_engine
+            and cfg.storage.database_url != self.cfg.storage.database_url
+        ):
+            await self._swap_database(cfg.storage.database_url)
+        self.cfg = cfg
+        self.spec = cfg.worker
+        logger.info("reloaded configuration from %s", self._config_path.name)
+
+    async def _swap_database(self, url: str) -> None:
+        """Rebuild the engine after the configured database URL changed.
+
+        Args:
+            url: The new async SQLAlchemy URL.
+        """
+        old_engine = self._engine
+        self._engine = create_async_engine(url)
+        self._session_factory = async_session_factory(self._engine)
+        if old_engine is not None:
+            await old_engine.dispose()
 
     async def _claim(self) -> Job | None:
         """Atomically claim one queued job.
@@ -259,7 +328,17 @@ class Worker:
         token = CancelState()
         self._cancel = token
         loop = asyncio.get_running_loop()
-        progress_state = {"last": 0.0}
+        progress_state: dict[str, Any] = {"last": 0.0, "latest": None}
+        log_buffer = LogBuffer()
+        ccat_logger = logging.getLogger("ccat")
+        log_handler = JobLogHandler(log_buffer.append)
+        previous_level = ccat_logger.level
+        # Programmatic runs (tests) never call setup_logging, so INFO
+        # records would otherwise be filtered out before reaching emit.
+        lowered_level = ccat_logger.getEffectiveLevel() > logging.INFO
+        if lowered_level:
+            ccat_logger.setLevel(logging.INFO)
+        ccat_logger.addHandler(log_handler)
 
         def progress(
             phase: str,
@@ -269,15 +348,46 @@ class Worker:
         ) -> None:
             """Throttled progress write usable from any thread."""
             now = loop.time()
+            progress_state["latest"] = {
+                "phase": phase,
+                "completed": completed,
+                "failed": failed,
+                "total": total,
+            }
             if (
                 now - progress_state["last"]
                 < self.spec.progress_throttle_seconds
             ):
                 return
             progress_state["last"] = now
+            progress_state["latest"] = None
             self._dispatch_progress(
                 loop, job.id, phase, completed, failed, total
             )
+
+        async def flush_progress() -> None:
+            """Persist the newest progress snapshot, ignoring the throttle.
+
+            The throttle drops intermediate updates; without this the
+            job would keep the last persisted snapshot, which can be
+            many steps behind the work that actually finished (three
+            tables pulled, one reported).  Only a dropped snapshot is
+            flushed, so an unthrottled run writes nothing extra.
+            """
+            snapshot = progress_state["latest"]
+            if snapshot is None:
+                return
+            progress_state["latest"] = None
+            try:
+                await self._write_progress(
+                    job.id,
+                    snapshot["phase"],
+                    snapshot["completed"],
+                    snapshot["failed"],
+                    snapshot["total"],
+                )
+            except Exception:  # noqa: BLE001 - progress is best effort
+                logger.warning("final progress write failed", exc_info=True)
 
         def cancel_check() -> None:
             """Cooperative cancel check (raises when requested)."""
@@ -286,6 +396,28 @@ class Worker:
                     "cancellation requested; completed work stays"
                     " committed (§6.2)"
                 )
+
+        async def flush_logs() -> None:
+            """Persist the buffered log lines as one event batch.
+
+            Best effort: a failed write is warned about and dropped so a
+            broken log sink never fails the job itself.
+            """
+            lines = log_buffer.drain()
+            if not lines:
+                return
+            try:
+                await self._write_logs(job.id, lines)
+            except Exception:  # noqa: BLE001 - logs must not kill the job
+                logger.warning(
+                    "log flush for job %s failed", job.id, exc_info=True
+                )
+
+        async def pump_logs() -> None:
+            """Drain the log buffer on the pump cadence."""
+            while True:
+                await asyncio.sleep(_LOG_PUMP_SECONDS)
+                await flush_logs()
 
         async def supervise() -> None:
             """Heartbeat the lease and watch the cancel flag."""
@@ -322,27 +454,36 @@ class Worker:
             repo_factory=self._repo_factory(job.requester),
         )
         supervision = asyncio.create_task(supervise())
+        log_pump = asyncio.create_task(pump_logs())
         try:
             handler = self.handlers.get(job.job_type)
             if handler is None:
                 raise JobError(
                     f"no handler registered for job type {job.job_type!r}"
                 )
-            result = await handler(ctx)
-            # Flush fire-and-forget progress writes so the terminal
-            # state lands after the last progress snapshot.
-            if self._pending:
-                await asyncio.gather(*self._pending, return_exceptions=True)
-            payload = (
-                result.model_dump() if hasattr(result, "model_dump") else result
-            )
+            try:
+                result = await handler(ctx)
+                payload = (
+                    result.model_dump()
+                    if hasattr(result, "model_dump")
+                    else result
+                )
+            finally:
+                # Let the dispatched writes land, then persist the newest
+                # snapshot so the terminal state follows the real progress.
+                if self._pending:
+                    await asyncio.gather(*self._pending, return_exceptions=True)
+                await flush_progress()
+                await flush_logs()
             await self._finalize(job.id, "succeeded", result=payload)
         except JobCancelRequested:
+            await flush_logs()
             await self._finalize(
                 job.id, "cancelled", result={"cancelled": True}
             )
         except Exception as error:  # noqa: BLE001 - job boundary
             logger.exception("job %s (%s) failed", job.id, job.job_type)
+            await flush_logs()
             err = error_json(error)
             attempts = job.max_attempts or self.spec.max_attempts
             if (
@@ -357,8 +498,37 @@ class Worker:
             else:
                 await self._finalize(job.id, "failed", error=err)
         finally:
+            log_pump.cancel()
+            await asyncio.gather(log_pump, return_exceptions=True)
+            ccat_logger.removeHandler(log_handler)
+            if lowered_level:
+                ccat_logger.setLevel(previous_level)
             supervision.cancel()
             await asyncio.gather(supervision, return_exceptions=True)
+
+    async def _write_logs(
+        self, job_id: int, lines: list[dict[str, Any]]
+    ) -> None:
+        """Persist one drained log batch as ``kind="log"`` events.
+
+        Args:
+            job_id: The running job's id.
+            lines: Event payloads drained from the log buffer.
+
+        Raises:
+            Exception: Any database failure, after rolling back.
+        """
+        now = datetime.now(UTC)
+        async with self._session_factory() as session:
+            try:
+                session.add_all(
+                    JobEvent(job_id=job_id, ts=now, kind="log", data=line)
+                    for line in lines
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
 
     def _dispatch_progress(
         self,
@@ -439,7 +609,7 @@ class Worker:
     @asynccontextmanager
     async def _repo_factory(
         self, actor: str
-    ) -> "AsyncIterator[SeasonStoreRepository]":
+    ) -> "AsyncGenerator[SeasonStoreRepository]":
         """Yield one ad-hoc season repository (ctx.repo_factory)."""
         engine = create_async_engine(self.cfg.storage.database_url)
         try:
@@ -518,15 +688,17 @@ def _log_progress_error(task: "asyncio.Task[Any]") -> None:
         logger.warning("progress write failed: %s", exception)
 
 
-def run_worker(cfg: "Config") -> None:
+def run_worker(cfg: "Config", config_path: str | Path | None = None) -> None:
     """Run the worker loop until SIGTERM/SIGINT (§6.1; ``ccat worker``).
 
     Args:
         cfg: Season configuration (worker tuning + database URL).
+        config_path: The configuration file to watch; an edited file is
+            picked up between jobs.
     """
 
     async def _main() -> None:
-        worker = Worker(cfg)
+        worker = Worker(cfg, config_path=config_path)
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             with suppress(NotImplementedError):

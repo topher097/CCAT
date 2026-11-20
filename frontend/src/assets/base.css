@@ -97,6 +97,7 @@ button.primary {
   padding: 1rem 1.2rem 3rem;
   max-width: 1200px;
   margin: 0 auto;
+  overflow-x: auto;
 }
 
 .banner {
@@ -148,6 +149,26 @@ button.primary {
   background: #dff0e2;
 }
 
+.badge.check-ok {
+  border-color: #2e6b3a;
+  background: #dff0e2;
+}
+
+.badge.check-warn {
+  border-color: #9a7b12;
+  background: #fdf4d8;
+}
+
+.badge.check-bad {
+  border-color: #9e2b25;
+  background: #f8dedc;
+}
+
+.badge.check-unchecked {
+  border-color: #6b7a88;
+  background: #eef2f6;
+}
+
 .card {
   background: #fff;
   border: 1px solid #d7dee6;
@@ -182,6 +203,31 @@ table.data td {
 table.data th {
   background: #eef2f6;
   font-size: 0.85rem;
+}
+
+/* Audit editor: wide value boxes, taller for long entries. */
+table.editor-table {
+  table-layout: fixed;
+  min-width: 56rem;
+}
+
+table.editor-table input[type='text'],
+table.editor-table input[type='number'],
+table.editor-table input[type='date'],
+table.editor-table textarea {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #9aa7b4;
+  border-radius: 4px;
+  background: #fff;
+}
+
+table.editor-table textarea {
+  min-height: 4.5rem;
+  line-height: 1.35;
+  resize: vertical;
 }
 
 .diff-changed,

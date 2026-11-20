@@ -84,7 +84,9 @@ describe('router map', () => {
         '/generate',
         '/stats',
         '/clarify',
+        '/clarify/:familyId',
         '/jobs',
+        '/jobs/:id',
         '/admin',
       ]),
     )
@@ -117,6 +119,13 @@ describe('router map', () => {
     const router = createAppRouter()
     await router.push('/audit/children')
     expect(router.currentRoute.value.path).toBe('/audit/children')
+  })
+
+  it('redirects non-admins away from /admin', async () => {
+    authenticated()
+    const router = createAppRouter()
+    await router.push('/admin')
+    expect(router.currentRoute.value.path).toBe('/')
   })
 
   it('blocks navigation while a form is dirty unless confirmed', async () => {

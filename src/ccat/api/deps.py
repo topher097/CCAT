@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from ccat.api.errors import ApiError
 from ccat.db.models import Season
-from ccat.db.repositories import SeasonStoreRepository
+from ccat.db.repositories import SeasonStoreRepository, ensure_season_row
 
 if TYPE_CHECKING:
     from ccat.config import Config
@@ -50,6 +50,12 @@ async def season_repo(
 ) -> AsyncIterator[SeasonStoreRepository]:
     """Yield a repository bound to the named season row.
 
+    The configured season's row is created on demand.  That row holds
+    configuration-derived data only (name, Christmas date, config
+    snapshot), so a migrated database that has not been imported into
+    yet still serves the web app.  Any other season is refused: it is
+    not the configured one, so there is nothing to derive it from.
+
     Args:
         season: The season name path parameter.
         request: The current request.
@@ -58,16 +64,38 @@ async def season_repo(
         A :class:`SeasonStoreRepository` on one fresh session.
 
     Raises:
-        ApiError: 404 when the season row does not exist.
+        ApiError: 404 when the season row does not exist and the
+            season is not the configured one.
     """
     uow: UnitOfWork = request.app.state.uow
+    cfg: Config = request.app.state.cfg
     async with uow.session() as session:
         row = await session.scalar(select(Season).where(Season.name == season))
+        if row is None and season == cfg.season:
+            row = await _create_season_row(uow, cfg)
         if row is None:
             raise ApiError(
                 404, "season_not_found", f"season {season!r} does not exist"
             )
         yield SeasonStoreRepository(session, row)
+
+
+async def _create_season_row(uow: "UnitOfWork", cfg: "Config") -> Season:
+    """Create the configured season row in its own committed transaction.
+
+    A separate transaction makes the row visible to every later
+    session; the request's own session holds an older read snapshot
+    and would not see the new row.
+
+    Args:
+        uow: The shared unit of work.
+        cfg: The pipeline configuration (season name and date).
+
+    Returns:
+        The created season row.
+    """
+    async with uow.session() as session:
+        return await ensure_season_row(session, cfg)
 
 
 def session_factory_dep(request: Request) -> Any:

@@ -15,6 +15,9 @@ migrated SQLite database as a single controlled migration batch:
   archives + current report, clarification sidecar state, drafts, and
   generated artifacts are imported through the season-store
   repositories as module ``migrate`` (actor ``migration``);
+- the import **merges**: workbook rows win for every key they carry,
+  and rows the database holds from a later acquisition survive (the
+  final stores are append-and-merge, never projections);
 - a validation gate compares the stored database against the workbook;
   any failure restores the pre-import database, records a ``failed``
   batch row, and writes the report;
@@ -1115,9 +1118,20 @@ def _entity_counts(
 async def _validate(
     repo: SeasonStoreRepository,
     source: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Run every parity check; returns the check list for the report."""
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Run every parity check; returns the check list and merged counts.
+
+    The comparison covers the workbook's rows: every one of them must
+    be stored with identical values.  Rows the database holds from a
+    later acquisition are counted, not compared — they are not the
+    workbook's business.
+
+    Returns:
+        The check list for the report and the per-entity count of
+        stored rows the workbook does not carry.
+    """
     checks: list[dict[str, Any]] = []
+    merged: dict[str, int] = {}
 
     def record(name: str, passed: bool, detail: str) -> None:
         checks.append({"check": name, "pass": passed, "detail": detail})
@@ -1136,9 +1150,16 @@ async def _validate(
     for entity in ("child", "family", "sponsor"):
         key = str(ENTITY_SPECS[entity]["key"])
         wb_rows = _sorted_by_key(entity, source["finals"][entity])
-        db_rows = _sorted_by_key(entity, _plain(await repo.final_rows(entity)))
+        stored_rows = _sorted_by_key(
+            entity, _plain(await repo.final_rows(entity))
+        )
         wb_keys = [str(row.get(key)) for row in wb_rows]
+        wb_key_set = set(wb_keys)
+        db_rows = [
+            row for row in stored_rows if str(row.get(key)) in wb_key_set
+        ]
         db_keys = [str(row.get(key)) for row in db_rows]
+        merged[entity] = len(stored_rows) - len(db_rows)
         record(
             f"{entity}_key_sets",
             set(wb_keys) == set(db_keys),
@@ -1250,7 +1271,7 @@ async def _validate(
                 wb_assigned == db_assigned,
                 f"{wb_assigned} workbook vs {db_assigned} db",
             )
-    return checks
+    return checks, merged
 
 
 def _age_discrepancies(
@@ -1277,6 +1298,87 @@ def _age_discrepancies(
                 }
             )
     return discrepancies
+
+
+# ---------------------------------------------------------------------------
+# Merge helpers (the final stores are append-and-merge, not projections).
+# ---------------------------------------------------------------------------
+
+
+def _merge_stored(
+    entity: str,
+    stored: list[dict[str, Any]],
+    workbook: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Merge workbook rows over stored rows (workbook wins, no removals).
+
+    A complete-store write must cover every persisted key, so the
+    import submits the workbook rows plus the stored rows the workbook
+    does not know about.  The workbook is usually an older snapshot
+    than the database (a later acquisition adds rows); dropping those
+    rows would delete people the season has not audited yet.
+
+    Angel ids are unique per season.  A workbook row's audited letter
+    wins: a stored row that holds the same letter (a duplicate
+    submission reserved by the pipeline) releases it and keeps its
+    family link, so the human assignments stay intact.
+
+    Args:
+        entity: "child", "family", or "sponsor".
+        stored: The rows already in the database.
+        workbook: The rows read from the source workbook.
+
+    Returns:
+        The merged row set (workbook rows first) and the stored rows
+        that released an angel id.
+    """
+    key = str(ENTITY_SPECS[entity]["key"])
+    known = {str(row.get(key)) for row in workbook}
+    claimed = {
+        str(row.get("angel_id"))
+        for row in workbook
+        if entity == "child" and row.get("angel_id") is not None
+    }
+    merged = list(workbook)
+    released: list[dict[str, Any]] = []
+    for row in stored:
+        if str(row.get(key)) in known:
+            continue
+        extra = {
+            name: value
+            for name, value in row.items()
+            if not name.startswith("_")
+        }
+        angel_id = extra.get("angel_id")
+        if entity == "child" and angel_id is not None:
+            if str(angel_id) in claimed:
+                extra["angel_id"] = None
+                released.append(
+                    {"zite_record_id": extra.get(key), "angel_id": angel_id}
+                )
+        merged.append(extra)
+    return merged, released
+
+
+def _merge_raw(
+    workbook: list[dict[str, Any]], stored: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Union one raw snapshot: workbook rows first, stored extras after.
+
+    Args:
+        workbook: The raw rows read from the source workbook.
+        stored: The rows of the database's active acquisition run.
+
+    Returns:
+        The union of both row sets, keyed by ``zite_record_id``.
+    """
+    known = {str(row.get("zite_record_id") or "") for row in workbook}
+    merged = list(workbook)
+    for row in stored:
+        if str(row.get("zite_record_id") or "") in known:
+            continue
+        merged.append(row)
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -1320,16 +1422,26 @@ async def _import_flow(
             # imports later (plan §10 v1-bootstrap lesson, D5).
             await _import_clarify(repo, cfg, source_data, report)
             # Complete final stores — every stored value copied as
-            # stored (migrate is trusted for derived values).
+            # stored (migrate is trusted for derived values).  Rows the
+            # database holds from a later acquisition are merged in,
+            # never dropped: the stores are append-and-merge.
             for entity in ("child", "family", "sponsor"):
                 rows = [
                     normalize_row(entity, row)
                     for row in source_data["finals"][entity]
                 ]
-                await repo.commit_finals("migrate", entity, rows, "migration")
-            await repo.replace_raw_snapshot(
-                "migrate", source_data["raw"], "migration"
-            )
+                merged, released = _merge_stored(
+                    entity, await repo.final_rows(entity), rows
+                )
+                await repo.commit_finals("migrate", entity, merged, "migration")
+                report["angel_ids_released"].extend(released)
+            raw = {
+                entity: _merge_raw(
+                    source_data["raw"][entity], await repo.raw_rows(entity)
+                )
+                for entity in ("sponsor", "family", "child")
+            }
+            await repo.replace_raw_snapshot("migrate", raw, "migration")
             await repo.replace_screen_diagnostics(
                 source_data["logs"]["duplicate_log"],
                 source_data["logs"]["dob_conflict_log"],
@@ -1355,8 +1467,9 @@ async def _import_flow(
             )
 
         async with uow.store(cfg, "migration") as repo:
-            checks = await _validate(repo, source_data)
+            checks, merged = await _validate(repo, source_data)
         report["validation"] = checks
+        report["merged_rows"] = merged
         failed = [check for check in checks if not check["pass"]]
         if failed:
             report["errors"].append(
@@ -1531,6 +1644,8 @@ def run(
         "backup": {"path": str(backup)} if backup is not None else None,
         "config_hash": _config_digest(cfg),
         "counts": {},
+        "merged_rows": {},
+        "angel_ids_released": [],
         "age_discrepancies": [],
         "artifacts": {},
         "clarify": {},

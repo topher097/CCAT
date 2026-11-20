@@ -24,7 +24,7 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Protocol, TYPE_CHECKING
 
 from jinja2 import Environment
 from pydantic import BaseModel, ConfigDict
@@ -545,6 +545,90 @@ def write_draft(cfg: Config, family: FamilyEntry, draft: EmailDraft) -> Path:
     return out_file
 
 
+class SenderLike(Protocol):
+    """Anything that can send one prompt and return the raw reply.
+
+    :class:`EmailSender` satisfies this structurally; tests pass
+    lightweight fakes with the same ``send`` method.
+    """
+
+    def send(self, prompt: str) -> str:
+        """Send one prompt to the model and return its raw text."""
+        ...
+
+
+def generate_missing(
+    cfg: Config,
+    families: list[FamilyEntry],
+    sender: SenderLike,
+    overwrite: bool = False,
+) -> tuple[list[int], list[int]]:
+    """Generate email drafts for families that do not have one yet.
+
+    Runs fully headless (one opencode connection, sequential
+    one-family-at-a-time generations).  A failing family is logged
+    and skipped; the run continues.
+
+    Args:
+        cfg: Pipeline configuration.
+        families: The flagged families.
+        sender: The prompt sender to generate with.
+        overwrite: Regenerate families that already have a saved
+            draft, replacing their HTML and JSON files.
+
+    Returns:
+        The (done, failed) family-id lists.
+    """
+    if overwrite:
+        targets = families
+        logger.info(
+            "headless generation (--overwrite): regenerating all %d"
+            " family draft(s)",
+            len(targets),
+        )
+    else:
+        targets = [
+            family
+            for family in families
+            if not html_path(cfg, family).is_file()
+        ]
+        logger.info(
+            "headless generation: %d of %d family(ies) without a saved draft",
+            len(targets),
+            len(families),
+        )
+    done: list[int] = []
+    failed: list[int] = []
+    for family in targets:
+        try:
+            email = generate_email(family, cfg, sender.send)
+            draft = EmailDraft.from_email(email, default_subject(cfg))
+            path = write_draft(cfg, family, draft)
+        except ClarifyError as error:
+            failed.append(family.family_id)
+            logger.error(
+                "family %d: draft generation failed: %s",
+                family.family_id,
+                error,
+            )
+            continue
+        done.append(family.family_id)
+        logger.info(
+            "family %d: draft saved to %s (%d done, %d failed)",
+            family.family_id,
+            path,
+            len(done),
+            len(failed),
+        )
+    if failed:
+        logger.warning(
+            "headless generation: %d family(ies) failed: %s",
+            len(failed),
+            sorted(failed),
+        )
+    return done, failed
+
+
 def load_draft(cfg: Config, family: FamilyEntry) -> EmailDraft | None:
     """Load one family's saved, editable draft from disk.
 
@@ -580,7 +664,7 @@ class EmailSender:
     server); otherwise starts an embedded ``opencode serve`` child
     process that lives until :meth:`close` (or process exit).  The
     connection is created lazily on first use and guarded by a lock,
-    so NiceGUI background-thread clicks can never race the startup.
+    so concurrent callers can never race the startup.
     """
 
     def __init__(self, cfg: Config) -> None:

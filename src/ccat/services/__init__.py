@@ -1,16 +1,15 @@
 """Phase 1b application services (refactor §5.1, §9.3).
 
 Typed, workbook-backed use-case functions shared by the future API and
-job layers. The legacy CLI entry points and NiceGUI apps are unchanged
-and remain the active callers of the legacy modules; these services
-wrap the same behavior behind stable signatures so the Phase 2 DB
-repositories can slot in behind :class:`ccat.services.ports.SeasonStore`.
+job layers. These services wrap the legacy behavior behind stable
+signatures so the DB repositories can slot in behind
+:class:`ccat.services.ports.SeasonStore`.
 
 Modules:
 
 - ``results`` — pydantic result DTOs.
 - ``audit`` — tri-state save, ignore/unignore actions, reconciliation.
-- ``special_needs`` — special-needs parse/serialize (ex-NiceGUI).
+- ``special_needs`` — special-needs parse/serialize.
 - ``pipeline`` — acquire/screen/match/generate/stats/clarify wrappers.
 - ``ports`` — ``SeasonStore`` storage protocol (documentation only).
 """

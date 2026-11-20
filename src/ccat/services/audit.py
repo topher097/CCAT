@@ -1,6 +1,6 @@
 """Tri-state audit save service (refactor §5.1, §9.3).
 
-The legacy NiceGUI editor sends a full form on every save, so the
+The legacy workbook editor sends a full form on every save, so the
 underlying ``_save_row`` semantics are dense: an omitted ``ignore``
 normalizes to false (unignore + reseed) and an omitted
 ``clarification_notes`` clears the note. This service adapts partial

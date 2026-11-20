@@ -163,6 +163,82 @@ async def _prepared_and_baseline(
     return None, {}
 
 
+def audit_sort_key(entity: str, row: dict[str, Any]) -> tuple[Any, ...]:
+    """Order one audit row by its assigned IDs (family / child / sponsor).
+
+    Children sort by their assigned family first (siblings stay
+    together) and by their child id (``angel_id``) inside that family;
+    orphans (no family) come last.  Families and sponsors sort by
+    their numeric id.
+
+    Args:
+        entity: "child", "family", or "sponsor".
+        row: One final row under legacy column names.
+
+    Returns:
+        A comparable sort key.
+    """
+    if entity == "child":
+        family_id = _as_int(row.get("family_id"))
+        return (
+            family_id is None,
+            family_id or 0,
+            str(row.get("angel_id") or ""),
+            str(row.get("zite_record_id") or ""),
+        )
+    return (_as_int(row.get(ENTITY_SPECS[entity]["key"])) or 0,)
+
+
+async def validation_statuses(
+    repo: "SeasonStoreRepository",
+    entity: str,
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, str | None]]:
+    """Email/address validation status per entity key (families, sponsors).
+
+    The email status is the ZeroBounce check for the row's own email;
+    the address status is the Nominatim check whose query matches the
+    family's address parts.  Sponsors carry no address, so theirs is
+    always ``None``.
+
+    Args:
+        repo: Season repository supplying the validation logs.
+        entity: "family" or "sponsor".
+        rows: The final rows to annotate.
+
+    Returns:
+        ``entity key -> {"email": status, "address": status}``; the
+        statuses are ``None`` when the row was never checked.
+    """
+    if entity not in {"family", "sponsor"}:
+        return {}
+    from ccat.engines.nominatim_address_check import build_query
+
+    email_statuses = await repo.email_statuses()
+    address_statuses = await repo.address_statuses()
+    statuses: dict[str, dict[str, str | None]] = {}
+    for row in rows:
+        email = (
+            row.get("primary_email") if entity == "family" else row.get("email")
+        )
+        normalized = str(email).strip().lower() if email else ""
+        address_status: str | None = None
+        if entity == "family":
+            query = build_query(
+                row.get("street_address"),
+                row.get("apt_floor"),
+                row.get("city"),
+                row.get("state"),
+                row.get("zip_code"),
+            )
+            address_status = address_statuses.get(query)
+        statuses[_stored_key(row, entity)] = {
+            "email": email_statuses.get(normalized) if normalized else None,
+            "address": address_status,
+        }
+    return statuses
+
+
 async def save_entity_db(
     repo: "SeasonStoreRepository",
     cfg: Config,
@@ -497,7 +573,9 @@ async def _control_save(
 
 
 __all__ = [
+    "audit_sort_key",
     "ignore_entity_db",
     "save_entity_db",
     "unignore_entity_db",
+    "validation_statuses",
 ]

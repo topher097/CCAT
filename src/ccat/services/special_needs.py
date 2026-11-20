@@ -1,4 +1,4 @@
-"""Special-needs text serialization (moved from the NiceGUI callback).
+"""Special-needs text serialization (moved from the audit editor).
 
 Child ``special_needs`` is stored as one semicolon-joined text value
 (``"ADHD; other: speech delay"``); an empty selection means none. The

@@ -118,7 +118,8 @@ order; keep production workbooks and configs unchanged during development.
   output readers.
 - [ ] Keep ignore/unignore semantics explicit and tested, including documented
   destructive behavior where applicable.
-- [ ] Update NiceGUI pages/server callers and audit smoke/UI coverage.
+- [x] Removed the NiceGUI pages/server and the audit smoke script; UI
+  coverage now belongs to the Vue SPA.
 - [ ] Make `audit-migrate` use one explicit storage mode: bootstrap directly to
   persistent finals or fail with instructions for the documented two-step path;
   never mix adj and persistent-final semantics.

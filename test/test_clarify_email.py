@@ -17,6 +17,7 @@ from ccat.clarify.email_gen import (
     default_subject,
     draft_path,
     generate_email,
+    generate_missing,
     group_families,
     html_path,
     load_draft,
@@ -25,7 +26,6 @@ from ccat.clarify.email_gen import (
     render_email_fragment,
     write_draft,
 )
-from ccat.clarify.server import generate_missing
 from ccat.config import ClarifySpec, Config
 
 

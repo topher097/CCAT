@@ -1,12 +1,14 @@
-"""Module 3 — multi-entity human audit tool (audit_architecture.md §8–§9).
+"""Module 3 — multi-entity human audit data layer (audit_architecture.md §8–§9).
 
 Package layout (§9.1):
 
-- ``store`` — pure data layer (no NiceGUI imports): dense adj schemas,
-  status machine, duplicate groups, saves, output filters.
+- ``store`` — pure data layer: dense adj schemas, status machine,
+  duplicate groups, saves, output filters.
 - ``migrate`` — one-time bootstrap of the new workbook from the old one.
-- ``pages`` — NiceGUI pages + shared components.
-- ``server`` — ``run()``: seed sheets, load state, ``ui.run``.
+
+The interactive audit editors live in the web application
+(:mod:`ccat.api` plus the Vue SPA); this package holds only the data
+rules they read and write.
 """
 
 

@@ -130,4 +130,7 @@ export const api = {
   patch<T>(path: string, body: unknown, headers?: Record<string, string>) {
     return request<T>(path, { method: 'PATCH', body, headers })
   },
+  put<T>(path: string, body: unknown, headers?: Record<string, string>) {
+    return request<T>(path, { method: 'PUT', body, headers })
+  },
 }

@@ -45,6 +45,13 @@ _SEGMENTS: dict[str, str] = {
     "children": "child",
 }
 
+#: Entity name -> the column holding its assigned id.
+_KEY_COLUMN: dict[str, str] = {
+    "child": "zite_record_id",
+    "family": "family_id",
+    "sponsor": "sponsor_id",
+}
+
 
 def _entity(segment: str) -> str:
     """Map a URL segment to the entity name.
@@ -113,7 +120,8 @@ async def _detail_payload(
 
     Runs the shared preparation for the baseline and duplicate
     submissions (the store's own semantics, plan §9.3) and merges the
-    child's DOB-conflict note into ``diagnostics``.
+    child's DOB-conflict note into ``diagnostics``; families and
+    sponsors carry their email/address validation status there.
 
     Args:
         repo: The season-bound repository.
@@ -130,11 +138,7 @@ async def _detail_payload(
     from ccat.audit.store import dob_conflict_notes
     from ccat.services.db_audit import _prepared_and_baseline
 
-    spec_key = {
-        "child": "zite_record_id",
-        "family": "family_id",
-        "sponsor": "sponsor_id",
-    }[entity]
+    spec_key = _KEY_COLUMN[entity]
     rows = await repo.final_rows(entity)
     existing = next(
         (row for row in rows if str(row.get(spec_key)) == str(key)), None
@@ -150,6 +154,12 @@ async def _detail_payload(
         note = dob_conflict_notes(log_rows, str(existing.get(spec_key)))
         if note:
             diagnostics["conflict_note"] = note
+    elif entity in {"family", "sponsor"}:
+        statuses = await db_audit.validation_statuses(repo, entity, [existing])
+        entry = statuses.get(str(existing.get(spec_key)))
+        if entry is not None:
+            diagnostics["email_status"] = entry["email"]
+            diagnostics["address_status"] = entry["address"]
     submissions: list[dict[str, Any]] = []
     if prepared is not None:
         from ccat.audit.store import group_submissions
@@ -283,7 +293,7 @@ async def _list(
     q: str,
     status: str | None,
 ) -> EntityListPage:
-    """Shared list implementation (filter → paginate → canonicalize).
+    """Shared list implementation (sort → filter → paginate → canonicalize).
 
     Args:
         entity: The entity name.
@@ -296,23 +306,39 @@ async def _list(
     Returns:
         The page DTO.
     """
-    {
-        "child": "zite_record_id",
-        "family": "family_id",
-        "sponsor": "sponsor_id",
-    }[entity]
     rows = await repo.final_rows(entity)
+    rows = sorted(rows, key=lambda row: db_audit.audit_sort_key(entity, row))
     filtered = [
         row
         for row in rows
         if (status is None or row.get("status") == status) and _match(row, q)
     ]
     start = (page - 1) * page_size
+    items = [
+        _public_row(entity, row) for row in filtered[start : start + page_size]
+    ]
+    if entity == "family":
+        counts = await repo.family_child_counts()
+        for item in items:
+            item["child_count"] = counts.get(int(item["family_id"]), 0)
+    elif entity == "child":
+        raw_ids = {
+            str(row.get("zite_record_id") or "")
+            for row in await repo.raw_rows("child")
+        }
+        for item in items:
+            item["raw_missing"] = (
+                str(item.get("zite_record_id") or "") not in raw_ids
+            )
+    if entity in {"family", "sponsor"}:
+        statuses = await db_audit.validation_statuses(repo, entity, filtered)
+        for item in items:
+            entry = statuses.get(str(item.get(_KEY_COLUMN[entity])))
+            if entry is not None:
+                item["email_status"] = entry["email"]
+                item["address_status"] = entry["address"]
     return EntityListPage(
-        items=[
-            _public_row(entity, row)
-            for row in filtered[start : start + page_size]
-        ],
+        items=items,
         total=len(filtered),
         page=page,
         page_size=page_size,
@@ -376,7 +402,9 @@ def _detail_routes(segment: str, entity: str) -> None:
     )
     async def patch_entity(
         key: str,
-        body: EntityPatch,
+        # The patch model is built at runtime, so the checker cannot
+        # treat it as a class.
+        body: EntityPatch,  # ty: ignore[invalid-type-form]
         request: Request,
         if_match: Annotated[str | None, Header(alias="If-Match")] = None,
         repo: SeasonStoreRepository = Depends(season_repo),
@@ -558,11 +586,7 @@ async def _stale_response(
     Returns:
         The 412 JSON response.
     """
-    spec_key = {
-        "child": "zite_record_id",
-        "family": "family_id",
-        "sponsor": "sponsor_id",
-    }[entity]
+    spec_key = _KEY_COLUMN[entity]
     rows = await repo.final_rows(entity)
     existing = next(
         (row for row in rows if str(row.get(spec_key)) == str(key)), None

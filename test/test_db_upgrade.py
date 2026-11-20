@@ -63,6 +63,47 @@ def test_db_upgrade_creates_missing_parent_directory(tmp_path: Path) -> None:
     assert (tmp_path / "nested" / "dir" / "ccat.sqlite3").exists()
 
 
+def test_db_upgrade_retires_cmendres400_account(tmp_path: Path) -> None:
+    """The retired dev account and the audit rows it owns are removed."""
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+
+    from ccat.db.engine import ALEMBIC_DIR
+
+    url = f"sqlite:///{tmp_path / 'ccat.sqlite3'}"
+    config = AlembicConfig()
+    config.set_main_option("script_location", str(ALEMBIC_DIR))
+    config.set_main_option("sqlalchemy.url", url)
+    # Before the retirement revision the account still exists.
+    command.upgrade(config, "20261119_0002")
+    connection = sqlite3.connect(tmp_path / "ccat.sqlite3")
+    connection.execute(
+        "INSERT INTO users (username, display_name, active, roles,"
+        " dev_no_password, otp_enrolled)"
+        " VALUES ('cmendres400', NULL, 1, '[\"admin\"]', 1, 0)"
+    )
+    connection.execute(
+        "INSERT INTO security_audit_events (ts, user_id, action, object_type,"
+        " object_id) VALUES (CURRENT_TIMESTAMP,"
+        " (SELECT id FROM users WHERE username = 'cmendres400'),"
+        " 'logout', 'user', 'cmendres400')"
+    )
+    connection.commit()
+    connection.close()
+
+    command.upgrade(config, "head")
+    connection = sqlite3.connect(tmp_path / "ccat.sqlite3")
+    usernames = {
+        row[0] for row in connection.execute("SELECT username FROM users")
+    }
+    events = connection.execute(
+        "SELECT count(*) FROM security_audit_events"
+    ).fetchone()[0]
+    connection.close()
+    assert "cmendres400" not in usernames
+    assert events == 0
+
+
 def test_cli_exposes_db_upgrade_command() -> None:
     """The Fire dispatch advertises the new command."""
     import ccat

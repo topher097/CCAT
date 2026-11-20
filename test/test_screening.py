@@ -913,6 +913,7 @@ def test_run_requires_raw_child(screen_cfg: Config) -> None:
 
 def test_run_requires_opencode_v2(cfg: Config, monkeypatch) -> None:
     """Opencode < 2 is refused before any work happens (§6.2)."""
+    monkeypatch.delenv("OPENCODE_BASE_URL", raising=False)
     monkeypatch.setattr(screening, "_opencode_major_version", lambda: 1)
     with pytest.raises(screening.ScreeningError, match="upgrade --major"):
         screening._require_opencode_v2()
@@ -920,9 +921,21 @@ def test_run_requires_opencode_v2(cfg: Config, monkeypatch) -> None:
 
 def test_run_requires_opencode_installed(cfg: Config, monkeypatch) -> None:
     """A missing/unparseable opencode CLI is refused (§6.2)."""
+    monkeypatch.delenv("OPENCODE_BASE_URL", raising=False)
     monkeypatch.setattr(screening, "_opencode_major_version", lambda: None)
     with pytest.raises(screening.ScreeningError, match="install opencode"):
         screening._require_opencode_v2()
+
+
+def test_opencode_v2_check_skipped_for_remote_server(monkeypatch) -> None:
+    """A remote server needs no local CLI, so the version check is skipped."""
+    monkeypatch.setenv("OPENCODE_BASE_URL", "http://opencode:4097")
+    monkeypatch.setattr(
+        screening,
+        "_opencode_major_version",
+        lambda: pytest.fail("local CLI checked against a remote server"),
+    )
+    screening._require_opencode_v2()
 
 
 def test_opencode_major_version_parses_cli_output(monkeypatch) -> None:

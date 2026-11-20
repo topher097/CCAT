@@ -1,5 +1,11 @@
 # CCAT Pipeline Architecture
 
+> **Historical note.** The NiceGUI audit and clarification applications and
+> their `ccat audit` / `ccat clarify` commands were removed. The interactive
+> editors now live in the Vue SPA served by `ccat serve` (FastAPI). The data
+> logic in `src/ccat/audit/store.py`, `src/ccat/audit/migrate.py`, and the
+> `ccat.clarify` modules survives.
+
 Architecture guide for the CCAT gift-giving matching system. This document is the
 basis of all code in this codebase. No implementation exists yet; every section below
 is the contract that the implementation must satisfy.
@@ -14,8 +20,9 @@ giving program. The pipeline has independently runnable modules:
 2. **Local Preparation and AI Screening** — clean, validate, link, assign
    stable IDs, refresh diagnostics, validate emails/addresses, append new
    persistent entities, and adjudicate only children still needing AI work.
-3. **Human Audit Tool** — a local NiceGUI tool; humans edit and commit rows
-   directly in the full persistent `final_*` stores.
+3. **Human Audit** — the audit editor in the Vue SPA served by `ccat serve`;
+   humans edit and commit rows directly in the full persistent `final_*`
+   stores through the FastAPI resources.
 4. **Matchmaking** — assign whole families to sponsors, honoring special-
    needs processing, exact child counts, and preference priority; it patches
    only assignment-owned columns in `final_family`/`final_sponsor`.
@@ -56,11 +63,13 @@ JSON file. Raw is source; final is truth; logs are process history.
                                          (email.html draft + combined packet PDF)
 ```
 
-Modules run individually via CLI (`ccat acquire`, `ccat screen`, `ccat
-audit`, `ccat match`, `ccat generate`, `ccat stats`, `ccat clarify`,
-`ccat clarify-export`), each taking an optional `--config` path (default
-`config/ccat_2026.json`). Packets run as the second phase of `ccat
-generate`; there is no standalone `sponsor_packets` command.
+Modules run individually via CLI (`ccat acquire`, `ccat screen`,
+`ccat match`, `ccat generate`, `ccat stats`, `ccat clarify-export`), each
+taking an optional `--config` path (default `config/ccat_2026.json`).
+Interactive audit and clarification editing run through `ccat serve` and its
+Vue views; the legacy `ccat audit` and `ccat clarify` commands are removed.
+Packets run as the second phase of `ccat generate`; there is no standalone
+`sponsor_packets` command.
 
 Supported migration commands are `ccat audit-migrate` (old v1 directly to
 persistent finals) and `ccat consolidate-migrate` (full v2 `adj_*` to a
@@ -254,12 +263,6 @@ Structure:
 
   // Deprecated (module 1 only fetches now); kept so old configs load.
   "acquire": {},
-
-  // Human audit tool (module 3).
-  "audit": {
-    "host": "127.0.0.1",
-    "port": 8642
-  },
 
   // Matchmaking (module 4). Weights are lexicographic tiers, not additive.
   "matchmaking": {
@@ -545,16 +548,18 @@ thread owns one session.
 
 ## 7. Module 3 — Human Audit Tool
 
-Authoritative detail is in `audit_architecture.md`. Entry point:
-`src/ccat/audit/`, CLI `ccat audit [--test] [--restart]`.
+Authoritative detail is in `audit_architecture.md` (historical for the removed
+NiceGUI UI). Surviving data logic: `src/ccat/audit/store.py` and
+`src/ccat/audit/migrate.py`. The interactive editor is the Vue SPA served by
+`ccat serve`.
 
 Startup (`ensure_final_sheets`) validates full stores, prepares raw in
 memory, and backfills only genuinely missing entities. It never refreshes
 existing rows or projects away controls. Missing raw/prepared data gives
 actionable acquire/screen errors.
 
-The NiceGUI app has a dashboard, filtered sponsor/family lists, and detail
-pages. Full stores intentionally expose ignored/orphan/raw-missing rows for
+The Vue SPA has audit lists (sponsors, families, children) and detail
+editors. Full stores intentionally expose ignored/orphan/raw-missing rows for
 correction. Side-by-side baselines come from in-memory prepared rows; raw-
 missing rows use their stored effective values.
 
@@ -672,7 +677,7 @@ src/ccat/
   sponsor_packets.py    # packet assembly helpers
   stats.py              # HTML/PDF statistics report
   consolidate.py        # full adj -> separate persistent workbook
-  audit/                # store, NiceGUI pages/server, v1 bootstrap
+  audit/                # store, v1 bootstrap (NiceGUI UI removed)
   clarify/              # extraction, server, external drafts/status
 test/                   # unit, migration, and persistent integration tests
 ```
@@ -876,13 +881,15 @@ retains its CLI name but means ephemeral cleaned/ID-assigned preparation from
 raw forms; no prepared submission sheet is created. Prepared mode does not
 apply output ignore/orphan filters and has no sponsor assignments.
 
-Clarification state is external to the workbook. `ccat clarify` reads
-eligible noted children/families and raw-child DOBs, generates family draft
-HTML plus editable JSON under `clarify.output_dir`, and tracks
-contacted/replied state in `clarification_status.json`.
-`ccat clarify-export` refreshes the CSV from those artifacts. Neither
-command writes workbook sheets, and consolidation never moves or rewrites
-clarification drafts/status.
+Clarification state is external to the workbook. Draft generation (moved from
+the removed `ccat clarify` server into `ccat.clarify.email_gen` and exposed
+through the API/service layer) reads eligible noted children/families and
+raw-child DOBs and writes family draft HTML plus editable JSON under
+`clarify.output_dir`; contacted/replied state lives in
+`clarification_status.json`. `ccat clarify-export` refreshes the CSV from those
+artifacts, and editing runs in the Vue SPA. None of these paths writes
+workbook sheets, and consolidation never moves or rewrites clarification
+drafts/status.
 
 ## 15. Migration Commands
 
@@ -1032,3 +1039,72 @@ Rules for the output:
 - Return only the JSON object (or null). No explanations, no markdown
   fences.
 ```
+
+## Appendix A. Current implementation (2026-11 refactor)
+
+The sections above describe the pipeline contract. The implementation now
+runs that contract over SQLite with a FastAPI backend, a Vue frontend, and
+a durable job worker. The refactor plan is `temp/web_server_refactor.md`;
+its decisions are `temp/refactor_decisions.md`.
+
+### A.1 Layers
+
+| Layer | Location | Responsibility |
+|---|---|---|
+| Domain | `src/ccat/domain/`, `preparation.py`, `match.py`, `screening.py`, `child_info_generate.py`, `sponsor_packets.py`, `stats.py` | Pure algorithms: cleaning, linkage, stable IDs, duplicate/DOB diagnostics, match scoring, enrichment, report math |
+| Services | `src/ccat/services/` | Use-case orchestration shared by CLI and API; typed result DTOs (`results.py`); storage port (`ports.py`) |
+| Persistence | `src/ccat/db/`, `alembic/` | SQLAlchemy models, repositories, unit of work, migrations, workbook importer/exporter |
+| HTTP | `src/ccat/api/` | Versioned REST (`/api/v1`), DTOs, sessions/RBAC, typed error mapping, OpenAPI contract |
+| Jobs | `src/ccat/jobs/` | Durable job registry, worker loop, cancellation, heartbeat/lease/recovery |
+
+The workbook survives only as an import/export format: `ccat db-import`
+migrates it into SQLite as one validated, hash-guarded batch, and
+`ccat workbook-export` writes the read-only reverse export used as rollback
+evidence. `ccat serve` (FastAPI) and `ccat worker` (job loop) are the
+active entry points after cutover.
+
+### A.2 Command mapping
+
+| Legacy command | Current equivalent |
+|---|---|
+| `ccat acquire` | job `acquire` (DB mode) / legacy CLI (workbook mode) |
+| `ccat screen` | job `screen` |
+| `ccat match` | job `match` |
+| `ccat generate` | job `generate` (sheets then packets) |
+| `ccat stats` | job `stats` |
+| `ccat clarify --generate` | job `clarify_generate` |
+| `ccat clarify-export` | job `clarify_export` |
+| `ccat audit` (NiceGUI) | removed; replaced by `ccat serve` + Vue audit views |
+| — | `ccat db-import`, `ccat db-upgrade`, `ccat worker` (new) |
+
+### A.3 Durable job semantics
+
+Jobs live in the database (`jobs`, `job_events`) with explicit states
+(`queued`, `running`, `succeeded`, `failed`, `cancel_requested`,
+`cancelled`), attempt/retry budgets, idempotency keys, a per-season
+exclusion for pipeline-class work, heartbeats with lease recovery
+(`recovery_required`, never a blind repeat), throttled progress, and
+cooperative cancellation. Completed AI corrections and PDFs stay committed;
+pending rows keep `screened=false` / `generated_info_sheet=false` and are
+picked up by the next run.
+
+### A.4 Deliberate divergences from the prose above
+
+- `potential_anomoly` is stored and exposed as `ai_screening_notes`; the
+  legacy workbook column and the AI JSON key stay mapped at the boundary.
+- The sponsor `create` column is stored as `created`.
+- Age is recomputed in Python from DOB and the season Christmas date; the
+  workbook `DATEDIF` formula is import/export only.
+- Generation commits `generated_info_sheet` per item (after a validated,
+  atomically renamed PDF) instead of in one end-of-run batch.
+- Match commits assignments, report and archive together; the CSV is a
+  tracked artifact whose failure yields an explicit partial state.
+- Clarification drafts are versioned rows keyed by child; legacy positional
+  drafts are imported as `legacy_positional`.
+- The status evaluator returns `ignored` before the sticky `audited` check,
+  matching persisted save behavior (decision D11).
+
+Everything else in this document remains the behavioral contract, including
+`--test` scope limits (they mutate state), the eligibility differences
+between match, generation, packets, statistics, clarification and audit, and
+the writer-ownership rules.

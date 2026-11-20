@@ -83,7 +83,7 @@ from ccat.services.results import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterable
+    from collections.abc import AsyncGenerator, Callable, Iterable
 
     from ccat.config import Config
     from ccat.db.repositories import SeasonStoreRepository
@@ -97,7 +97,7 @@ _ENTITIES = ("sponsor", "family", "child")
 @asynccontextmanager
 async def _store(
     cfg: "Config", actor: str
-) -> "AsyncIterator[SeasonStoreRepository]":
+) -> "AsyncGenerator[SeasonStoreRepository]":
     """Yield a short-lived season repository on its own engine.
 
     Args:

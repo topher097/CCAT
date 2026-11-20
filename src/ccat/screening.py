@@ -21,6 +21,7 @@ row on the main thread. Prompts contain no names or contact information.
 
 import json
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -96,12 +97,15 @@ def _require_opencode_v2() -> None:
 
     The embedded server relies on ``opencode serve --stdio``, which only
     exists in opencode 2.x; older versions print a usage message and
-    exit, so screening must refuse to run.
+    exit, so screening must refuse to run.  A remote server named by
+    ``OPENCODE_BASE_URL`` needs no local CLI, so the check is skipped.
 
     Raises:
         ScreeningError: If opencode is missing, unparseable, or older
             than version 2.
     """
+    if os.environ.get("OPENCODE_BASE_URL"):
+        return
     version = _opencode_major_version()
     if version is None:
         raise ScreeningError(
@@ -998,8 +1002,6 @@ def _screen_targets(
     Raises:
         ScreeningError: If the opencode server cannot be started.
     """
-    import os
-
     from opencode import Opencode, OpencodeServer, ServerStartError
     from opencode.types import ModelRef
 

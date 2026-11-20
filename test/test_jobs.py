@@ -8,6 +8,7 @@ handlers are exercised in ``test_db_pipeline.py``.
 """
 
 import asyncio
+import logging
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -314,6 +315,46 @@ def test_worker_runs_job_to_success(tmp_path: Path) -> None:
     asyncio.run(main())
 
 
+def test_worker_captures_log_events(tmp_path: Path) -> None:
+    """A handler's ``ccat.*`` log record becomes a ``kind="log"`` event."""
+
+    async def main() -> None:
+        cfg = _prepare(tmp_path)
+        factory = _factory(cfg)
+        emit = logging.getLogger("ccat.test_job_logs")
+
+        async def handler(ctx: Any) -> dict[str, Any]:
+            emit.info("matched %d children", 3)
+            return {"worked": True}
+
+        worker = Worker(
+            cfg, session_factory=factory, handlers={"match": handler}
+        )
+        task = asyncio.create_task(worker.run())
+        job = await enqueue_job(factory, cfg, "match", {}, "a")
+        for _ in range(500):
+            state = await get_job(factory, job["id"])
+            if state["status"] == "succeeded":
+                break
+            await asyncio.sleep(0.01)
+        worker.stop.set()
+        await task
+        assert state["status"] == "succeeded"
+        events = await _drain_events(factory)
+        job_events = [e for e in events if e["job_id"] == job["id"]]
+        logs = [e for e in job_events if e["kind"] == "log"]
+        assert len(logs) == 1
+        assert logs[0]["data"]["level"] == "INFO"
+        assert logs[0]["data"]["logger"] == "ccat.test_job_logs"
+        assert logs[0]["data"]["message"] == "matched 3 children"
+        assert logs[0]["data"]["ts"]
+        # the log row lands before the terminal event
+        assert job_events[-1]["kind"] == "succeeded"
+        await _dispose(factory)
+
+    asyncio.run(main())
+
+
 def test_progress_events_written_and_throttled(tmp_path: Path) -> None:
     """progress() persists jobs.progress plus throttled event rows."""
 
@@ -360,7 +401,7 @@ def test_progress_events_written_and_throttled(tmp_path: Path) -> None:
 
 
 def test_progress_throttle_skips_rapid_updates(tmp_path: Path) -> None:
-    """With a large throttle window only the first update persists."""
+    """A large throttle window skips the intermediate update only."""
 
     async def main() -> None:
         cfg = _prepare(tmp_path, progress_throttle_seconds=60.0)
@@ -384,14 +425,61 @@ def test_progress_throttle_skips_rapid_updates(tmp_path: Path) -> None:
         await asyncio.sleep(0.05)
         worker.stop.set()
         await task
-        assert state["progress"]["phase"] == "one"
+        # The throttled update is skipped, but the newest snapshot is
+        # flushed when the job ends.
+        assert state["progress"]["phase"] == "two"
         events = await _drain_events(factory)
         progress_events = [
             event
             for event in events
             if event["job_id"] == job["id"] and event["kind"] == "progress"
         ]
-        assert len(progress_events) == 1
+        assert [event["data"]["phase"] for event in progress_events] == [
+            "one",
+            "two",
+        ]
+        await _dispose(factory)
+
+    asyncio.run(main())
+
+
+def test_final_progress_is_flushed_after_throttled_updates(
+    tmp_path: Path,
+) -> None:
+    """Rapid per-table updates end up persisted as the last one (3/3).
+
+    Mirrors ``db_pipeline.acquire``: a slow pull, then one update per
+    table.  The throttle drops those rapid updates, so the job would
+    otherwise keep a stale ``1/3`` snapshot.
+    """
+
+    async def main() -> None:
+        cfg = _prepare(tmp_path, progress_throttle_seconds=1.0)
+        factory = _factory(cfg)
+
+        async def handler(ctx: Any) -> dict[str, Any]:
+            ctx.progress("pull", 0, 0, 3)
+            await asyncio.sleep(1.2)
+            for completed in (1, 2, 3):
+                ctx.progress("pull", completed, 0, 3)
+            return {}
+
+        worker = Worker(
+            cfg, session_factory=factory, handlers={"acquire": handler}
+        )
+        task = asyncio.create_task(worker.run())
+        job = await enqueue_job(factory, cfg, "acquire", {}, "a")
+        for _ in range(500):
+            state = await get_job(factory, job["id"])
+            if state["status"] == "succeeded":
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        worker.stop.set()
+        await task
+        assert state["status"] == "succeeded"
+        assert state["progress"]["completed"] == 3
+        assert state["progress"]["total"] == 3
         await _dispose(factory)
 
     asyncio.run(main())

@@ -3,8 +3,10 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, RouterView, useRouter } from 'vue-router'
 
 import { useSessionStore } from './stores/session'
+import { useOverviewStore } from './stores/overview'
 
 const session = useSessionStore()
+const overview = useOverviewStore()
 const router = useRouter()
 const online = ref(typeof navigator === 'undefined' ? true : navigator.onLine)
 
@@ -18,8 +20,15 @@ const nav = [
   { to: '/stats', label: 'Stats' },
   { to: '/clarify', label: 'Clarify' },
   { to: '/jobs', label: 'Jobs' },
-  { to: '/admin', label: 'Admin' },
-]
+  { to: '/admin', label: 'Admin', admin: true },
+  { to: '/admin/database', label: 'Database', admin: true },
+  { to: '/settings', label: 'Settings', admin: true },
+] as const
+
+/** Admin-only entries stay hidden for every other role (§7.1.11). */
+const visibleNav = computed(() =>
+  nav.filter((item) => !('admin' in item) || session.hasRole('admin')),
+)
 
 const seasonName = computed(() => session.season?.name ?? '—')
 
@@ -33,6 +42,7 @@ function onOffline() {
 
 async function logout() {
   await session.logout()
+  overview.clear()
   await router.push('/login')
 }
 
@@ -63,7 +73,7 @@ onUnmounted(() => {
     </header>
 
     <nav v-if="session.authenticated" class="app-nav" aria-label="Sections">
-      <RouterLink v-for="item in nav" :key="item.to" :to="item.to">
+      <RouterLink v-for="item in visibleNav" :key="item.to" :to="item.to">
         {{ item.label }}
       </RouterLink>
     </nav>

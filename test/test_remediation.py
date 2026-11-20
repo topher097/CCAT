@@ -415,31 +415,6 @@ def test_consolidation_metrics_use_real_raw_identity() -> None:
     assert metrics["keys"] == ["1", "2"]
 
 
-def test_audit_ui_smoke_is_collected() -> None:
-    """The real NiceGUI smoke script boots and requests every page."""
-    import os
-    import subprocess
-    import sys
-
-    root = Path(__file__).resolve().parents[1]
-    env = os.environ.copy()
-    # NiceGUI's pytest integration would otherwise turn `ui.run` into its
-    # screen-test mode; this is a real local browserless HTTP smoke run.
-    env.pop("PYTEST_CURRENT_TEST", None)
-    env.pop("NICEGUI_SCREEN_TEST_PORT", None)
-    result = subprocess.run(
-        [sys.executable, str(root / "scripts" / "audit_ui_smoke.py")],
-        cwd=root,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-        env=env,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "SMOKE PASS: all pages render" in result.stdout
-
-
 def test_converted_copy_rehearsal_and_rollback(
     cfg: Config, tmp_path: Path
 ) -> None:

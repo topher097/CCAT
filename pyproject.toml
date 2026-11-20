@@ -25,7 +25,6 @@ dependencies = [
     "pypdf>=5.0.0",
     "jinja2>=3.1.0",
     "xhtml2pdf>=0.2.16",
-    "nicegui>=4.0.0",
     "dnspython>=2.9.2",
     "email-validator>=2.4.0",
     "zerobouncesdk>=3.2.0",
@@ -53,12 +52,12 @@ include = ["src", "scripts", "test"]
 # ty resolves first-party only from src/, so these cannot be resolved.
 [[tool.ty.overrides]]
 include = [
-    "scripts/audit_ui_smoke.py",
     "test/test_api.py",
     "test/test_audit_migrate.py",
-    "test/test_audit_server.py",
+    "test/test_config_api.py",
     "test/test_consolidate.py",
     "test/test_db_clarify.py",
+    "test/test_db_console.py",
     "test/test_db_generate.py",
     "test/test_db_import.py",
     "test/test_db_pipeline.py",
@@ -68,9 +67,14 @@ include = [
     "test/test_remediation.py",
     "test/test_services.py",
 ]
-rules = { unresolved-import = "ignore" }
+rules = { import-not-found = "ignore" }
 
 [tool.pytest.ini_options]
+# Every pytest run is parallel: pytest-xdist spreads tests over worker
+# processes (`-n auto` = one worker per available CPU).  Kept in addopts so
+# plain `pytest`, `just test`, pre-commit and agents all get it for free.
+# Override the worker count on the command line, e.g. `pytest -n 4`.
+addopts = "-n auto"
 # API tests are async (pytest-asyncio auto-detects tests + async
 # fixtures).  Every other suite is synchronous (asyncio.run inside the
 # test body) and unaffected.
@@ -82,4 +86,5 @@ dev = [
     "httpx>=0.28.1",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.5.0",
+    "pytest-xdist>=3.6",
 ]

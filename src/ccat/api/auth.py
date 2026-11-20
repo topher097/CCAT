@@ -7,6 +7,12 @@ by the sha256 of a random URL-safe token, so a DB leak reveals no
 usable tokens.  Cookies are HttpOnly/SameSite=Strict; ``Secure`` is
 set whenever the auth mode is not ``dev`` (dev runs over plain http).
 
+In ``dev`` auth mode the API needs no login at all: a request without a
+usable session is authenticated as the auto-login identity
+(:data:`DEV_AUTO_LOGIN_USERNAME`, admin) so local development never
+stops at a login screen.  Every other auth mode answers 401 for an
+unauthenticated request.
+
 Security-audit events (``security_audit_events``) record login, logout,
 login-failed, and user changes — usernames and action names only, never
 tokens or payloads (plan §8).
@@ -35,6 +41,12 @@ SESSION_COOKIE = "ccat_session"
 
 #: Header carrying the per-session CSRF token for mutating requests.
 CSRF_HEADER = "x-ccat-csrf"
+
+#: Dev-mode identity the API authenticates as when a request carries no
+#: usable session (§8).  It must be an active account the seeder
+#: creates (:mod:`ccat.db.seed`); the auto-login owns no session, so it
+#: has no CSRF token either.
+DEV_AUTO_LOGIN_USERNAME = "cmendres"
 
 #: The four staff roles (decision D1).
 ROLES = ("read_only", "auditor", "coordinator", "admin")
@@ -180,15 +192,16 @@ class AuthUser:
         username: Username.
         display_name: Display name (may be None).
         roles: Granted roles.
-        session_id: Session row id (the token hash).
-        csrf_token: The session's CSRF token.
+        session_id: Session row id (the token hash); ``None`` for the
+            dev auto-login identity, which owns no session.
+        csrf_token: The session's CSRF token (empty without a session).
     """
 
     id: int
     username: str
     display_name: str | None
     roles: list[str]
-    session_id: str
+    session_id: str | None
     csrf_token: str
 
 
@@ -327,7 +340,12 @@ async def record_event(
 
 
 async def current_user(request: Request) -> AuthUser:
-    """Resolve the session cookie to an authenticated user (§8).
+    """Resolve the request to an authenticated identity (§8).
+
+    A usable session cookie always wins.  In ``dev`` auth mode a request
+    without one falls back to the auto-login identity, so local
+    development needs no login at all; every other auth mode answers
+    401 for an unauthenticated request.
 
     Args:
         request: The current request.
@@ -336,21 +354,43 @@ async def current_user(request: Request) -> AuthUser:
         The authenticated identity.
 
     Raises:
-        ApiError: 401 when the cookie is missing/expired/revoked or
-            the user is inactive.
+        ApiError: 401 when the cookie is missing/expired/revoked, the
+            user is inactive, and the auth mode is not ``dev``.
     """
+    cfg: Config = request.app.state.cfg
     token = request.cookies.get(SESSION_COOKIE)
-    if not token:
-        raise ApiError(401, "unauthenticated", "authentication required")
+    if token:
+        identity = await _session_identity(request, token)
+        if identity is not None:
+            request.state.auth_user = identity
+            return identity
+    if cfg.api.auth_mode == "dev":
+        identity = await _dev_identity(request)
+        request.state.auth_user = identity
+        return identity
+    raise ApiError(401, "unauthenticated", "authentication required")
+
+
+async def _session_identity(request: Request, token: str) -> AuthUser | None:
+    """Resolve one session token to an identity, or None when unusable.
+
+    Args:
+        request: The current request.
+        token: The raw token from the cookie.
+
+    Returns:
+        The identity, or ``None`` when the session is missing, expired,
+        revoked, or its user is inactive.
+    """
     uow: UnitOfWork = request.app.state.uow
     async with uow.session_factory() as session:
         row = await session.get(Session, hash_token(token))
         if row is None or row.revoked_at is not None or _expired(row):
-            raise ApiError(401, "unauthenticated", "authentication required")
+            return None
         user = await session.get(User, row.user_id)
         if user is None or not user.active:
-            raise ApiError(401, "unauthenticated", "authentication required")
-        identity = AuthUser(
+            return None
+        return AuthUser(
             id=user.id,
             username=user.username,
             display_name=user.display_name,
@@ -358,8 +398,40 @@ async def current_user(request: Request) -> AuthUser:
             session_id=row.id,
             csrf_token=row.csrf_token,
         )
-    request.state.auth_user = identity
-    return identity
+
+
+async def _dev_identity(request: Request) -> AuthUser:
+    """Return the dev auto-login identity (no session, no CSRF token).
+
+    Args:
+        request: The current request.
+
+    Returns:
+        The auto-login identity, with the roles the seeded account holds.
+
+    Raises:
+        ApiError: 500 when the auto-login account is missing or inactive
+            (the seeder creates it on API startup).
+    """
+    uow: UnitOfWork = request.app.state.uow
+    async with uow.session_factory() as session:
+        row = await session.scalar(
+            select(User).where(User.username == DEV_AUTO_LOGIN_USERNAME)
+        )
+    if row is None or not row.active:
+        raise ApiError(
+            500,
+            "internal_error",
+            f"dev login user {DEV_AUTO_LOGIN_USERNAME!r} is missing",
+        )
+    return AuthUser(
+        id=row.id,
+        username=row.username,
+        display_name=row.display_name,
+        roles=list(row.roles or []),
+        session_id=None,
+        csrf_token="",
+    )
 
 
 def require_roles(*roles: str) -> Any:
@@ -397,7 +469,9 @@ async def require_csrf(
     """Require the CSRF header to match the session token (§8).
 
     Applies to mutating requests only; the dependency is a no-op for
-    safe methods so GET-only usage never needs the header.
+    safe methods so GET-only usage never needs the header.  The dev
+    auto-login identity owns no session, so it has no CSRF token to
+    match and the guard does not apply to it.
 
     Args:
         request: The current request.
@@ -407,6 +481,8 @@ async def require_csrf(
         ApiError: 403 on a missing/mismatched header.
     """
     if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+    if user.session_id is None:
         return
     header = request.headers.get(CSRF_HEADER)
     if not header or not secrets.compare_digest(header, user.csrf_token):

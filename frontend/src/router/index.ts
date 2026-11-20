@@ -15,12 +15,29 @@ import AuditListView from '../views/AuditListView.vue'
 import FamilyDetailView from '../views/FamilyDetailView.vue'
 import SponsorDetailView from '../views/SponsorDetailView.vue'
 import ChildDetailView from '../views/ChildDetailView.vue'
-import StubView from '../views/StubView.vue'
+
+import PipelineCommandView from '../views/PipelineCommandView.vue'
+import MatchView from '../views/MatchView.vue'
+import GenerateView from '../views/GenerateView.vue'
+import StatsView from '../views/StatsView.vue'
+import ClarifyListView from '../views/ClarifyListView.vue'
+import ClarifyDetailView from '../views/ClarifyDetailView.vue'
+import JobsListView from '../views/JobsListView.vue'
+import JobDetailView from '../views/JobDetailView.vue'
+import AdminView from '../views/AdminView.vue'
+import DatabaseView from '../views/DatabaseView.vue'
+import SettingsLayout from '../views/settings/SettingsLayout.vue'
+import SettingsIndexView from '../views/settings/SettingsIndexView.vue'
+import SettingsSectionView from '../views/settings/SettingsSectionView.vue'
+import { useSettingsStore } from '../stores/settings'
+import { sectionBySlug } from '../settings/sections'
 
 declare module 'vue-router' {
   interface RouteMeta {
     /** Reachable without a session. */
     public?: boolean
+    /** Admin-only route (nav hidden and guard enforced). */
+    admin?: boolean
     title?: string
   }
 }
@@ -36,13 +53,15 @@ export const routes: RouteRecordRaw[] = [
   {
     path: '/acquire',
     name: 'acquire',
-    component: StubView,
+    component: PipelineCommandView,
+    props: { command: 'acquire' },
     meta: { title: 'Acquire' },
   },
   {
     path: '/screen',
     name: 'screen',
-    component: StubView,
+    component: PipelineCommandView,
+    props: { command: 'screen' },
     meta: { title: 'Screen' },
   },
   {
@@ -97,42 +116,78 @@ export const routes: RouteRecordRaw[] = [
     component: ChildDetailView,
     meta: { title: 'Child' },
   },
-  // Phase 4b command areas: entries exist; pages are stubs by design.
   {
     path: '/match',
     name: 'match',
-    component: StubView,
+    component: MatchView,
     meta: { title: 'Match' },
   },
   {
     path: '/generate',
     name: 'generate',
-    component: StubView,
+    component: GenerateView,
     meta: { title: 'Generate' },
   },
   {
     path: '/stats',
     name: 'stats',
-    component: StubView,
+    component: StatsView,
     meta: { title: 'Stats' },
   },
   {
     path: '/clarify',
     name: 'clarify',
-    component: StubView,
+    component: ClarifyListView,
     meta: { title: 'Clarify' },
+  },
+  {
+    path: '/clarify/:familyId',
+    name: 'clarify-family',
+    component: ClarifyDetailView,
+    meta: { title: 'Clarification family' },
   },
   {
     path: '/jobs',
     name: 'jobs',
-    component: StubView,
+    component: JobsListView,
     meta: { title: 'Jobs' },
+  },
+  {
+    path: '/jobs/:id',
+    name: 'job',
+    component: JobDetailView,
+    meta: { title: 'Job' },
   },
   {
     path: '/admin',
     name: 'admin',
-    component: StubView,
-    meta: { title: 'Admin' },
+    component: AdminView,
+    meta: { title: 'Admin', admin: true },
+  },
+  {
+    path: '/admin/database',
+    name: 'admin-database',
+    component: DatabaseView,
+    meta: { title: 'Database', admin: true },
+  },
+  {
+    path: '/settings',
+    component: SettingsLayout,
+    meta: { title: 'Settings', admin: true },
+    children: [
+      {
+        path: '',
+        name: 'settings',
+        component: SettingsIndexView,
+        meta: { title: 'Settings', admin: true },
+      },
+      {
+        path: ':section',
+        name: 'settings-section',
+        component: SettingsSectionView,
+        meta: { title: 'Settings', admin: true },
+      },
+    ],
   },
 ]
 
@@ -142,8 +197,9 @@ export function createAppRouter() {
     routes,
   })
 
-  router.beforeEach(async (to) => {
+  router.beforeEach(async (to, from) => {
     const session = useSessionStore()
+    const settings = useSettingsStore()
 
     if (to.meta.public) {
       if (!session.authenticated) await session.restore()
@@ -154,17 +210,37 @@ export function createAppRouter() {
       return { path: '/login', query: { redirect: to.fullPath } }
     }
 
-    if (formDirty.value) {
+    if (to.meta.admin && !session.hasRole('admin')) return { path: '/' }
+
+    // Moving between settings sections keeps the same draft, so only
+    // leaving the settings pages can lose the edits.
+    const staysInSettings =
+      to.path.startsWith('/settings') && from.path.startsWith('/settings')
+
+    if ((formDirty.value || settings.dirty) && !staysInSettings) {
       // Browser confirm is the last-resort guard; editors also expose
       // explicit reload/rebase actions for version conflicts.
       if (!window.confirm('Discard unsaved changes?')) return false
       setDirty(false)
     }
+
+    if (
+      from.path.startsWith('/settings') &&
+      !to.path.startsWith('/settings')
+    ) {
+      // The prompt above promises the edits are dropped; drop them.
+      settings.discard()
+    }
+
     return true
   })
 
   router.afterEach((to) => {
-    document.title = to.meta.title ? `${to.meta.title} · CCAT` : 'CCAT'
+    const title =
+      to.name === 'settings-section'
+        ? sectionBySlug(String(to.params.section))?.title
+        : to.meta.title
+    document.title = title ? `${title} · CCAT` : 'CCAT'
   })
 
   return router

@@ -274,6 +274,80 @@ describe('entity editor', () => {
     expect(wrapper.get('[data-testid="orphan-warning"]').text()).toContain(
       'Audited status stays disabled',
     )
+    expect(
+      (wrapper.get('[data-testid="mark-audited"]').element as HTMLButtonElement)
+        .disabled,
+    ).toBe(true)
+  })
+
+  it('marks the row audited together with the pending edits', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (!url.includes('/children/c1')) return undefined
+        if (init.method === 'PATCH') {
+          return jsonResponse(
+            200,
+            childDetail({
+              row: { ...CHILD_ROW, first_name: 'Anna', status: 'audited' },
+              status: 'audited',
+              row_version: 4,
+            }),
+          )
+        }
+        return jsonResponse(200, childDetail())
+      },
+    ])
+    const wrapper = mountEditor('child')
+    await flushPromises()
+
+    await wrapper.get('input[name="first_name"]').setValue('Anna')
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+
+    const call = patchCall(fetchMock)
+    expect(bodyOf(call!)).toEqual({ first_name: 'Anna', status: 'audited' })
+    expect(headersOf(call!)['If-Match']).toBe('3')
+    expect(wrapper.get('[data-testid="mark-audited"]').text()).toContain(
+      'Undo audit',
+    )
+    expect(wrapper.get('[data-testid="save-notice"]').text()).toContain(
+      'Marked audited',
+    )
+  })
+
+  it('undoes an audit', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (!url.includes('/children/c1')) return undefined
+        if (init.method === 'PATCH') {
+          return jsonResponse(
+            200,
+            childDetail({
+              row: { ...CHILD_ROW, status: 'new' },
+              status: 'new',
+              row_version: 4,
+            }),
+          )
+        }
+        return jsonResponse(
+          200,
+          childDetail({
+            row: { ...CHILD_ROW, status: 'audited' },
+            status: 'audited',
+          }),
+        )
+      },
+    ])
+    const wrapper = mountEditor('child')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+
+    expect(bodyOf(patchCall(fetchMock)!)).toEqual({ status: 'new' })
+    expect(wrapper.get('[data-testid="mark-audited"]').text()).toContain(
+      'Mark audited',
+    )
   })
 
   it('lists duplicate submissions', async () => {
@@ -335,6 +409,26 @@ function sponsorDetail(overrides: Record<string, unknown> = {}) {
 }
 
 describe('ignore / unignore', () => {
+  it('shows the email and address validation status', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/sponsors/10')
+          ? jsonResponse(
+              200,
+              sponsorDetail({
+                diagnostics: { email_status: 'valid', address_status: null },
+              }),
+            )
+          : undefined,
+    ])
+    const wrapper = mountEditor('sponsor', '10')
+    await flushPromises()
+
+    const panel = wrapper.get('[data-testid="validation-status"]')
+    expect(panel.text()).toContain('email: valid')
+    expect(panel.text()).not.toContain('address:')
+  })
+
   it('requires an explicit destructive confirmation and sends expected_version', async () => {
     const fetchMock = mockRoutes([
       (url, init) => {

@@ -8,6 +8,8 @@ keys, or invalid vocabulary references (see pipeline_architecture.md §3).
 
 import json
 import logging
+import tempfile
+from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -16,6 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import (
     BaseModel,
     ConfigDict,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -43,7 +46,25 @@ TABLE_NAMES = ("sponsor", "family", "child")
 
 
 class ConfigError(Exception):
-    """Raised when the configuration file is missing or invalid."""
+    """Raised when the configuration file is missing or invalid.
+
+    Attributes:
+        errors: Structured contract violations (``path``/``message``
+            pairs) when the failure came from the configuration
+            contract; empty for file-level problems.
+    """
+
+    def __init__(
+        self, message: str, errors: list[dict[str, str]] | None = None
+    ) -> None:
+        """Initialize the error.
+
+        Args:
+            message: Human-readable failure description.
+            errors: Structured contract violations, when known.
+        """
+        super().__init__(message)
+        self.errors = errors or []
 
 
 class ColumnSpec(BaseModel):
@@ -124,21 +145,10 @@ class AIScreeningSpec(BaseModel):
         return value
 
 
-class AuditSpec(BaseModel):
-    """Local audit server settings (module 3)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    host: str = "127.0.0.1"
-    port: int = 8642
-
-
 class ClarifySpec(BaseModel):
     """Clarification email tool settings (module 7).
 
     Attributes:
-        host: Bind address of the local NiceGUI web app.
-        port: Bind port of the local NiceGUI web app.
         model: Model reference (``provider/model``) writing the email
             prose, via the opencode SDK (same pattern as module 2).
         system_prompt: Instructions for the email-writing model; the
@@ -147,31 +157,20 @@ class ClarifySpec(BaseModel):
             model's prose fragments in paste-safe inline-CSS markup.
         output_dir: Directory receiving one ``family_<id>.html`` draft
             and its ``family_<id>.json`` companion (the editable
-            subject/fragment data) per generated email (in addition
-            to the copy shown in the web app).
+            subject/fragment data) per generated email.
         clarifications_csv: CSV path refreshed from the workbook on
-            every ``ccat clarify`` / ``ccat clarify-export`` run; it
-            carries a ``clarification_email_file`` column referencing
-            each family's saved draft when one exists.
+            every ``ccat clarify-export`` run; it carries a
+            ``clarification_email_file`` column referencing each
+            family's saved draft when one exists.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    host: str = "127.0.0.1"
-    port: int = 8643
     model: str
     system_prompt: str
     email_template_html_file: str = "data/clarification_email_2026.html"
     output_dir: str = "output/clarify_emails"
     clarifications_csv: str = "output/clarifications.csv"
-
-    @field_validator("port")
-    @classmethod
-    def _check_port(cls, value: int) -> int:
-        """Require a bindable TCP port."""
-        if not 1 <= value <= 65535:
-            raise ValueError("clarify.port must be between 1 and 65535")
-        return value
 
 
 class AcquireSpec(BaseModel):
@@ -456,9 +455,9 @@ class ApiSpec(BaseModel):
     Attributes:
         host: Bind address of the FastAPI server.
         port: Bind port of the FastAPI server.
-        auth_mode: ``dev`` enables the no-password bootstrap accounts
-            (loopback development only); ``oidc`` defers to the real
-            identity adapter.
+        auth_mode: ``dev`` enables the no-password bootstrap accounts and
+            the no-login auto identity (loopback development only);
+            ``oidc`` defers to the real identity adapter.
         session_secret_env: Environment variable holding the cookie
             session signing secret.
         session_ttl_hours: Server-side session lifetime in hours.
@@ -555,7 +554,6 @@ class Config(BaseModel):
     screening: ScreeningSpec = ScreeningSpec()
     email_check: EmailCheckSpec = EmailCheckSpec()
     address_check: AddressCheckSpec = AddressCheckSpec()
-    audit: AuditSpec
     clarify: ClarifySpec
     matchmaking: MatchmakingSpec
     info_sheet: InfoSheetSpec
@@ -630,6 +628,150 @@ class Config(BaseModel):
         return spec.values
 
 
+def load_config_data(path: str | Path) -> dict[str, Any]:
+    """Read the raw configuration mapping without validating it.
+
+    Args:
+        path: Path to the JSON configuration file.
+
+    Returns:
+        The parsed mapping.
+
+    Raises:
+        ConfigError: If the file is missing, unparseable, or does not
+            hold a JSON object.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise ConfigError(f"config file not found: {path}")
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise ConfigError(
+            f"config file is not valid JSON: {path}: {error}"
+        ) from error
+    if not isinstance(data, dict):
+        raise ConfigError(f"config file must hold a JSON object: {path}")
+    return data
+
+
+def _merge(model: Any, file: Any, dropped: list[str], path: str = "") -> Any:
+    """Overlay a file's values onto the model's default tree.
+
+    Args:
+        model: The model's default value for this node.
+        file: The file's value for this node.
+        dropped: Collects the dotted paths of file keys the model does
+            not know.
+        path: Dotted path of this node (for the dropped list).
+
+    Returns:
+        The merged value.
+    """
+    if not isinstance(model, dict):
+        return file
+    source = file if isinstance(file, dict) else {}
+    merged: dict[str, Any] = {}
+    for key, value in model.items():
+        child = f"{path}.{key}" if path else key
+        if key in source:
+            merged[key] = _merge(value, source[key], dropped, child)
+        elif isinstance(value, dict):
+            merged[key] = _merge(value, {}, dropped, child)
+        elif value is not None:
+            merged[key] = value
+    for key in source:
+        if key not in model:
+            dropped.append(f"{path}.{key}" if path else key)
+    return merged
+
+
+def effective_config(
+    path: str | Path, fallback: Config
+) -> tuple[dict[str, Any], list[str]]:
+    """Return the effective configuration tree of one configuration file.
+
+    The file's own values always win; settings the file does not
+    mention are filled in from the model, so every known setting is
+    visible and editable.  A file that no longer validates falls back
+    to the running configuration's defaults, which lets an admin repair
+    a broken file through the settings UI.
+
+    Args:
+        path: Path to the JSON configuration file.
+        fallback: The running configuration, used for the defaults when
+            the file itself does not validate.
+
+    Returns:
+        The merged tree and the dotted paths of the file keys the
+        contract does not know (they are not part of the merged tree).
+    """
+    data = load_config_data(path)
+    try:
+        cfg = Config(**data)
+    except ValidationError:
+        cfg = fallback
+    dropped: list[str] = []
+    merged = _merge(cfg.model_dump(mode="json"), data, dropped)
+    return merged, dropped
+
+
+def save_config(path: str | Path, data: Mapping[str, Any]) -> Config:
+    """Validate a configuration mapping and write it to disk.
+
+    The write is atomic (temp file in the same directory, then
+    rename), so an interrupted save never leaves a half-written
+    configuration behind.
+
+    Args:
+        path: Path to the JSON configuration file.
+        data: The complete configuration mapping.
+
+    Returns:
+        The validated configuration.
+
+    Raises:
+        ConfigError: When the data violates the configuration contract
+            or the file cannot be written.
+    """
+    try:
+        cfg = Config(**dict(data))
+    except ValidationError as error:
+        errors = [
+            {
+                "path": ".".join(str(part) for part in item["loc"]),
+                "message": item["msg"],
+            }
+            for item in error.errors()
+        ]
+        summary = "; ".join(
+            f"{item['path']}: {item['message']}" for item in errors
+        )
+        raise ConfigError(
+            f"invalid configuration: {summary}", errors
+        ) from error
+    target = Path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            temp = Path(handle.name)
+        temp.replace(target)
+    except OSError as error:
+        raise ConfigError(
+            f"config file is not writable: {target}: {error}"
+        ) from error
+    return cfg
+
+
 def load_config(path: str | Path) -> Config:
     """Load and validate the pipeline configuration.
 
@@ -644,14 +786,7 @@ def load_config(path: str | Path) -> Config:
             configuration contract.
     """
     path = Path(path)
-    if not path.is_file():
-        raise ConfigError(f"config file not found: {path}")
-    try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as error:
-        raise ConfigError(
-            f"config file is not valid JSON: {path}: {error}"
-        ) from error
+    data = load_config_data(path)
     try:
         return Config(**data)
     except ValueError as error:

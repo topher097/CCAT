@@ -58,16 +58,15 @@ ccat screen        [--config PATH] [--redo ID] [--test] [--overwrite]
                    # prepare raw in memory, append/merge full finals,
                    # refresh duplicate/DOB diagnostics and validation logs,
                    # then screen only children with screened=false
-ccat audit         [--config PATH] [--test] [--restart]
-                   # legacy NiceGUI editor (workbook mode only)
 ccat match         [--config PATH] [--test] [--overwrite] [--skip-match]
                    # patch assignment fields; archive/report as configured
 ccat generate      [--config PATH] [--test] [--overwrite]
                    [--sponsor ID] [--max-workers N]
                    # child information PDFs, generation markers, packets
 ccat stats         [--config PATH] [--raw]
-ccat clarify       [--config PATH] [--generate] [--overwrite]
 ccat clarify-export [--config PATH] [--output PATH]
+                   # refresh the clarifications CSV; generation and editing
+                   # run through the web application
 
 ccat db-import     --from WORKBOOK [--db URL] [--force] [--backup PATH]
                    [--report PATH]     # workbook -> SQLite migration batch
@@ -93,15 +92,33 @@ responses remain stored.
 - `ccat serve` starts the FastAPI app (`/api/v1`, OpenAPI at
   `/api/v1/docs`); the Vue SPA is served from the same origin when
   `frontend/dist` exists.
+- The interactive audit lists/detail editors and the clarification
+  list/detail views live in the Vue SPA; there is no separate local editor.
 - `ccat worker` runs the durable job worker. Jobs are queued in the
   database, leased with heartbeats, cancelled cooperatively, and report
   typed, retryable errors.
-- Authentication is cookie-session based. In `auth_mode: dev` the two
-  bootstrap accounts (`cmendres`, `lmboswell`) sign in without a password —
-  development only. Roles: `read_only`, `auditor`, `coordinator`, `admin`.
+- Authentication is cookie-session based. In `auth_mode: dev` no login
+  is needed at all: every request is authenticated as `cmendres`
+  (admin), and the bootstrap accounts (`cmendres`, `lmboswell`) can still
+  sign in without a password — development only. Roles: `read_only`,
+  `auditor`, `coordinator`, `admin`.
 - Every entity edit is versioned: the client sends `If-Match`, and a stale
   write returns `412` with the current server row instead of overwriting
   another user's work.
+- The admin **Settings** tab edits the configuration JSON file in place.
+  The tree is read from the file, so every level of the file — and any
+  setting added later — appears as a nested level in the UI without a
+  frontend change. A save validates the tree against the configuration
+  contract (a rejected tree leaves the file untouched), rewrites the
+  file, and reloads the running configuration; the worker picks the same
+  file up between jobs.
+- The admin **Database** tab runs one SQL statement at a time against the
+  live database. Reads run inside a savepoint that is rolled back
+  afterwards, so a read cannot change the file; a statement that modifies
+  the database needs writes to be enabled explicitly. Results are capped
+  at 500 rows, one statement per request, and every statement is recorded
+  in the security audit log with its author. Schema changes belong in an
+  Alembic revision, not in the console.
 
 ## Migration
 

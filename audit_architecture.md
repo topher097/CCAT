@@ -1,19 +1,25 @@
 # CCAT Audit Architecture
 
-Authoritative guide to the NiceGUI human audit tool and its persistent-final
-data layer. This document reflects implementation; superseded dense-adj and
-projection descriptions are removed.
+> **Historical design record.** The NiceGUI audit application described below
+> was removed. The interactive audit editor now lives in the Vue SPA served by
+> `ccat serve` (FastAPI); the store/data rules in `src/ccat/audit/store.py`
+> survive unchanged.
 
-## 1. Runtime and Commands
+Historical description of the removed NiceGUI human audit tool and its
+persistent-final data layer. This document reflects the implementation as of
+its removal; superseded dense-adj and projection descriptions are removed.
 
-- CLI: `ccat audit [--config PATH] [--test] [--restart]`.
-- `server.run` optionally discovers/stops stale audit processes (`--restart`),
-  calls `store.ensure_final_sheets`, installs global `AuditState`, and starts
-  NiceGUI at `audit.host:audit.port`.
-- `--test` limits displayed lists to the first stable family/sponsor and its
-  children after normal startup reconciliation. It does not reduce writes.
-- `scripts/audit_ui_smoke.py` boots a throwaway redirected workbook and
-  requests every page.
+## 1. Runtime and Commands (historical)
+
+- CLI (removed): `ccat audit [--config PATH] [--test] [--restart]`.
+- `server.run` (removed) optionally discovered/stopped stale audit processes
+  (`--restart`), called `store.ensure_final_sheets`, installed global
+  `AuditState`, and started NiceGUI at `audit.host:audit.port` (that config
+  block is also removed).
+- `--test` limited displayed lists to the first stable family/sponsor and its
+  children after normal startup reconciliation. It did not reduce writes.
+- `scripts/audit_ui_smoke.py` (removed) booted a throwaway redirected workbook
+  and requested every page.
 - One controlling process owns workbook writes. Close Excel/LibreOffice and
   other CLI processes before audit runs.
 
@@ -210,10 +216,72 @@ Relevant suites include:
 - `test_audit_store.py`: schemas/keys, status, groups/baselines, startup
   append behavior, raw-missing retention, saves, ignore/unignore, module
   ownership, output filters, formulas.
-- `test_audit_server.py`: restart discovery, startup wiring, unavailable raw
-  guidance, no projection behavior.
+- `test_audit_server.py` (removed with the server): restart discovery, startup
+  wiring, unavailable raw guidance, no projection behavior.
 - `test_audit_migrate.py`: direct persistent bootstrap and immutability.
 - `test_persistent_integration.py`: end-to-end append/merge, resume,
   interruption, human/module state, and golden populations.
-- `scripts/audit_ui_smoke.py`: every NiceGUI page renders against a
+- `scripts/audit_ui_smoke.py` (removed): rendered every NiceGUI page against a
   disposable workbook.
+
+## 10. Current implementation (2026-11 refactor)
+
+The human audit surface is now the FastAPI + Vue application (`ccat serve`),
+not the removed NiceGUI tool. The sections above still describe the
+adjudication rules; this section describes how they are exposed.
+
+### 10.1 Runtime
+
+- `ccat serve` starts the FastAPI app under `/api/v1`; the Vue SPA is
+  served from the same origin. `ccat worker` runs the durable job loop.
+- The legacy `ccat audit` NiceGUI path was removed; the Vue SPA is the only
+  editor and the API/worker are DB-only (one active store).
+- Authentication is a server-side cookie session (hashed token, HttpOnly,
+  SameSite=Strict, CSRF header on mutations). Roles: `read_only`,
+  `auditor` (edit/audit), `coordinator` (pipeline), `admin` (users/config).
+  The two bootstrap accounts (`cmendres`, `lmboswell`) are development-only
+  passwordless identities; dev mode also auto-authenticates every request
+  as `cmendres` (admin) so no login is needed locally.
+
+### 10.2 Save semantics
+
+- `PATCH /api/v1/seasons/{season}/{entity}/{key}` takes only the fields the
+  user touched. Omitted means unchanged, explicit null clears, a value
+  sets. The server derives the final status; a client cannot post an
+  arbitrary status string.
+- Every write carries `If-Match: <row_version>`. A stale version returns
+  `412` with the current server row, its version, and the winner's
+  `last_updated_by`/`last_updated_at` so the client can review or rebase.
+  Nothing is overwritten silently.
+- Ignore and unignore are separate, confirmed actions. Ignore keeps the
+  identity skeleton and module-owned markers; unignore re-seeds the data
+  columns from the raw baseline (existing edits to those rows are lost —
+  the same destructive rule the removed NiceGUI tool applied).
+- `audited_at` is stamped on every save, exactly as before. The human
+  audit authority remains `status == "audited"`; there is no replacement
+  Boolean and no reuse of the audit timestamp as a generic "last touched"
+  marker. `last_updated_by`/`last_updated_at` are the attribution fields.
+- Linkage, assignment, screening and generation columns are not writable
+  through the audit API; the repository enforces per-module column
+  ownership.
+
+### 10.3 Baselines, status and lists
+
+- Baselines are unchanged: family baseline is the survivor/first submission,
+  child baseline is the latest-non-null duplicate-group combination with a
+  prepared-row fallback, and a raw-missing row supplies its own stored
+  values.
+- Status precedence is `ignored`, then `audited`, then
+  `needs_clarification` (nonblank note), then `in_progress` (editable
+  baseline difference), then `new`. Linkage, computed, assignment and
+  process fields never make a row "in progress"; child `special_needs` is a
+  control, not an editable comparison field.
+- Audit lists intentionally include ignored, orphaned and raw-missing rows.
+  Counts, filters and the home overview are computed server-side.
+
+### 10.4 Tests
+
+`test/test_audit_store.py` still characterizes the workbook-backed domain
+rules, `test/test_services.py` the tri-state save service, and
+`test/test_api.py` the HTTP contract (role matrix, tri-state PATCH, the
+A/B stale-version scenario, ignore/unignore, IDOR and error mapping).

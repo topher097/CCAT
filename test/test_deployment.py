@@ -17,7 +17,7 @@ DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 COMPOSE = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 CADDY = (ROOT / "Caddyfile").read_text(encoding="utf-8")
 CADDY_DEV = (ROOT / "Caddyfile.dev").read_text(encoding="utf-8")
-ENV_EXAMPLE = (ROOT / ".env.example").read_text(encoding="utf-8")
+ENVRC = (ROOT / ".envrc").read_text(encoding="utf-8")
 DOCKERIGNORE = (ROOT / ".dockerignore").read_text(encoding="utf-8")
 ENTRYPOINT = (ROOT / "scripts" / "docker_entrypoint.sh").read_text(
     encoding="utf-8"
@@ -79,8 +79,8 @@ def test_dockerfile_keeps_healthcheck_out_of_the_image() -> None:
 
 def test_compose_services_profiles_and_commands() -> None:
     """Both profiles resolve to the documented service set."""
-    prod = {"api", "worker", "db-upgrade", "caddy"}
-    dev = {"api-dev", "worker", "db-upgrade", "web", "caddy-dev"}
+    prod = {"api", "worker", "db-upgrade", "caddy", "opencode"}
+    dev = {"api-dev", "worker", "db-upgrade", "web", "caddy-dev", "opencode"}
     for name in prod:
         assert '"prod"' in _service_block(name), name
     for name in dev:
@@ -115,6 +115,7 @@ def test_compose_volumes_ports_and_logging() -> None:
         "ccat-logs:",
         "caddy-data:",
         "caddy-config:",
+        "opencode-data:",
     ):
         assert re.search(rf"^  {re.escape(volume)}$", COMPOSE, re.MULTILINE)
     caddy = _service_block("caddy")
@@ -123,8 +124,26 @@ def test_compose_volumes_ports_and_logging() -> None:
     assert "./frontend/dist:/srv/frontend:ro" in caddy
     assert "max-size" in COMPOSE and "max-file" in COMPOSE
     # Only Caddy binds host ports.
-    for name in ("api", "worker", "db-upgrade", "web", "api-dev"):
+    for name in ("api", "worker", "db-upgrade", "web", "api-dev", "opencode"):
         assert "ports:" not in _service_block(name), name
+
+
+def test_compose_opencode_server_backs_ai_screening() -> None:
+    """The opencode service is built from upstream and wired to the app."""
+    block = _service_block("opencode")
+    assert "github.com/roborew/opencode-server" in block
+    assert "opencode-data:/var/lib/opencode-data" in block
+    # Host credentials are copied into the container before it drops root.
+    assert "/run/opencode-auth.json" in block
+    assert "install -m 600" in block
+    # The app and the server share one URL and one basic-auth password.
+    assert "OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-http://opencode:4097}" in (
+        COMPOSE
+    )
+    assert "OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-}" in COMPOSE
+    # The worker waits for the LLM server before it takes a screening job.
+    assert "opencode:" in _service_block("worker")
+    assert "condition: service_healthy" in _service_block("worker")
 
 
 def test_compose_has_no_hardcoded_secrets() -> None:
@@ -134,6 +153,7 @@ def test_compose_has_no_hardcoded_secrets() -> None:
         "ZEROBOUNCE_API_KEY",
         "CCAT_SESSION_SECRET",
         "OIDC_CLIENT_SECRET",
+        "OPENCODE_SERVER_PASSWORD",
     ):
         for match in re.finditer(rf"{variable}\s*:\s*(\S+)", COMPOSE):
             assert match.group(1).startswith("${"), (variable, match.group(0))
@@ -141,7 +161,9 @@ def test_compose_has_no_hardcoded_secrets() -> None:
         assert "ZITE_API_KEY" not in text
         assert "ZEROBOUNCE_API_KEY" not in text
         assert "CCAT_SESSION_SECRET" not in text
-    assert not re.search(r"password\s*[:=]\s*\S", COMPOSE, re.IGNORECASE)
+    # Interpolated values are not secrets; anything left over must be empty.
+    literal = re.sub(r"\$\{[^}]*\}", "", COMPOSE)
+    assert not re.search(r"password[ \t]*[:=][ \t]*\S", literal, re.IGNORECASE)
 
 
 def test_caddyfile_same_origin_spa_and_api_routes() -> None:
@@ -157,25 +179,29 @@ def test_caddyfile_same_origin_spa_and_api_routes() -> None:
     assert "reverse_proxy api-dev:8650" in CADDY_DEV
 
 
-def test_env_example_is_placeholders_only() -> None:
-    """No real credentials committed; keys documented."""
+def test_envrc_holds_public_settings_and_points_at_private_secrets() -> None:
+    """Direnv carries the deployment settings; secrets stay in .envrc.private."""
     for variable in (
         "CCAT_DOMAIN",
+        "CCAT_ACME_EMAIL",
+        "CCAT_IMAGE_TAG",
+        "OPENCODE_BASE_URL",
+        "OPENCODE_AUTH_FILE",
+        "OIDC_ISSUER",
+        "OIDC_CLIENT_ID",
+    ):
+        assert re.search(rf"^export {variable}=", ENVRC, re.MULTILINE), variable
+    assert "source_env .envrc.private" in ENVRC
+    # No secret value in the committed file: the secret names may be named in
+    # the pointer comment, but never assigned.
+    for secret in (
         "CCAT_SESSION_SECRET",
         "ZITE_API_KEY",
         "ZEROBOUNCE_API_KEY",
+        "OPENCODE_SERVER_PASSWORD",
+        "OIDC_CLIENT_SECRET",
     ):
-        assert re.search(rf"^{variable}=", ENV_EXAMPLE, re.MULTILINE), variable
-    values = [
-        line.split("=", 1)[1]
-        for line in ENV_EXAMPLE.splitlines()
-        if line and not line.startswith("#") and "=" in line
-    ]
-    for value in values:
-        assert value == "" or value.startswith(
-            ("replace-me", "localhost", "local")
-        ), value
-    assert "replace-me" in ENV_EXAMPLE
+        assert not re.search(rf"^export {secret}=", ENVRC, re.MULTILINE), secret
 
 
 def test_dockerignore_excludes_state_and_secrets() -> None:

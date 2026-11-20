@@ -13,8 +13,9 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -33,6 +34,12 @@ from ccat.api.routes import (
 )
 from ccat.api.routes import (
     clarify as clarify_routes,
+)
+from ccat.api.routes import (
+    config as config_routes,
+)
+from ccat.api.routes import (
+    dbconsole as dbconsole_routes,
 )
 from ccat.api.routes import (
     diagnostics as diagnostics_routes,
@@ -63,11 +70,14 @@ FRONTEND_DIST = ROOT / "frontend" / "dist"
 API_PREFIX = "/api/v1"
 
 
-def create_app(cfg: "Config") -> FastAPI:
+def create_app(cfg: "Config", config_path: str | Path | None = None) -> FastAPI:
     """Build the FastAPI application for one configuration.
 
     Args:
         cfg: The pipeline configuration (season, storage, api specs).
+        config_path: The configuration file the app was started with.
+            The admin settings UI reads and writes that file; without
+            it the configuration endpoints refuse to run.
 
     Returns:
         The configured app (docs at ``/api/v1/docs``); the shared
@@ -76,7 +86,7 @@ def create_app(cfg: "Config") -> FastAPI:
     from ccat.api.deps import get_cfg  # noqa: F401 - route dependency
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         """Seed bootstrap users; dispose the engine at shutdown.
 
         Seeding is idempotent and best-effort (an unmigrated database
@@ -112,6 +122,7 @@ def create_app(cfg: "Config") -> FastAPI:
         lifespan=lifespan,
     )
     app.state.cfg = cfg
+    app.state.config_path = str(config_path) if config_path else None
     # Created eagerly (lazy-connecting engine) so ASGI transports that
     # skip lifespan still have it; disposal happens on shutdown.
     app.state.uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
@@ -130,6 +141,8 @@ def create_app(cfg: "Config") -> FastAPI:
         (artifacts_routes.router, current_user),
         (clarify_routes.router, current_user),
         (audit_routes.router, current_user),
+        (config_routes.router, current_user),
+        (dbconsole_routes.router, current_user),
     ):
         # Router-level auth runs before route dependencies (season
         # resolution), so an anonymous request is always 401 (§8).
@@ -239,16 +252,18 @@ def _mount_frontend(app: FastAPI) -> None:
             )
 
 
-def serve(cfg: "Config") -> None:
+def serve(cfg: "Config", config_path: str | Path | None = None) -> None:
     """Run the API server with uvicorn (``ccat serve``).
 
     Args:
         cfg: Pipeline configuration (api.host/api.port).
+        config_path: The configuration file the server was started
+            with; the admin settings UI edits it.
     """
     import uvicorn
 
     uvicorn.run(
-        create_app(cfg),
+        create_app(cfg, config_path=config_path),
         host=cfg.api.host,
         port=cfg.api.port,
         reload=False,

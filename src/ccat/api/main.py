@@ -15,7 +15,7 @@ DEFAULT_CONFIG = os.environ.get("DEFAULT_CONFIG", "config/ccat_2026.json")
 #: The app's config path: ``CCAT_CONFIG`` wins over ``DEFAULT_CONFIG``.
 CONFIG_PATH = os.environ.get("CCAT_CONFIG", DEFAULT_CONFIG)
 
-app = create_app(load_config(CONFIG_PATH))
+app = create_app(load_config(CONFIG_PATH), config_path=CONFIG_PATH)
 
 
 def serve() -> None:

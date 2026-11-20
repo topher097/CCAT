@@ -9,6 +9,7 @@
     "ty@latest",
     "ruff@latest",
     "just@latest",
+    "github:NixOS/nixpkgs/ac588ef1c914865dad517b337ea0eb9694a4021c#nodejs_24",
     "bump-my-version@latest",
     "tabiew@latest",
     "frogmouth@latest",
@@ -16,13 +17,18 @@
     "ugrep@latest",
     "mdterm@latest"
   ],
+  "env": {
+    "PATH": "$PWD/frontend/node_modules/.bin:$PATH"
+  },
   "shell": {
     "init_hook": [
       "export LD_LIBRARY_PATH=`pwd`/.devbox/nix/profile/default/lib:$LD_LIBRARY_PATH",
       "pre-commit install",
       "uv python install 3.12",
       "just ready-py",
-      "source .venv/bin/activate"
+      "source .venv/bin/activate",
+      "printf 'allow-scripts[]=esbuild\\nallow-scripts[]=vue-demi\\n' > frontend/.npmrc",
+      "npm install --prefix frontend --no-save --package-lock=false --no-audit --no-fund jsdom@28.1.0"
     ],
     "scripts": {}
   }

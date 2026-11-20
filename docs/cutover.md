@@ -11,9 +11,10 @@ imported database; the workbook copy is never written.
 ## 1. Freeze writers
 
 1. Announce a write freeze: no audit edits, no pipeline runs against the
-   workbook (CLI or the old NiceGUI apps).
+   workbook (CLI or API).
 2. Confirm nobody holds a workbook open (`lsof` / close Excel).
-3. Stop old app processes. Leave the workbook untouched from now on.
+3. Stop any remaining pipeline/worker processes. Leave the workbook
+   untouched from now on.
 
 ## 2. Back up the sources of truth
 
@@ -32,6 +33,18 @@ Record the config hash too — jobs pin it. Copy the workbook to the deployment
 host as the import input; keep the original where it is (never import the
 live workbook in place).
 
+The importer reads the workbook and the artifact tree from the `ccat-artifacts`
+volume, so copy both in before §3:
+
+```sh
+docker compose --profile prod cp ./backups/$STAMP/workbook.xlsx \
+  worker:/artifacts/workbook/ccat_2026_v2.xlsx
+docker compose --profile prod cp ./backups/$STAMP/artifacts/. worker:/artifacts/
+```
+
+The workbook destination must not already exist as a directory — `docker cp`
+then copies the file *into* it and the importer finds no workbook.
+
 ## 3. Import into a database (via a copy)
 
 `ccat db-import` opens the source read-only, runs a validation gate, and writes
@@ -49,6 +62,13 @@ docker compose --profile prod run --rm --entrypoint ccat worker \
 The target DB is `storage.database_url` (`/data/ccat.sqlite3`). A non-empty
 target is refused unless `--force` is paired with an existing `--backup`.
 
+The import **merges**: the workbook wins for every key it carries, and rows the
+database holds from a later acquisition survive (the final stores are
+append-and-merge, never projections). A stored row that holds an angel id the
+workbook assigns to another child releases it, so the audited assignments stay
+intact. Both are reported: `merged_rows` counts the stored rows the workbook
+does not carry, `angel_ids_released` lists the rows that gave up a letter.
+
 ## 4. Review the validation report
 
 Open `/artifacts/rehearsal/import-report.json` (or
@@ -57,6 +77,7 @@ and check:
 
 - counts: sponsor/family/child imported vs workbook rows;
 - all validation checks pass (`validation` list is empty of failures);
+- `merged_rows` and `angel_ids_released` show what the merge kept or gave up;
 - logs (raw snapshot, four diagnostic/validation logs) and match report rows
   imported;
 - import batch status `completed` and source SHA-256 matches
@@ -136,7 +157,7 @@ docker compose --profile prod ps
 curl -fsS https://$CCAT_DOMAIN/api/v1/readyz
 ```
 
-Decommission the old NiceGUI apps; do not leave them able to write the
+The old NiceGUI apps are already removed, so no local editor can write the
 workbook. Set `storage.mode: workbook` nowhere — the API/worker are DB-only.
 
 ## 7. Post-cutover verification checklist (plan §11.3)
@@ -146,7 +167,7 @@ Fill in during the rehearsal; repeat on cutover day.
 | # | Criterion | Evidence (command/screen) | Rehearsal result | Cutover result |
 |---|---|---|---|---|
 | 1 | Backend and frontend suites, ruff, ty, Vue lint/build pass | `pytest`, `ruff check`, `ty check`, `npm run build` | | |
-| 2 | No normal API operation reads/writes the workbook; no NiceGUI editor can mutate data | API routes on `SeasonStore` port; old apps stopped | | |
+| 2 | No normal API operation reads/writes the workbook; no editor can mutate it | API routes on `SeasonStore` port; workbook is import/export only | | |
 | 3 | No-change rerun preserves edits, controls, assignments, generation markers, raw-missing rows, external-call counts | re-run screen/match on golden fixture | | |
 | 4 | Interrupted jobs resume; every generation marker has an authorized downloadable PDF | kill worker mid-job, restart; spot-check PDFs | | |
 | 5 | Two users cannot silently overwrite; mutations authorized + attributed | stale-version save → 409; `last_updated_by/at` | | |
@@ -156,9 +177,10 @@ Fill in during the rehearsal; repeat on cutover day.
 
 ## 8. Rollback
 
-**Before new writes after the flip:** restore the old config
-(`storage.mode: workbook` / previous deployment config), the old UI, and the
-workbook copy from `backups/$STAMP`; restart the old processes. No data moved.
+**Before new writes after the flip:** restore the previous deployment config
+and the workbook copy from `backups/$STAMP`; restart api/worker. No data moved.
+The legacy NiceGUI editor no longer exists, so any workbook-mode corrections
+must go through a reviewed CLI/import path, not a local UI.
 
 **After new writes:** restoring the workbook would silently discard DB writes.
 Instead:

@@ -13,6 +13,7 @@ import {
 import { useSessionStore } from '../stores/session'
 import { useDirtyGuard } from '../composables/useDirtyGuard'
 import { ENTITY_FIELDS, formatTime, type FieldSpec } from '../utils/format'
+import { checkClass, checkLabel } from '../utils/status'
 import { differs, normalizeValue, toAge } from '../utils/diff'
 import { conflictFromError, type ConflictInfo } from '../utils/conflict'
 import StatusBadge from './StatusBadge.vue'
@@ -55,6 +56,9 @@ const neutralFields = computed(() =>
 )
 const isDirty = computed(() => touched.value.size > 0)
 const isIgnored = computed(() => detail.value?.row.ignore === true)
+const isAudited = computed(() => detail.value?.status === 'audited')
+/** Status control sent with the next save (null = plain field save). */
+const pendingStatus = ref<'audited' | 'new' | null>(null)
 const submissions = computed<Record<string, unknown>[]>(
   () => (detail.value?.submissions ?? []) as Record<string, unknown>[],
 )
@@ -68,6 +72,28 @@ const isOrphan = computed(
     detail.value !== null &&
     detail.value.row.family_id === null,
 )
+
+const auditHint = computed(() => {
+  if (isOrphan.value) {
+    return 'An orphaned child cannot be marked audited until a matching family registration exists.'
+  }
+  if (isIgnored.value) {
+    return 'An ignored row stays ignored; un-ignore it before auditing.'
+  }
+  return 'Accepts the current values as the final entry.'
+})
+
+/** Email/address validation status (families and sponsors only). */
+const validation = computed(() => {
+  const diagnostics = (detail.value?.diagnostics ?? {}) as Record<
+    string,
+    unknown
+  >
+  return {
+    email: diagnostics.email_status as string | undefined,
+    address: diagnostics.address_status as string | undefined,
+  }
+})
 
 const ageMismatch = computed<string | null>(() => {
   if (props.entity !== 'child' || !detail.value) return null
@@ -121,6 +147,7 @@ function payload(): EntityPatch {
         ? String(draft[field])
         : null
   }
+  if (pendingStatus.value) body.status = pendingStatus.value
   return body as EntityPatch
 }
 
@@ -140,6 +167,7 @@ async function load(): Promise<void> {
   conflict.value = null
   submitError.value = null
   notice.value = null
+  pendingStatus.value = null
   try {
     apply(
       await getEntity(seasonName.value, props.entity, props.entityKey),
@@ -152,7 +180,8 @@ async function load(): Promise<void> {
 }
 
 async function persist(version: number): Promise<void> {
-  if (!detail.value || touched.value.size === 0) return
+  if (!detail.value || (touched.value.size === 0 && !pendingStatus.value))
+    return
   saving.value = true
   submitError.value = null
   try {
@@ -165,7 +194,13 @@ async function persist(version: number): Promise<void> {
         version,
       ),
     )
-    notice.value = 'Saved.'
+    notice.value =
+      pendingStatus.value === 'audited'
+        ? 'Marked audited — the current values are the final entry.'
+        : pendingStatus.value === 'new'
+          ? 'Audit undone.'
+          : 'Saved.'
+    pendingStatus.value = null
   } catch (failure) {
     const next =
       failure instanceof ApiError
@@ -180,6 +215,13 @@ async function persist(version: number): Promise<void> {
 
 function save(): void {
   if (detail.value) void persist(detail.value.row_version)
+}
+
+/** Mark the row audited (or undo it), keeping unsaved edits. */
+function toggleAudited(): void {
+  if (!detail.value) return
+  pendingStatus.value = isAudited.value ? 'new' : 'audited'
+  void persist(detail.value.row_version)
 }
 
 function reloadConflict(): void {
@@ -268,9 +310,21 @@ onMounted(() => void load())
           <StatusBadge :status="detail.status" />
           <span class="muted">row version {{ detail.row_version }}</span>
         </div>
-        <button type="button" :disabled="saving || !isDirty" @click="save">
-          Save changes
-        </button>
+        <div class="status-line">
+          <button type="button" :disabled="saving || !isDirty" @click="save">
+            Save changes
+          </button>
+          <button
+            type="button"
+            :class="isAudited ? '' : 'primary'"
+            :disabled="saving || isIgnored || isOrphan"
+            :title="auditHint"
+            data-testid="mark-audited"
+            @click="toggleAudited"
+          >
+            {{ isAudited ? 'Undo audit' : 'Mark audited' }}
+          </button>
+        </div>
       </div>
       <p class="muted">
         Last updated by
@@ -278,6 +332,7 @@ onMounted(() => void load())
         at {{ formatTime(detail.last_updated_at) }} · audited at
         {{ formatTime(detail.audited_at) }}
       </p>
+      <p class="muted">“Mark audited” {{ auditHint }}</p>
 
       <p v-if="isOrphan" class="card" data-testid="orphan-warning">
         <strong>Orphaned child:</strong> no matching family registration.
@@ -286,6 +341,23 @@ onMounted(() => void load())
       </p>
       <p v-if="ageMismatch" class="card diff-changed" data-testid="age-warning">
         <strong>Age mismatch:</strong> {{ ageMismatch }}
+      </p>
+      <p
+        v-if="entity !== 'child'"
+        class="card"
+        data-testid="validation-status"
+      >
+        <strong>Validation:</strong>
+        <span class="badge" :class="checkClass(validation.email)">
+          email: {{ checkLabel(validation.email) }}
+        </span>
+        <span
+          v-if="entity === 'family'"
+          class="badge"
+          :class="checkClass(validation.address)"
+        >
+          address: {{ checkLabel(validation.address) }}
+        </span>
       </p>
 
       <ConflictPanel
@@ -314,7 +386,12 @@ onMounted(() => void load())
         Only touched fields are sent; an empty value clears the field.
       </p>
       <div style="overflow-x: auto">
-        <table class="data">
+        <table class="data editor-table">
+          <colgroup>
+            <col style="width: 18%" />
+            <col style="width: 32%" />
+            <col style="width: 50%" />
+          </colgroup>
           <thead>
             <tr>
               <th>Field</th>
@@ -352,6 +429,7 @@ onMounted(() => void load())
                 <textarea
                   v-else-if="spec.kind === 'textarea'"
                   :name="spec.field"
+                  rows="3"
                   :value="(draft[spec.field] as string)"
                   @input="
                     setField(
@@ -377,6 +455,7 @@ onMounted(() => void load())
               <td>
                 <textarea
                   name="clarification_notes"
+                  rows="4"
                   :value="(draft.clarification_notes as string)"
                   @input="
                     setField(

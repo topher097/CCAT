@@ -483,8 +483,10 @@ suppress global correction/flag checks.
 
 ### D. Audit UI and save functions
 
-**Files:** `src/ccat/audit/store.py`, relevant `src/ccat/audit/pages.py`,
-`src/ccat/audit/server.py` callers.
+**Files (historical):** `src/ccat/audit/store.py`, relevant
+`src/ccat/audit/pages.py` and `src/ccat/audit/server.py` callers. The pages
+and server modules were later removed with the NiceGUI UI; `store.py`
+survives.
 
 - Update detail-page side-by-side raw comparisons to use in-memory prepared
   raw data rather than `*_submissions`.
@@ -708,7 +710,8 @@ Dump selected pre/post fields for these individuals in code-ready fixtures.
 1. `ccat acquire` replaces raw sheets only.
 2. `ccat screen` appends/prepares new final entities, refreshes cheap global
    flags/log results, and AI-screens children that still need it.
-3. `ccat audit` is the sole place for interactive human changes. Direct Excel
+3. `ccat serve` + the Vue SPA is the sole place for interactive human changes
+   (the legacy `ccat audit` NiceGUI command was removed). Direct Excel
    editing remains possible technically, but programmatic runs assume no
    concurrent external edits and obey the same surviving-value contract.
 4. `ccat match` owns matching fields; `ccat generate` owns generation fields.

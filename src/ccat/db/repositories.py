@@ -100,7 +100,7 @@ from ccat.db.models import (
 from ccat.domain import AGE_PREF_BOUNDS, compute_age_at_xmas
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Mapping
+    from collections.abc import AsyncGenerator, Iterable, Mapping
     from datetime import date
 
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -537,6 +537,27 @@ class SeasonStoreRepository:
             rows.append(row)
         return rows
 
+    async def family_child_counts(self) -> dict[int, int]:
+        """Count final children per family in one grouped query.
+
+        Returns:
+            ``family_id -> child count``; orphan children (NULL
+            ``family_id``) are not counted.
+        """
+        result = await self._session.execute(
+            select(FinalChild.family_id, func.count())
+            .where(
+                FinalChild.season_id == self._season_id,
+                FinalChild.family_id.is_not(None),
+            )
+            .group_by(FinalChild.family_id)
+        )
+        return {
+            int(family_id): int(count)
+            for family_id, count in result
+            if family_id is not None
+        }
+
     async def commit_finals(
         self,
         module: str,
@@ -581,7 +602,7 @@ class SeasonStoreRepository:
         return changed
 
     @asynccontextmanager
-    async def _transaction(self) -> AsyncIterator[None]:
+    async def _transaction(self) -> AsyncGenerator[None]:
         """Bound one write call to exactly one short transaction.
 
         Yields:
@@ -1169,6 +1190,41 @@ class SeasonStoreRepository:
             }
             for target, check in result
         ]
+
+    async def email_statuses(self) -> dict[str, str]:
+        """Read the season's email-validation status per address.
+
+        Returns:
+            ``normalized email -> status`` (e.g. ``valid``, ``invalid``).
+        """
+        result = await self._session.execute(
+            select(EmailCheck.normalized_email, EmailCheck.status).where(
+                EmailCheck.season_id == self._season_id
+            )
+        )
+        return {
+            str(email): str(status)
+            for email, status in result
+            if email and status
+        }
+
+    async def address_statuses(self) -> dict[str, str]:
+        """Read the season's address-validation status per query.
+
+        Returns:
+            ``address query -> status`` (``found`` / ``ambiguous`` /
+            ``not_found`` / ``error``).
+        """
+        result = await self._session.execute(
+            select(AddressCheck.query, AddressCheck.status).where(
+                AddressCheck.season_id == self._season_id
+            )
+        )
+        return {
+            str(query): str(status)
+            for query, status in result
+            if query and status
+        }
 
     async def append_email_log(
         self, rows: list[dict[str, Any]], actor: str | None = None

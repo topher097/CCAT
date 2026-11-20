@@ -20,7 +20,7 @@ from ccat.db.repositories import SeasonStoreRepository, ensure_season_row
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from ccat.config import Config
@@ -40,7 +40,7 @@ class UnitOfWork:
         self.session_factory = async_session_factory(engine)
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[AsyncSession]:
+    async def session(self) -> AsyncGenerator[AsyncSession]:
         """Yield one session committed on success, rolled back on error.
 
         Yields:
@@ -59,7 +59,7 @@ class UnitOfWork:
     @asynccontextmanager
     async def store(
         self, cfg: Config, actor: str
-    ) -> AsyncIterator[SeasonStoreRepository]:
+    ) -> AsyncGenerator[SeasonStoreRepository]:
         """Yield a repository on a fresh session with the season ensured.
 
         Args:

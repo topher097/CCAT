@@ -1,10 +1,12 @@
 """API tests (refactor §5, §8; Phase 3 acceptance).
 
 File-backed SQLite per test; httpx AsyncClient over ASGITransport; all
-providers faked at the seams the domain modules expose.  Logins use
-the dev no-password bootstrap users (D2): ``cmendres`` (admin) and
-``lmboswell`` (coordinator+auditor); extra users are created through
-the admin API.
+providers faked at the seams the domain modules expose.  In dev auth
+mode every request is authenticated as the auto-login identity
+(``cmendres``, admin); the strict session rules are exercised with a
+non-dev app (``oidc_app``).  The dev no-password bootstrap users (D2)
+are ``cmendres`` (admin) and ``lmboswell`` (coordinator+auditor); extra
+users are created through the admin API.
 """
 
 import asyncio
@@ -17,10 +19,15 @@ from typing import Any
 import pytest
 from conftest import load_test_cfg
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select, update
 
 from ccat.api import create_app
+from ccat.api.auth import SESSION_COOKIE, issue_session
 from ccat.config import AIScreeningSpec, Config, StorageSpec, WorkerSpec
 from ccat.db.engine import create_async_engine, run_migrations
+from ccat.db.models import JobEvent
+from ccat.db.models import Session as SessionRow
+from ccat.db.models import User
 from ccat.db.uow import UnitOfWork
 from ccat.jobs.worker import Worker
 
@@ -272,6 +279,57 @@ def app(tmp_path: Path) -> Any:
 
 
 @pytest.fixture
+def oidc_app(app: Any) -> Any:
+    """One app instance in a non-dev auth mode (production posture).
+
+    Shares the seeded database with :func:`app`; only the auth mode
+    differs, so the strict session rules stay testable.
+    """
+    cfg = app.state.cfg
+    return create_app(
+        cfg.model_copy(
+            update={
+                "api": cfg.api.model_copy(update={"auth_mode": "oidc"}),
+            }
+        )
+    )
+
+
+async def _session_token(
+    app: Any, username: str, *, expires_at: datetime | None = None
+) -> str:
+    """Create one session row for a user and return its raw token.
+
+    Args:
+        app: The FastAPI app owning the database.
+        username: The account the session belongs to.
+        expires_at: Expiry to stamp on the row (default: not expired).
+
+    Returns:
+        The raw cookie token for the new session.
+    """
+    cfg = app.state.cfg
+    from ccat.db.engine import async_session_factory
+
+    engine = create_async_engine(cfg.storage.database_url)
+    factory = async_session_factory(engine)
+    try:
+        async with factory() as session:
+            user = await session.scalar(
+                select(User).where(User.username == username)
+            )
+            token, _row = await issue_session(session, cfg, user)
+            if expires_at is not None:
+                await session.execute(
+                    update(SessionRow).values(expires_at=expires_at)
+                )
+            await session.commit()
+    finally:
+        await engine.dispose()
+    return token
+
+
+@pytest.fixture
 async def anonymous(app: Any) -> AsyncIterator[Client]:
     """Provide an unauthenticated client."""
     client = Client(app)
@@ -341,39 +399,59 @@ async def test_login_sets_devcookie_and_me(app: Any, anonymous: Client) -> None:
     assert me.json()["csrf_token"]
 
 
-async def test_logout_revokes_session(app: Any) -> None:
-    """Logout revokes the server session; the cookie stops working."""
+async def test_dev_mode_needs_no_login(app: Any, anonymous: Client) -> None:
+    """Dev mode authenticates every request as the auto-login admin."""
+    me = await anonymous.client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["username"] == "cmendres"
+    assert "admin" in me.json()["roles"]
+    # The auto-login identity is an admin, so the admin route answers.
+    users = await anonymous.client.get("/api/v1/users")
+    assert users.status_code == 200
+    assert {u["username"] for u in users.json()} >= {
+        "cmendres",
+        "lmboswell",
+    }
+
+
+async def test_dev_mode_login_still_wins(app: Any) -> None:
+    """An explicit dev login outranks the auto-login identity."""
     client = await _logged_in(app)
+    me = await client.client.get("/api/v1/auth/me")
+    assert me.json()["username"] == "lmboswell"
+    assert "auditor" in me.json()["roles"]
+
+
+async def test_logout_revokes_session(oidc_app: Any) -> None:
+    """Logout revokes the server session; the cookie stops working."""
+    token = await _session_token(oidc_app, "lmboswell")
+    client = Client(oidc_app)
+    client.client.cookies.set(SESSION_COOKIE, token)
+    me = await client.client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    csrf = me.json()["csrf_token"]
     response = await client.client.post(
-        "/api/v1/auth/logout", headers=client.headers()
+        "/api/v1/auth/logout", headers={"X-CCAT-CSRF": csrf}
     )
     assert response.status_code == 204
+    client.client.cookies.set(SESSION_COOKIE, token)
     me = await client.client.get("/api/v1/auth/me")
     assert me.status_code == 401
+    await client.close()
 
 
-async def test_expired_session_is_401(app: Any) -> None:
+async def test_expired_session_is_401(oidc_app: Any) -> None:
     """An expired session row authenticates nobody."""
-    client = await _logged_in(app)
-    cfg = app.state.cfg
-    from ccat.db.engine import async_session_factory
-    from ccat.db.models import Session as SessionRow
-    from sqlalchemy import update
-
-    engine = create_async_engine(cfg.storage.database_url)
-    factory = async_session_factory(engine)
-    try:
-        async with factory() as session:
-            await session.execute(
-                update(SessionRow).values(
-                    expires_at=datetime.now(UTC) - timedelta(hours=1)
-                )
-            )
-            await session.commit()
-    finally:
-        await engine.dispose()
+    token = await _session_token(
+        oidc_app,
+        "lmboswell",
+        expires_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    client = Client(oidc_app)
+    client.client.cookies.set(SESSION_COOKIE, token)
     me = await client.client.get("/api/v1/auth/me")
     assert me.status_code == 401
+    await client.close()
 
 
 async def test_wrong_csrf_403_on_mutation(app: Any) -> None:
@@ -469,10 +547,13 @@ async def test_rate_limit_429(app: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_anonymous_401_on_every_route_class(
-    app: Any, anonymous: Client
-) -> None:
-    """Every route class requires authentication (401 anonymous)."""
+async def test_anonymous_401_on_every_route_class(oidc_app: Any) -> None:
+    """Every route class requires authentication (401 anonymous).
+
+    Outside dev mode the auto-login fallback is gone, so an
+    unauthenticated request is refused again.
+    """
+    client = Client(oidc_app)
     paths = [
         ("GET", "/api/v1/users"),
         ("GET", "/api/v1/seasons"),
@@ -487,8 +568,9 @@ async def test_anonymous_401_on_every_route_class(
     ]
     # healthz/readyz are deliberately unauthenticated (§5.2).
     for method, path in paths:
-        response = await anonymous.client.request(method, path)
+        response = await client.client.request(method, path)
         assert response.status_code == 401, f"{method} {path}"
+    await client.close()
 
 
 async def test_read_only_can_read_not_write(app: Any) -> None:
@@ -649,6 +731,154 @@ async def test_list_pagination_search_status(app: Any) -> None:
     assert response.json()["total"] == 2
 
 
+async def test_family_list_computes_child_count(app: Any) -> None:
+    """Family list rows carry a server-computed child_count (§5.3)."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                children=[child_row("c1"), child_row("c2", family_id=2)],
+                families=[family_row(1), family_row(2)],
+            )
+    finally:
+        await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get("/api/v1/seasons/2026/families")
+    rows = {row["family_id"]: row for row in response.json()["items"]}
+    assert rows[1]["child_count"] == 1
+    assert rows[2]["child_count"] == 1
+    await client.close()
+
+
+async def test_child_list_flags_raw_missing(app: Any) -> None:
+    """Child list rows carry raw_missing for absent raw records (§5.2)."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                children=[
+                    child_row("c1"),
+                    child_row("c2"),
+                    child_row("c3", first_name="Gone"),
+                ],
+            )
+    finally:
+        await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get("/api/v1/seasons/2026/children")
+    flags = {
+        row["zite_record_id"]: row["raw_missing"]
+        for row in response.json()["items"]
+    }
+    assert flags == {"c1": False, "c2": False, "c3": True}
+    await client.close()
+
+
+async def test_child_list_sorted_by_family_then_child_id(app: Any) -> None:
+    """Child rows list by assigned family, then child id (orphans last)."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                children=[
+                    child_row("c-2b", family_id=2, angel_id="2B"),
+                    child_row("c-1b", family_id=1, angel_id="1B"),
+                    child_row("c-1a", family_id=1, angel_id="1A"),
+                    child_row("c-orphan", family_id=None),
+                ],
+                families=[family_row(1), family_row(2)],
+                sponsors=[sponsor_row(1)],
+            )
+    finally:
+        await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get("/api/v1/seasons/2026/children")
+    assert [row["zite_record_id"] for row in response.json()["items"]] == [
+        "c-1a",
+        "c-1b",
+        "c-2b",
+        "c-orphan",
+    ]
+    await client.close()
+
+
+async def test_family_and_sponsor_lists_carry_validation_status(
+    app: Any,
+) -> None:
+    """Family/sponsor rows carry their email/address check status."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                children=[child_row("c1")],
+                families=[
+                    family_row(
+                        1,
+                        street_address="1 Main St",
+                        city="Hancock",
+                        state="Michigan",
+                        zip_code="49930",
+                    )
+                ],
+                sponsors=[sponsor_row(1, email="ada@example.org")],
+            )
+    finally:
+        await engine.dispose()
+    from ccat.db.engine import async_session_factory
+    from ccat.db.models import AddressCheck, EmailCheck
+
+    factory = async_session_factory(engine)
+    async with factory() as session:
+        session.add(
+            EmailCheck(
+                season_id=1,
+                normalized_email="fam1@example.com",
+                status="valid",
+            )
+        )
+        session.add(
+            EmailCheck(
+                season_id=1,
+                normalized_email="ada@example.org",
+                status="invalid",
+            )
+        )
+        session.add(
+            AddressCheck(
+                season_id=1,
+                query="1 Main St, Hancock, Michigan, 49930",
+                status="found",
+            )
+        )
+        await session.commit()
+    await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    families = await client.client.get("/api/v1/seasons/2026/families")
+    family = families.json()["items"][0]
+    assert family["email_status"] == "valid"
+    assert family["address_status"] == "found"
+    sponsors = await client.client.get("/api/v1/seasons/2026/sponsors")
+    sponsor = sponsors.json()["items"][0]
+    assert sponsor["email_status"] == "invalid"
+    assert sponsor["address_status"] is None
+    detail = await client.client.get("/api/v1/seasons/2026/families/1")
+    assert detail.json()["diagnostics"]["email_status"] == "valid"
+    assert detail.json()["diagnostics"]["address_status"] == "found"
+    await client.close()
+
+
 async def test_detail_includes_baseline_version_attribution(app: Any) -> None:
     """Detail: row + baseline + submissions + version + attribution."""
     await _seed_default(app)
@@ -797,6 +1027,32 @@ async def test_ignore_unignore_flow(app: Any) -> None:
     )
     assert response.status_code == 200
     assert response.json()["row"]["first_name"] == "Kiddo"
+
+
+async def test_patch_marks_row_audited(app: Any) -> None:
+    """A PATCH with status=audited accepts the row as the final entry."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"first_name": "Kiddo", "status": "audited"},
+        headers=client.headers() | {"If-Match": "1"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "audited"
+    assert response.json()["row"]["status"] == "audited"
+    assert response.json()["audited_at"]
+    detail = await client.client.get("/api/v1/seasons/2026/children/c1")
+    assert detail.json()["status"] == "audited"
+    # Un-auditing drops back to the derived status.
+    version = detail.json()["row_version"]
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"status": "new"},
+        headers=client.headers() | {"If-Match": str(version)},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] != "audited"
 
 
 async def test_orphan_cannot_become_audited_409(app: Any) -> None:
@@ -1013,6 +1269,48 @@ async def test_job_list_detail_cancel_and_events(app: Any) -> None:
     if response.status_code == 200:
         state = (await client.client.get(f"/api/v1/jobs/{job_id}")).json()
         assert state["status"] in {"cancelled", "cancel_requested"}
+
+
+async def test_job_detail_keeps_status_events_beside_logs(app: Any) -> None:
+    """GET /jobs/{id} returns the status tail plus the log tail."""
+    await _seed_default(app)
+    client = await _logged_in(app, "lmboswell")
+    enqueued = await client.client.post(
+        "/api/v1/seasons/2026/jobs",
+        json={"job_type": "reconcile"},
+        headers=client.headers(),
+    )
+    job_id = enqueued.json()["id"]
+    from ccat.db.engine import async_session_factory
+
+    engine = create_async_engine(app.state.cfg.storage.database_url)
+    factory = async_session_factory(engine)
+    stamp = datetime.now(UTC).isoformat()
+    async with factory() as session:
+        session.add_all(
+            JobEvent(
+                job_id=job_id,
+                ts=datetime.now(UTC),
+                kind="log",
+                data={
+                    "level": "INFO",
+                    "logger": "ccat.match",
+                    "message": f"line {index}",
+                    "ts": stamp,
+                },
+            )
+            for index in range(25)
+        )
+        await session.commit()
+    await engine.dispose()
+    detail = (await client.client.get(f"/api/v1/jobs/{job_id}")).json()
+    kinds = [event["kind"] for event in detail["events"]]
+    assert kinds.count("log") == 25
+    # the lifecycle event survives even though 25 newer log rows exist
+    assert "queued" in kinds
+    ids = [event["id"] for event in detail["events"]]
+    assert ids == sorted(ids)
+    await client.close()
 
 
 async def test_worker_runs_screen_job_end_to_end(
@@ -1346,6 +1644,27 @@ async def test_unknown_season_404(app: Any) -> None:
     response = await client.client.get("/api/v1/seasons/1999/children")
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "season_not_found"
+
+
+async def test_configured_season_row_is_created_on_demand(app: Any) -> None:
+    """A migrated database with no season row still serves the season.
+
+    The season row holds configuration-derived data only, so the API
+    creates it instead of refusing every season-scoped request.
+    """
+    client = await _logged_in(app, "lmboswell")
+    first = await client.client.get("/api/v1/seasons/2026/children")
+    assert first.status_code == 200, first.text
+    assert first.json()["items"] == []
+    # The row is reused, not recreated, and is now listed.
+    second = await client.client.get("/api/v1/seasons/2026/children")
+    assert second.status_code == 200, second.text
+    seasons = await client.client.get("/api/v1/seasons")
+    assert [row["name"] for row in seasons.json()] == ["2026"]
+    # A season other than the configured one is still refused.
+    other = await client.client.get("/api/v1/seasons/1999/children")
+    assert other.status_code == 404
+    assert other.json()["detail"]["code"] == "season_not_found"
 
 
 async def test_unknown_entity_job_artifact_404(app: Any) -> None:

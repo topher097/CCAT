@@ -3,8 +3,9 @@
 #   docker compose --profile prod up -d --build   # production shape
 #   docker compose --profile dev  up --build      # live-reload shape
 #
-# Secrets come from the environment (compose interpolates .env); no secret is
-# stored in this file and none is passed as a build arg.  See docs/deployment.md.
+# Secrets come from the environment (compose interpolates the shell env, fed
+# by .envrc / .envrc.private); no secret is stored in this file and none is
+# passed as a build arg.  See docs/deployment.md.
 name: ccat
 
 x-app-env: &app-env
@@ -18,6 +19,11 @@ x-app-env: &app-env
   OIDC_ISSUER: ${OIDC_ISSUER:-}
   OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
   OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+  # AI screening (module 2) and clarify (module 7) drive the opencode
+  # service below; the CCAT image ships no opencode CLI, so the server
+  # is the only LLM path in Docker.
+  OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-http://opencode:4097}
+  OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-}
 
 # State lives on named volumes; config + templates are read-only bind mounts.
 # The SQLite volume (ccat-db) must stay on local disk, never NFS.
@@ -83,8 +89,66 @@ services:
     depends_on:
       db-upgrade:
         condition: service_completed_successfully
+      # Screening jobs need the LLM server; wait until it answers.
+      opencode:
+        condition: service_healthy
     restart: unless-stopped
     stop_grace_period: 150s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
+    logging: *logging
+
+  # Headless opencode server (the LLM behind AI screening and the clarify
+  # writer).  The image is built from https://github.com/roborew/opencode-server;
+  # its entrypoint drops to OPENCODE_UID/GID, so the credential copy below has
+  # to happen first (that step still runs as root).
+  opencode:
+    build:
+      context: https://github.com/roborew/opencode-server.git#main
+      args:
+        CONFIG_REPO: ${OPENCODE_CONFIG_REPO:-https://github.com/roborew/opencode-config-v2.git}
+        CONFIG_REF: ${OPENCODE_CONFIG_REF:-main}
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-2.3.0}
+    image: ccat-opencode:${CCAT_IMAGE_TAG:-local}
+    profiles: ["prod", "dev"]
+    working_dir: /home/opencode
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -euo pipefail
+        # The host credential file is mode 600 and owned by the host user, so
+        # only root can read it here.  Copy it into the container's own store
+        # before the upstream entrypoint drops privileges.
+        if [[ -f /run/opencode-auth.json ]]; then
+          install -m 600 -o "${OPENCODE_UID:-1000}" -g "${OPENCODE_GID:-1000}" \
+            /run/opencode-auth.json /var/lib/opencode-data/auth.json
+        fi
+        exec /usr/local/bin/opencode-entrypoint.sh opencode serve \
+          --hostname 0.0.0.0 --port 4097
+    environment:
+      OPENCODE_UID: ${OPENCODE_UID:-1000}
+      OPENCODE_GID: ${OPENCODE_GID:-1000}
+      # Basic auth for the server; the SDK client reads the same variable.
+      # Empty -> opencode generates a random password nobody knows, so set it.
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-}
+      XDG_DATA_HOME: /var/opencode-xdg
+      OPENCODE_CONTAINER_XDG: /var/opencode-xdg
+    volumes:
+      - opencode-data:/var/lib/opencode-data
+      # Host opencode credentials (provider API keys), copied in on start.
+      - ${OPENCODE_AUTH_FILE:-${HOME}/.local/share/opencode/auth.json}:/run/opencode-auth.json:ro
+    healthcheck:
+      # 401 = the server is up and asking for the basic-auth password.
+      test: ["CMD-SHELL", "status=$$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:4097/api/info || true); test \"$$status\" = 401 -o \"$$status\" = 200"]
+      interval: 30s
+      timeout: 10s
+      start_period: 180s
+      retries: 3
+    restart: unless-stopped
     deploy:
       resources:
         limits:
@@ -148,7 +212,9 @@ services:
       - ccat-db:/data
       - ccat-artifacts:/artifacts
       - ccat-logs:/logs
-      - ./config/ccat_docker.json:/app/config/ccat_docker.json:ro
+      # Writable so the admin Settings tab can save here; prod stays
+      # read-only (the operator edits the file and restarts).
+      - ./config/ccat_docker.json:/app/config/ccat_docker.json
       - ./data:/app/data:ro
       - ./src:/app/src:ro
     depends_on:
@@ -174,6 +240,9 @@ services:
       - npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 5173
     volumes:
       - ./frontend:/app/frontend
+      # Container-only node_modules: the host tree keeps its own glibc
+      # install (vitest), so the image's musl binaries never land here.
+      - /app/frontend/node_modules
     restart: unless-stopped
     logging: *logging
 
@@ -200,3 +269,4 @@ volumes:
   ccat-logs:
   caddy-data:
   caddy-config:
+  opencode-data:

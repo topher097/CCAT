@@ -38,7 +38,7 @@ from ccat.db.migration_io import (
     workbook_export_run,
 )
 from ccat.db.models import Season
-from ccat.db.repositories import SeasonStoreRepository
+from ccat.db.repositories import SeasonStoreRepository, ensure_season_row
 from ccat.db.uow import UnitOfWork
 from ccat.acquire import DOB_CONFLICT_LOG_SCHEMA
 from ccat.audit.store import build_final_frame
@@ -702,6 +702,72 @@ def test_changed_source_requires_new_batch(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Merging into a database that already holds a later acquisition.
+# ---------------------------------------------------------------------------
+
+
+def test_import_merges_later_acquisition_rows(tmp_path: Path) -> None:
+    """Rows the workbook lacks survive; the workbook wins where it speaks.
+
+    The database holds a row the (older) workbook does not know about,
+    and that row already reserved an angel id the workbook assigns to
+    another child.  The import must keep the row, release the angel id
+    it holds, and still store the workbook's audited values.
+    """
+    cfg = _import_cfg(tmp_path)
+    source = _build_source(cfg)
+    run_migrations(cfg.storage.database_url)
+
+    # A row a later acquisition added, holding the angel id the
+    # workbook assigns to c-old-original.
+    async def seed() -> None:
+        engine = create_async_engine(cfg.storage.database_url)
+        uow = UnitOfWork(engine)
+        try:
+            async with uow.session() as session:
+                season = await ensure_season_row(session, cfg)
+                repo = SeasonStoreRepository(session, season)
+                late = {
+                    "zite_record_id": "c-late-arrival",
+                    "family_id": 1,
+                    "angel_id": "1A",
+                    "first_name": "Late",
+                    "status": "new",
+                    "screened": False,
+                    "generated_info_sheet": False,
+                    "audited_at": None,
+                }
+                await repo.commit_finals("screen", "child", [late], "tester")
+        finally:
+            await engine.dispose()
+
+    asyncio.run(seed())
+
+    report_path = db_import(
+        cfg, str(source), force=True, backup_path=str(tmp_path / "b.sqlite3")
+    )
+    report = _report_of(report_path)
+    assert report["batch"]["status"] == "completed"
+    assert report["errors"] == []
+    assert all(check["pass"] for check in report["validation"]), report[
+        "validation"
+    ]
+    assert report["merged_rows"]["child"] == 1
+
+    children = {
+        row["zite_record_id"]: row for row in _read_db_rows(cfg, "child")
+    }
+    assert len(children) == 5  # the workbook's four plus the stored one
+    # The workbook's audited letter wins; the stored row releases it.
+    assert children["c-old-original"]["angel_id"] == "1A"
+    assert children["c-late-arrival"]["angel_id"] is None
+    assert children["c-late-arrival"]["family_id"] == 1
+    assert report["angel_ids_released"] == [
+        {"zite_record_id": "c-late-arrival", "angel_id": "1A"}
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Refusals.
 # ---------------------------------------------------------------------------
 
@@ -876,7 +942,7 @@ def test_cli_db_import_and_export_dispatch(
             **{
                 "from": "wb.xlsx",
                 "dry_run": True,
-            }  # ty: ignore[invalid-argument-type]
+            }
         )
     with pytest.raises(SystemExit, match="unknown flags"):
         ccat._workbook_export_cmd(output="o.xlsx", extra=1)

@@ -37,19 +37,26 @@ Runtime paths (all config paths are absolute — no CWD dependence):
 | `/data` | volume `ccat-db` (`ccat.sqlite3`, WAL files) | yes |
 | `/artifacts` | volume `ccat-artifacts` (PDFs, packets, reports, exports) | yes |
 | `/logs` | volume `ccat-logs` (`ccat.log`) | yes |
-| `/app/config/ccat_docker.json` | bind mount, read-only | no |
+| `/app/config/ccat_docker.json` | bind mount, read-only (dev: writable) | prod: no |
 | `/app/data` | bind mount, read-only | no |
 
-> **Frontend stage:** until the Vue app lands, the stage logs
+> **Settings tab:** the admin Settings tab rewrites the configuration file
+> in place. The **dev** profile mounts that file writable, so a save works
+> there (the container writes it as uid `10001` — `chown` it back on the
+> host afterwards). In the **prod** profile the mount is read-only, so a
+> save is rejected (`500 config_write_failed`); edit the file on the host
+> and restart instead.
+
+> **Frontend stage:** when `frontend/package.json` is absent the stage logs
 > `frontend/package.json absent` and produces an empty dist; the image and API
 > still build. Production requires a real build — `cd frontend && npm ci &&
-> npm run build` before `--profile prod up` (or `docker compose build` once
-> `frontend/package.json` exists). Without it Caddy serves 404s.
+> npm run build` before `--profile prod up` (or `docker compose build`).
+> Without it Caddy serves 404s.
 
 ## 3. Development profile (live reload)
 
 ```sh
-cp .env.example .env      # optional in dev; fill placeholders later
+direnv allow            # .envrc carries the public settings
 docker compose --profile dev up --build
 # https://localhost:8443  (API + Vite HMR behind Caddy's internal CA)
 ```
@@ -57,20 +64,30 @@ docker compose --profile dev up --build
 - `api-dev`: uvicorn `--reload` with `./src` mounted at `/app/src`
   (`PYTHONPATH=/app/src` overrides the wheel).
 - `web`: Vite dev server with HMR; Caddy proxies non-`/api` traffic to it.
+  Its `node_modules` is a container-only volume, so the image's musl
+  binaries never overwrite the host's install (the local `vitest` run).
 - `worker`: runs the image command unchanged; **do not hot-reload a worker**
   while it holds a job lease — rebuild/restart when idle.
 - `db-upgrade` runs once before the API starts.
-- Only in this profile do the two no-password dev accounts (`cmendres`,
+- Only in this profile do the no-password dev accounts (`cmendres`,
   `lmboswell`) exist; they come from `api.auth_mode: dev`.
+- `auth_mode: dev` also means **no login at all**: a request without a
+  session cookie is authenticated as `cmendres` (admin), so the SPA
+  never stops at a login screen. A dev login still works and outranks
+  the auto identity.
 
 Logs: `docker compose --profile dev logs -f api-dev worker`.
 
 ## 4. Production profile
 
 ```sh
-# 1. Fill secrets (never commit .env)
-cp .env.example .env && $EDITOR .env
+# 1. Secrets go in .envrc.private (gitignored, sourced by .envrc):
+#    CCAT_SESSION_SECRET, ZITE_API_KEY, ZEROBOUNCE_API_KEY,
+#    OPENCODE_SERVER_PASSWORD, OIDC_CLIENT_SECRET.
+#    Public settings live in .envrc.
+$EDITOR .envrc.private
 python -c "import secrets; print(secrets.token_urlsafe(48))"   # session secret
+direnv allow
 
 # 2. Build immutable assets + image
 (cd frontend && npm ci && npm run build)
@@ -83,6 +100,9 @@ curl -fsS https://$CCAT_DOMAIN/api/v1/readyz
 docker compose --profile prod ps
 ```
 
+Compose reads the shell environment (direnv puts it there), so `.envrc` /
+`.envrc.private` are the only configuration files — there is no `.env`.
+
 Profiles at a glance:
 
 | Service | `dev` | `prod` | Notes |
@@ -94,6 +114,7 @@ Profiles at a glance:
 | `caddy` | – | ✔ | :80/:443, Let's Encrypt or internal CA |
 | `caddy-dev` | ✔ | – | :8443, `tls internal`, proxies Vite |
 | `web` | ✔ | – | Vite HMR |
+| `opencode` | ✔ | ✔ | LLM server for screening; internal only |
 
 TLS:
 
@@ -103,6 +124,62 @@ TLS:
   single-host rehearsal; browsers must trust the CA or use `-k`.
 
 The API is never published directly; only Caddy binds host ports.
+
+### opencode server (LLM behind AI screening)
+
+The `screen` job (module 2) and the clarify writer (module 7) need an LLM.
+The CCAT image ships no opencode CLI, so compose runs a headless **opencode
+v2** server as a service; the app reaches it at `http://opencode:4097`
+(`OPENCODE_BASE_URL`, set for api/worker by compose).
+
+- **Image.** Built by compose from
+  [`roborew/opencode-server`](https://github.com/roborew/opencode-server)
+  (git build context). The first build clones that repo and its config repo
+  and installs node/opencode — expect several minutes. Rebuild with
+  `docker compose --profile prod build opencode` after upstream changes.
+- **Auth.** Set `OPENCODE_SERVER_PASSWORD` in `.envrc.private`: the server
+  then requires basic auth and the same value is handed to api/worker. The
+  variable is **not optional** — with an empty value opencode invents a
+  random password and every client request is rejected with 401.
+- **Credentials.** The host's `~/.local/share/opencode/auth.json` (provider
+  API keys of the local opencode install) is mounted read-only at
+  `/run/opencode-auth.json` and copied into the container's own credential
+  store on every start — the host file is mode 600, so only root can read it
+  and the copy happens before the upstream entrypoint drops privileges.
+  Point `OPENCODE_AUTH_FILE` at another file to override.
+- **Account.** A key alone is not an account: opencode also needs the
+  console session that carries the workspace (`x-opencode-org-id`), and it
+  keeps that in its own store, not in `auth.json`. Copy the host's
+  credentials into the container once (the container keeps them in the
+  `opencode-data` volume):
+
+  ```sh
+  opencode auth export > /tmp/creds.json          # on the host
+  docker compose --profile prod cp /tmp/creds.json opencode:/tmp/creds.json
+  docker compose --profile prod exec opencode opencode auth import /tmp/creds.json
+  docker compose --profile prod restart opencode
+  ```
+
+  `opencode auth login` inside the container does the same interactively.
+  Until that is done the server only serves the anonymous free tier (usage
+  limited) and the `opencode-go` provider answers "Invalid credential".
+- **Model.** The pinned opencode v2.3.0 serves `glm-5.3-flash` through the
+  `opencode-go` provider, not through `opencode` — that is why
+  `config/ccat_docker.json` asks for `opencode-go/glm-5.3-flash`. Check
+  what the server offers with
+  `docker compose --profile prod exec opencode opencode models`.
+- **Ordering.** `worker` waits for `condition: service_healthy` on
+  `opencode`, so screening jobs never start against a cold server.
+- **Verify.**
+
+  ```sh
+  docker compose --profile prod exec opencode \
+    curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4097/api/info
+  docker compose --profile prod logs opencode | tail -20
+  ```
+
+  `401` means the server is up and asking for the password; `200` means it is
+  up without auth.
 
 ## 5. Migrations (controlled release step)
 
@@ -176,6 +253,8 @@ workbook, which is only a snapshot. See `cutover.md` §7.
   writable; 503 with check names (no internals) when not ready.
 - Logs rotate via the json-file driver (10 MB × 5 per service). Request logs
   carry `request_id`, method, path, status, duration, user/roles — no payloads.
+- The `opencode` healthcheck asks `GET /api/info` inside the container:
+  `401` = up with basic auth, `200` = up without auth.
 - Watch: queue age/failures/heartbeat (`job` table), disk space on
   `ccat-db`/`ccat-artifacts`, `database is locked` errors, LibreOffice
   conversion failures, worker restarts.
@@ -203,15 +282,21 @@ workbook, which is only a snapshot. See `cutover.md` §7.
 - [ ] Login rate limiting active (in-process in the API; single-process only).
 - [ ] No dev no-password accounts on a public route. `api.auth_mode: dev` in
       `config/ccat_docker.json` is a **pre-production gate**: the OIDC adapter
-      is still a stub (decision D2, `[human]`). Do not expose the stack beyond
+      is still a stub (decision D2, `[human]`). Dev mode grants every
+      request the admin auto identity (`cmendres`) without a login, so
+      the whole stack must stay behind localhost/a trusted network until a
+      real auth mode replaces `dev`. Do not expose the stack beyond
       localhost/a trusted network until OIDC lands.
 - [ ] Secrets (`ZITE_API_KEY`, `ZEROBOUNCE_API_KEY`, `CCAT_SESSION_SECRET`,
-      OIDC) enter via environment only — never image layers, Vue build args,
-      compose files, logs or reports.
+      OIDC, `OPENCODE_SERVER_PASSWORD`) live in `.envrc.private` only —
+      never image layers, Vue build args, compose files, logs or reports.
+- [ ] The host `~/.local/share/opencode/auth.json` is a secret: it is mounted
+      read-only into the opencode service and copied there; never commit it.
+      Set `OPENCODE_SERVER_PASSWORD` unless the compose network is private.
 - [ ] Rotate provider/session secrets on staff changes; restart api/worker.
 - [ ] Backups encrypted and access-controlled; retention schedule agreed
       (decision D9, `[human]`).
-- [ ] API/worker ports unpublished; only Caddy binds host ports.
+- [ ] API/worker/opencode ports unpublished; only Caddy binds host ports.
 - [ ] Logs contain no child/family payloads, emails, addresses or AI prompts.
 
 ## 11. LibreOffice dependency
@@ -231,7 +316,8 @@ docker compose --profile prod run --rm --entrypoint soffice worker --version
 - `Caddyfile.dev` is an extra dev-only file: Caddy cannot switch from
   `file_server` to a Vite proxy by env var alone.
 - The prod profile runs the API in `dev` auth mode until OIDC is implemented
-  (see checklist). Treat `docker compose --profile prod` on a public host as
+  (see checklist), which also means it hands every request the admin auto
+  identity. Treat `docker compose --profile prod` on a public host as
   blocked.
 - Frontend builds are conditional at image-build time; a production image
   built before the SPA landed must be rebuilt.

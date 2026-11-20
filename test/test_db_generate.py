@@ -598,7 +598,8 @@ def test_rerun_skips_marker_but_reconciles_orphan_artifact(
         )
     )
     first = _run(cfg, {})
-    assert first.sheets_generated == [
+    # Sheets are generated concurrently, so the order is not a contract.
+    assert sorted(first.sheets_generated) == [
         f"AT{cfg.season}_1A",
         f"AT{cfg.season}_1B",
     ]

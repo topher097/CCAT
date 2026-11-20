@@ -7,7 +7,7 @@ eligibility is an explicit reader filter, not a destructive projection.
 
 Human edits and module-owned values survive deliberate field-scoped writes.
 Age formulas, atomic replacement, and sheet ownership remain in ``ccat.io``.
-No NiceGUI imports live here, keeping the store unit-testable.
+The store holds no UI or transport code, keeping it unit-testable.
 """
 
 import logging

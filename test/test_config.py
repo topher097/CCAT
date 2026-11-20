@@ -15,6 +15,8 @@ from ccat.config import (
     StorageSpec,
     WorkerSpec,
     load_config,
+    load_config_data,
+    save_config,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -157,7 +159,7 @@ def test_config_direct_construction() -> None:
     """Config constructs directly with all required fields."""
     good = json.loads(CONFIG_PATH.read_text())
     config = Config(**good)
-    assert config.audit.port == 8642
+    assert config.clarify.output_dir == "output/clarify_emails"
 
 
 def test_has_default_semantics() -> None:
@@ -234,6 +236,40 @@ def test_report_timezone_invalid_fails_config_load(tmp_path: Path) -> None:
     good["report"]["timezone"] = "Mars/Olympus_Mons"
     with pytest.raises(ConfigError, match="timezone"):
         load_config(_write(tmp_path, good))
+
+
+def test_save_config_writes_and_returns_validated(tmp_path: Path) -> None:
+    """save_config validates the mapping and writes it back verbatim."""
+    data = json.loads(CONFIG_PATH.read_text())
+    data["report"]["filename_prefix"] = "edited"
+    path = tmp_path / "cfg.json"
+    config = save_config(path, data)
+    assert isinstance(config, Config)
+    assert config.report.filename_prefix == "edited"
+    assert json.loads(path.read_text()) == data
+    assert load_config(path).report.filename_prefix == "edited"
+
+
+def test_save_config_invalid_leaves_file_untouched(tmp_path: Path) -> None:
+    """A rejected mapping raises ConfigError with paths; file unchanged."""
+    data = json.loads(CONFIG_PATH.read_text())
+    data["api"] = {"port": 99999}
+    path = _write(tmp_path, json.loads(CONFIG_PATH.read_text()))
+    before = path.read_bytes()
+    with pytest.raises(ConfigError) as excinfo:
+        save_config(path, data)
+    assert excinfo.value.errors
+    assert excinfo.value.errors[0]["path"] == "api.port"
+    assert path.read_bytes() == before
+
+
+def test_load_config_data_returns_raw_mapping(tmp_path: Path) -> None:
+    """load_config_data reads a tree the contract would reject."""
+    data = json.loads(CONFIG_PATH.read_text())
+    data["api"] = {"port": 99999}
+    data["surprise"] = True
+    path = _write(tmp_path, data)
+    assert load_config_data(path) == data
 
 
 def test_info_sheet_conversion_timeout_default_and_validation() -> None:

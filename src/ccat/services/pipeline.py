@@ -366,7 +366,7 @@ def clarify_generate(
 
     Mirrors the ``ccat clarify --generate`` branch exactly (build the
     table, refresh the CSV, generate, refresh the CSV again) without
-    starting the NiceGUI app.
+    starting any web app.
 
     Args:
         cfg: Pipeline configuration.
@@ -378,8 +378,9 @@ def clarify_generate(
     Raises:
         ClarifyError: As raised by the extraction or generation path.
     """
-    # Imported here so the service module stays free of NiceGUI.
-    from ccat.clarify.server import generate_missing
+    # Imported here so the service module stays free of the email
+    # generation helpers it does not own.
+    from ccat.clarify.email_gen import generate_missing
 
     table = build_table(Path(cfg.excel_file))
     write_csv(cfg)

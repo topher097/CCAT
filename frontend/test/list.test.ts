@@ -141,21 +141,63 @@ describe('audit list', () => {
     expect(row.text()).toContain('orphan')
   })
 
-  it('shows per-family child counts read from the children list', async () => {
+  it('shows email and address validation status for families', async () => {
     mockRoutes([
       (url) =>
         url.includes('/families?')
           ? pageOf([
-              { family_id: 1, first_name: 'One', status: 'new' },
-              { family_id: 2, first_name: 'Two', status: 'new' },
+              {
+                family_id: 1,
+                first_name: 'One',
+                status: 'new',
+                child_count: 2,
+                email_status: 'valid',
+                address_status: 'not_found',
+              },
             ])
           : undefined,
+    ])
+    const wrapper = mountList('families')
+    await flushPromises()
+
+    const cell = wrapper.get('[data-testid="validation"]')
+    expect(cell.text()).toContain('email: valid')
+    expect(cell.text()).toContain('address: not found')
+    const badges = cell.findAll('.badge')
+    expect(badges[0]!.classes()).toContain('check-ok')
+    expect(badges[1]!.classes()).toContain('check-bad')
+  })
+
+  it('shows only the email check for sponsors', async () => {
+    mockRoutes([
       (url) =>
-        url.includes('/children?')
+        url.includes('/sponsors?')
           ? pageOf([
-              { zite_record_id: 'c1', family_id: 1 },
-              { zite_record_id: 'c2', family_id: 1 },
-              { zite_record_id: 'c3', family_id: 2 },
+              {
+                sponsor_id: 10,
+                first_name: 'Ada',
+                status: 'new',
+                email_status: 'do_not_mail',
+              },
+            ])
+          : undefined,
+    ])
+    const wrapper = mountList('sponsors')
+    await flushPromises()
+
+    const cell = wrapper.get('[data-testid="validation"]')
+    expect(cell.text()).toContain('email: do not mail')
+    expect(cell.text()).not.toContain('address:')
+    expect(cell.get('.badge').classes()).toContain('check-bad')
+  })
+
+  it('renders server-computed per-family child counts', async () => {
+    const fetchMock = mockRoutes([
+      (url) =>
+        url.includes('/families?')
+          ? pageOf([
+              { family_id: 1, first_name: 'One', status: 'new', child_count: 2 },
+              { family_id: 2, first_name: 'Two', status: 'new', child_count: 0 },
             ])
           : undefined,
     ])
@@ -164,6 +206,11 @@ describe('audit list', () => {
 
     const rows = wrapper.findAll('tbody tr')
     expect(rows[0]!.text()).toContain('2')
-    expect(rows[1]!.text()).toContain('1')
+    expect(rows[1]!.text()).toContain('0')
+    expect(
+      fetchMock.mock.calls.some((call) =>
+        String(call[0]).includes('/children?'),
+      ),
+    ).toBe(false)
   })
 })

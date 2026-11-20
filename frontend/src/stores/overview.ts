@@ -47,6 +47,14 @@ export const useOverviewStore = defineStore('overview', () => {
     timer = null
   }
 
+  /** Drop cached overview data on logout/season switch (§7.2). */
+  function clear(): void {
+    stopPolling()
+    data.value = null
+    error.value = null
+    lastLoaded.value = null
+  }
+
   return {
     data,
     loading,
@@ -56,5 +64,6 @@ export const useOverviewStore = defineStore('overview', () => {
     refresh,
     startPolling,
     stopPolling,
+    clear,
   }
 })

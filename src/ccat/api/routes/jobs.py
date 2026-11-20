@@ -36,6 +36,9 @@ _SSE_POLL_SECONDS = 0.25
 #: SSE safety bound (~30s of silence before the stream ends).
 _SSE_MAX_POLLS = 120
 
+#: Log-event tail for the job detail view (log rows are far more frequent).
+_LOG_TAIL = 500
+
 
 def _view(
     job: dict[str, Any], events: list[dict[str, Any]] | None = None
@@ -57,27 +60,46 @@ def _view(
 async def _events_tail(
     session_factory: Any, job_id: int, limit: int = 20
 ) -> list[dict[str, Any]]:
-    """Read the most recent events for one job (oldest-first tail).
+    """Read the status event tail plus the most recent log lines.
+
+    Log rows arrive at a far higher rate than lifecycle events, so they
+    get their own (larger) tail; otherwise a busy job would push its
+    status events out of the detail view.
 
     Args:
         session_factory: Async session factory.
         job_id: The job id.
-        limit: Tail length.
+        limit: Status-event tail length.
 
     Returns:
-        Event dicts.
+        Event dicts, oldest first, status and log events merged.
     """
     from ccat.db.models import JobEvent as JobEventRow
 
     async with session_factory() as session:
-        rows = (
+        status_rows = (
             await session.scalars(
                 select(JobEventRow)
-                .where(JobEventRow.job_id == job_id)
+                .where(
+                    JobEventRow.job_id == job_id,
+                    JobEventRow.kind != "log",
+                )
                 .order_by(JobEventRow.id.desc())
                 .limit(limit)
             )
         ).all()
+        log_rows = (
+            await session.scalars(
+                select(JobEventRow)
+                .where(
+                    JobEventRow.job_id == job_id,
+                    JobEventRow.kind == "log",
+                )
+                .order_by(JobEventRow.id.desc())
+                .limit(_LOG_TAIL)
+            )
+        ).all()
+        rows = sorted((*status_rows, *log_rows), key=lambda row: row.id)
         return [
             {
                 "id": row.id,
@@ -86,7 +108,7 @@ async def _events_tail(
                 "kind": row.kind,
                 "data": row.data,
             }
-            for row in reversed(rows)
+            for row in rows
         ]
 
 

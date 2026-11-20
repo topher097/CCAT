@@ -4,9 +4,8 @@ import { RouterLink } from 'vue-router'
 
 import { listEntities, type Entity } from '../api/audit'
 import { useSessionStore } from '../stores/session'
-import { STATUSES } from '../utils/status'
+import { STATUSES, checkClass, checkLabel } from '../utils/status'
 import { formatTime } from '../utils/format'
-import { loadChildCounts } from '../utils/childCounts'
 import StatusBadge from '../components/StatusBadge.vue'
 
 const props = defineProps<{
@@ -38,8 +37,6 @@ const query = ref('')
 const status = ref<string>('all')
 const loading = ref(false)
 const error = ref<string | null>(null)
-const childCounts = ref<Map<string, number>>(new Map())
-let countsLoaded = false
 
 const totalPages = computed(() =>
   Math.max(1, Math.ceil(total.value / pageSize.value)),
@@ -97,16 +94,6 @@ async function load(): Promise<void> {
   }
 }
 
-async function ensureChildCounts(): Promise<void> {
-  if (countsLoaded || entity.value !== 'family') return
-  countsLoaded = true
-  try {
-    childCounts.value = await loadChildCounts(seasonName.value)
-  } catch {
-    countsLoaded = false // retry on the next load
-  }
-}
-
 function submitSearch(): void {
   page.value = 1
   void load()
@@ -129,15 +116,12 @@ watch(
     page.value = 1
     query.value = ''
     status.value = 'all'
-    countsLoaded = false
-    childCounts.value = new Map()
     void load()
   },
 )
 
 onMounted(() => {
   void load()
-  void ensureChildCounts()
 })
 </script>
 
@@ -198,6 +182,7 @@ onMounted(() => {
           <th>Email</th>
           <th v-if="entity === 'child'">Family</th>
           <th v-if="entity === 'family'">Children</th>
+          <th v-if="entity !== 'child'">Validation</th>
           <th>Indicators</th>
           <th>Last updated</th>
         </tr>
@@ -220,7 +205,19 @@ onMounted(() => {
             <span v-else class="badge">orphan</span>
           </td>
           <td v-if="entity === 'family'">
-            {{ childCounts.get(keyOf(row)) ?? 0 }}
+            {{ Number(row.child_count ?? 0) }}
+          </td>
+          <td v-if="entity !== 'child'" data-testid="validation">
+            <span class="badge" :class="checkClass(row.email_status)">
+              email: {{ checkLabel(row.email_status) }}
+            </span>
+            <span
+              v-if="entity === 'family'"
+              class="badge"
+              :class="checkClass(row.address_status)"
+            >
+              address: {{ checkLabel(row.address_status) }}
+            </span>
           </td>
           <td>
             <span v-if="row.ignore === true" class="badge">ignored</span>
@@ -265,9 +262,8 @@ onMounted(() => {
     </div>
 
     <p class="muted" style="margin-top: 0.75rem">
-      Ignored, orphaned and raw-missing rows stay visible. Raw-missing rows are
-      not flagged by the list API yet (no field); open the detail to compare
-      against the prepared baseline.
+      Ignored, orphaned and raw-missing rows stay visible. A “raw missing”
+      badge marks a row whose source record is absent from the current raw snapshot.
     </p>
   </section>
 </template>

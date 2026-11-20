@@ -350,6 +350,96 @@
         "title": "ContactRequest",
         "type": "object"
       },
+      "DbQueryRequest": {
+        "additionalProperties": false,
+        "description": "One SQL statement to run (admin only).\n\n``write`` must be true for anything that changes the database; the\nserver refuses a modifying statement without it.",
+        "properties": {
+          "sql": {
+            "title": "Sql",
+            "type": "string"
+          },
+          "write": {
+            "default": false,
+            "title": "Write",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "title": "DbQueryRequest",
+        "type": "object"
+      },
+      "DbQueryResult": {
+        "additionalProperties": true,
+        "description": "The outcome of one SQL statement.\n\nAttributes:\n    columns: Result column names (empty for a statement with no\n        result set).\n    rows: The returned rows.\n    row_count: Number of rows returned.\n    truncated: Whether more rows existed than were returned.\n    affected_rows: Rows changed by a modifying statement.\n    duration_ms: Server-side execution time.",
+        "properties": {
+          "affected_rows": {
+            "default": 0,
+            "title": "Affected Rows",
+            "type": "integer"
+          },
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
+          "duration_ms": {
+            "default": 0.0,
+            "title": "Duration Ms",
+            "type": "number"
+          },
+          "row_count": {
+            "default": 0,
+            "title": "Row Count",
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "title": "DbQueryResult",
+        "type": "object"
+      },
+      "DbTableView": {
+        "additionalProperties": true,
+        "description": "One database table with its columns and row count.",
+        "properties": {
+          "columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "row_count": {
+            "default": 0,
+            "title": "Row Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "DbTableView",
+        "type": "object"
+      },
       "DraftPatch": {
         "additionalProperties": false,
         "description": "Tri-state draft edit (omitted = unchanged, null = clear).",
@@ -1599,6 +1689,74 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/admin/db/query": {
+      "post": {
+        "description": "Run one SQL statement against the live database (admin only).\n\nArgs:\n    body: The statement and the write flag.\n    request: The current request.\n    _admin: Admin guard.\n    _csrf: CSRF guard.\n\nReturns:\n    The statement's rows (read) or its affected-row count (write).\n\nRaises:\n    ApiError: 422 empty statement; 400 invalid SQL; 403 a\n        modifying statement without ``write=true``.",
+        "operationId": "run_query_api_v1_admin_db_query_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DbQueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DbQueryResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Query",
+        "tags": [
+          "database"
+        ]
+      }
+    },
+    "/api/v1/admin/db/tables": {
+      "get": {
+        "description": "List every table with its columns and row count (admin only).\n\nArgs:\n    request: The current request.\n    _admin: Admin guard.\n\nReturns:\n    One entry per table, ordered by name.",
+        "operationId": "list_tables_api_v1_admin_db_tables_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DbTableView"
+                  },
+                  "title": "Response List Tables Api V1 Admin Db Tables Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Tables",
+        "tags": [
+          "database"
+        ]
+      }
+    },
     "/api/v1/artifacts/{artifact_id}/download": {
       "get": {
         "description": "Download one artifact (any authenticated role; no-store).\n\nThe id resolves only to a path inside the canonical artifact root\n(:func:`ccat.db.artifacts.resolve_download`); sensitive kinds are\nrecorded in the security-audit events (\u00a78).\n\nArgs:\n    artifact_id: The artifact id.\n    request: The current request.\n    _user: Authenticated identity.\n    _csrf: CSRF guard.\n\nReturns:\n    The file response (attachment disposition).\n\nRaises:\n    ApiError: 404 unknown artifact/missing file; 403 path escape.",
@@ -1709,6 +1867,74 @@
         "summary": "Me",
         "tags": [
           "auth"
+        ]
+      }
+    },
+    "/api/v1/config": {
+      "get": {
+        "description": "Return the configuration tree the settings UI edits.\n\nThe tree is the file's own values over the model's defaults, so\nevery known setting appears \u2014 including the ones the file leaves\nimplicit \u2014 and any setting added to the file later appears without\na frontend change.\n\nArgs:\n    request: The current request.\n\nReturns:\n    ``{\"path\": ..., \"config\": {...}}`` with the merged tree.",
+        "operationId": "get_config_api_v1_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Config Api V1 Config Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Config",
+        "tags": [
+          "config"
+        ]
+      },
+      "put": {
+        "description": "Validate, save, and reload the configuration file.\n\nA rejected configuration leaves the file untouched: the contract is\nchecked before anything is written.\n\nArgs:\n    body: The complete configuration mapping.\n    request: The current request.\n    _admin: Admin guard.\n    _csrf: CSRF guard.\n\nReturns:\n    ``{\"path\": ..., \"config\": {...}}`` with the saved mapping.\n\nRaises:\n    ApiError: 422 when the configuration violates the contract;\n        500 when the file cannot be written.",
+        "operationId": "put_config_api_v1_config_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Config Api V1 Config Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Config",
+        "tags": [
+          "config"
         ]
       }
     },

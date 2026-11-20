@@ -4,6 +4,66 @@
  */
 
 export interface paths {
+    "/api/v1/admin/db/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run Query
+         * @description Run one SQL statement against the live database (admin only).
+         *
+         *     Args:
+         *         body: The statement and the write flag.
+         *         request: The current request.
+         *         _admin: Admin guard.
+         *         _csrf: CSRF guard.
+         *
+         *     Returns:
+         *         The statement's rows (read) or its affected-row count (write).
+         *
+         *     Raises:
+         *         ApiError: 422 empty statement; 400 invalid SQL; 403 a
+         *             modifying statement without ``write=true``.
+         */
+        post: operations["run_query_api_v1_admin_db_query_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/db/tables": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Tables
+         * @description List every table with its columns and row count (admin only).
+         *
+         *     Args:
+         *         request: The current request.
+         *         _admin: Admin guard.
+         *
+         *     Returns:
+         *         One entry per table, ordered by name.
+         */
+        get: operations["list_tables_api_v1_admin_db_tables_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/artifacts/{artifact_id}/download": {
         parameters: {
             query?: never;
@@ -126,6 +186,57 @@ export interface paths {
          */
         get: operations["me_api_v1_auth_me_get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Config
+         * @description Return the configuration tree the settings UI edits.
+         *
+         *     The tree is the file's own values over the model's defaults, so
+         *     every known setting appears — including the ones the file leaves
+         *     implicit — and any setting added to the file later appears without
+         *     a frontend change.
+         *
+         *     Args:
+         *         request: The current request.
+         *
+         *     Returns:
+         *         ``{"path": ..., "config": {...}}`` with the merged tree.
+         */
+        get: operations["get_config_api_v1_config_get"];
+        /**
+         * Put Config
+         * @description Validate, save, and reload the configuration file.
+         *
+         *     A rejected configuration leaves the file untouched: the contract is
+         *     checked before anything is written.
+         *
+         *     Args:
+         *         body: The complete configuration mapping.
+         *         request: The current request.
+         *         _admin: Admin guard.
+         *         _csrf: CSRF guard.
+         *
+         *     Returns:
+         *         ``{"path": ..., "config": {...}}`` with the saved mapping.
+         *
+         *     Raises:
+         *         ApiError: 422 when the configuration violates the contract;
+         *             500 when the file cannot be written.
+         */
+        put: operations["put_config_api_v1_config_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -1401,6 +1512,82 @@ export interface components {
             replied?: boolean | null;
         };
         /**
+         * DbQueryRequest
+         * @description One SQL statement to run (admin only).
+         *
+         *     ``write`` must be true for anything that changes the database; the
+         *     server refuses a modifying statement without it.
+         */
+        DbQueryRequest: {
+            /** Sql */
+            sql: string;
+            /**
+             * Write
+             * @default false
+             */
+            write: boolean;
+        };
+        /**
+         * DbQueryResult
+         * @description The outcome of one SQL statement.
+         *
+         *     Attributes:
+         *         columns: Result column names (empty for a statement with no
+         *             result set).
+         *         rows: The returned rows.
+         *         row_count: Number of rows returned.
+         *         truncated: Whether more rows existed than were returned.
+         *         affected_rows: Rows changed by a modifying statement.
+         *         duration_ms: Server-side execution time.
+         */
+        DbQueryResult: {
+            /**
+             * Affected Rows
+             * @default 0
+             */
+            affected_rows: number;
+            /** Columns */
+            columns?: string[];
+            /**
+             * Duration Ms
+             * @default 0
+             */
+            duration_ms: number;
+            /**
+             * Row Count
+             * @default 0
+             */
+            row_count: number;
+            /** Rows */
+            rows?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DbTableView
+         * @description One database table with its columns and row count.
+         */
+        DbTableView: {
+            /** Columns */
+            columns?: string[];
+            /** Name */
+            name: string;
+            /**
+             * Row Count
+             * @default 0
+             */
+            row_count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * DraftPatch
          * @description Tri-state draft edit (omitted = unchanged, null = clear).
          */
@@ -1819,6 +2006,59 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    run_query_api_v1_admin_db_query_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DbQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DbQueryResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_tables_api_v1_admin_db_tables_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DbTableView"][];
+                };
+            };
+        };
+    };
     download_artifact_api_v1_artifacts__artifact_id__download_get: {
         parameters: {
             query?: never;
@@ -1915,6 +2155,65 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MeView"];
+                };
+            };
+        };
+    };
+    get_config_api_v1_config_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    put_config_api_v1_config_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
