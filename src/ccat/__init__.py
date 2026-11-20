@@ -75,9 +75,7 @@ logger = logging.getLogger(__name__)
 
 #: Default config path for every ``ccat`` command.  The
 #: ``DEFAULT_CONFIG`` environment variable overrides it (exported by
-#: ``.envrc``); the fallback is the original 2026 season config, so the
-#: repo default only changes when the user cuts over (audit arch §14
-#: Q1).
+#: ``.envrc``); the fallback is the 2026 season config.
 DEFAULT_CONFIG = os.environ.get("DEFAULT_CONFIG", "config/ccat_2026.json")
 
 
@@ -205,7 +203,7 @@ def _audit_migrate_cmd(config: str = DEFAULT_CONFIG, **kwargs: object) -> None:
 
     Args:
         config: Path to the **new** JSON configuration file (typically
-            ``config/ccat_2026_v2.json``).
+            ``config/ccat_2026.json``).
         kwargs: ``from`` (passed as ``--from``; the old workbook,
             opened read-only) and the optional ``force`` flag that
             re-creates persistent final sheets in a non-empty target.

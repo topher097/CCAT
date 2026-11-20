@@ -1,6 +1,6 @@
 """One-time v1-to-persistent-final migration (audit_architecture.md §11).
 
-``ccat audit-migrate --config config/ccat_2026_v2.json --from
+``ccat audit-migrate --config config/ccat_2026.json --from
 ./output/ccat_2026.xlsx`` copies raw, complete legacy effective rows, all
 operational logs, and the current match report into persistent ``final_*``
 stores in ``cfg.excel_file``.  Legacy-only reads explicitly use

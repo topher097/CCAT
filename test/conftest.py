@@ -36,10 +36,10 @@ def load_test_cfg(**updates: object) -> Config:
 
 @pytest.fixture(autouse=True)
 def _pin_default_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep tests on the original season config.
+    """Keep tests on the season config.
 
-    The user's ``.envrc`` exports ``DEFAULT_CONFIG`` pointing at the v2
-    config; the test suite builds its fixtures from the original
+    The user's ``.envrc`` exports ``DEFAULT_CONFIG`` pointing at the
+    season config; the test suite builds its fixtures from that
     config's table specs, so tests pin the variable to the repo
     fallback regardless of the environment they run in.
     """

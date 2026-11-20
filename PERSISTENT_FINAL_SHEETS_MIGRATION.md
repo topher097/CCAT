@@ -378,7 +378,7 @@ Suggested workflow:
 
 ```text
 ccat consolidate-migrate \
-    --config config/ccat_2026_v2.json \
+    --config config/ccat_2026.json \
     --from output/ccat_2026_v2.xlsx \
     --output output/ccat_2026_v2_persistent.xlsx
 ```

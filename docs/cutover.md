@@ -25,7 +25,7 @@ imported database; the workbook copy is never written.
 STAMP=$(date +%Y%m%d-%H%M)
 mkdir -p backups/$STAMP
 cp -a output/ccat_2026_v2.xlsx          backups/$STAMP/workbook.xlsx
-cp -a config/ccat_2026_v2.json          backups/$STAMP/config.json
+cp -a config/ccat_2026.json          backups/$STAMP/config.json
 cp -a data                              backups/$STAMP/data-templates
 cp -a output/child_info_sheets output/sponsor_packets output/reports \
       output/clarify_emails             backups/$STAMP/artifacts/ 2>/dev/null || true

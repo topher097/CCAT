@@ -520,6 +520,7 @@
   },
   "email_check": {
     "enabled": true,
+    "workers": 4,
     "delay": 0.25
   },
   "address_check": {

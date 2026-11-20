@@ -604,7 +604,7 @@
     ]
   },
   "log_file": "/logs/ccat.log",
-  "match_report_csv": "/artifacts/match_reports/ccat_2026_v2_match_report.csv",
+  "match_report_csv": "/artifacts/match_reports/ccat_2026_match_report.csv",
   "storage": {
     "mode": "db",
     "database_url": "sqlite+aiosqlite:////data/ccat.sqlite3",
