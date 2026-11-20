@@ -108,6 +108,9 @@ class Worker:
         self._cancel = CancelState()
         self._current: asyncio.Task[Any] | None = None
         self._pending: set[asyncio.Task[Any]] = set()
+        # Progress writes are dispatched concurrently; serializing them
+        # keeps the persisted snapshot from regressing to an older phase.
+        self._progress_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Loop.
@@ -587,24 +590,25 @@ class Worker:
             "failed": failed,
             "total": total,
         }
-        async with self._session_factory() as session:
-            try:
-                job = await session.get(Job, job_id)
-                if job is None:
-                    return
-                job.progress = data
-                session.add(
-                    JobEvent(
-                        job_id=job_id,
-                        ts=datetime.now(UTC),
-                        kind="progress",
-                        data=data,
+        async with self._progress_lock:
+            async with self._session_factory() as session:
+                try:
+                    job = await session.get(Job, job_id)
+                    if job is None:
+                        return
+                    job.progress = data
+                    session.add(
+                        JobEvent(
+                            job_id=job_id,
+                            ts=datetime.now(UTC),
+                            kind="progress",
+                            data=data,
+                        )
                     )
-                )
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
 
     @asynccontextmanager
     async def _repo_factory(
