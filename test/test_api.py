@@ -1235,18 +1235,16 @@ async def test_ignore_refused_on_audited_row_409(
 async def test_duplication_audit_twice_still_ok(
     app: Any, auditor: Client
 ) -> None:
-    """A second duplication audit of already-audited members returns 200."""
+    """A second duplication audit of the surviving entry returns 200."""
     await _seed_duplicates(app)
     listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
     group = listing.json()["items"][0]
-    for record_id in ("c1", "c1b"):
-        decided = await auditor.client.post(
-            f"/api/v1/seasons/2026/duplications/{group['id']}/members/"
-            f"{record_id}",
-            json={"decision": "not_duplicate", "confirm": True},
-            headers=auditor.headers(),
-        )
-        assert decided.status_code == 200, decided.text
+    decided = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/members/c1",
+        json={"decision": "not_duplicate", "confirm": True},
+        headers=auditor.headers(),
+    )
+    assert decided.status_code == 200, decided.text
     for _ in range(2):
         audited = await auditor.client.post(
             f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
@@ -2017,6 +2015,58 @@ async def _seed_duplicates(app: Any) -> None:
         await engine.dispose()
 
 
+async def _seed_family_duplicates(app: Any) -> None:
+    """Seed one duplicate family group, its family row and its child."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw={
+                    "sponsor": [raw_sponsor("rec_s1")],
+                    "family": [
+                        raw_family("fam@example.com", zite_record_id="f1"),
+                        raw_family("fam@example.com", zite_record_id="f2"),
+                    ],
+                    "child": [raw_child("c1")],
+                },
+                children=[child_row("c1", angel_id="1A")],
+                families=[
+                    family_row(
+                        1,
+                        zite_record_id="f1",
+                        primary_email="fam@example.com",
+                    )
+                ],
+                sponsors=[sponsor_row(1)],
+            )
+            await repo.replace_screen_diagnostics(
+                [
+                    _duplicate_log_row(
+                        "family_submissions",
+                        "fam@example.com",
+                        "f1",
+                        "2026-02-01T09:00:00+00:00",
+                        True,
+                        raw_family("fam@example.com", zite_record_id="f1"),
+                    ),
+                    _duplicate_log_row(
+                        "family_submissions",
+                        "fam@example.com",
+                        "f2",
+                        "2026-02-02T09:00:00+00:00",
+                        False,
+                        raw_family("fam@example.com", zite_record_id="f2"),
+                    ),
+                ],
+                [],
+                "screen",
+            )
+    finally:
+        await engine.dispose()
+
+
 async def _seed_children(app: Any, children: list[dict[str, Any]]) -> None:
     """Replace the stored final children through migrate ownership."""
     cfg = app.state.cfg
@@ -2206,24 +2256,25 @@ async def test_duplication_detail_reports_neighbours(
 
 
 async def test_duplication_mark_audited(app: Any, auditor: Client) -> None:
-    """Marking a resolved duplication audited audits its members."""
+    """Marking a group audited audits the surviving entry only."""
     await _seed_duplicates(app)
     listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
     group = listing.json()["items"][0]
-    # A member is still undecided: the group refuses.
+    # No decision leaves two survivors: the group refuses.
     refused = await auditor.client.post(
         f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
         headers=auditor.headers(),
     )
     assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "conflict"
 
-    for record_id in ("c1", "c1b"):
-        decided = await auditor.client.post(
-            f"/api/v1/seasons/2026/duplications/{group['id']}/members/{record_id}",
-            json={"decision": "not_duplicate", "confirm": True},
-            headers=auditor.headers(),
-        )
-        assert decided.status_code == 200, decided.text
+    # Release c1, leaving c1b as the group's surviving entry.
+    decided = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/members/c1",
+        json={"decision": "not_duplicate", "confirm": True},
+        headers=auditor.headers(),
+    )
+    assert decided.status_code == 200, decided.text
 
     audited = await auditor.client.post(
         f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
@@ -2235,8 +2286,204 @@ async def test_duplication_mark_audited(app: Any, auditor: Client) -> None:
 
     children = await auditor.client.get("/api/v1/seasons/2026/children")
     rows = {row["zite_record_id"]: row for row in children.json()["items"]}
-    assert rows["c1"]["status"] == "audited"
-    assert rows["c1"]["audited_at"]
+    assert rows["c1b"]["status"] == "audited"
+    assert rows["c1b"]["audited_at"]
+    # The released member is its own entry now, back to "new".
+    assert rows["c1"]["status"] == "new"
+
+
+async def test_duplication_audit_carries_the_current_values(
+    app: Any, auditor: Client
+) -> None:
+    """The audit writes the carried values into the surviving entry."""
+    await _seed_duplicates(app)
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    decided = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/members/c1",
+        json={"decision": "not_duplicate", "confirm": True},
+        headers=auditor.headers(),
+    )
+    assert decided.status_code == 200, decided.text
+    current = await auditor.client.get("/api/v1/seasons/2026/children/c1b")
+    version = current.json()["row_version"]
+
+    audited = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+        json={
+            "values": {
+                "first_name": "Marcus",
+                "ai_screening_notes": "reviewed note",
+            },
+            "expected_version": version,
+        },
+        headers=auditor.headers(),
+    )
+    assert audited.status_code == 200, audited.text
+
+    stored = await auditor.client.get("/api/v1/seasons/2026/children/c1b")
+    row = stored.json()["row"]
+    assert row["first_name"] == "Marcus"
+    assert row["ai_screening_notes"] == "reviewed note"
+    assert stored.json()["status"] == "audited"
+
+
+async def test_duplication_audit_stale_version_is_412(
+    app: Any, auditor: Client
+) -> None:
+    """A stale expected_version refuses the audit instead of overwriting."""
+    await _seed_duplicates(app)
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    decided = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/members/c1",
+        json={"decision": "not_duplicate", "confirm": True},
+        headers=auditor.headers(),
+    )
+    assert decided.status_code == 200, decided.text
+
+    audited = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+        json={"expected_version": 999},
+        headers=auditor.headers(),
+    )
+    assert audited.status_code == 412, audited.text
+    assert audited.json()["detail"]["code"] == "stale_version"
+
+
+async def test_duplication_reaudit_of_an_audited_entry(
+    app: Any, auditor: Client
+) -> None:
+    """An audited surviving entry is re-affirmed but never re-valued."""
+    await _seed_duplicates(app)
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    decided = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/members/c1",
+        json={"decision": "not_duplicate", "confirm": True},
+        headers=auditor.headers(),
+    )
+    assert decided.status_code == 200, decided.text
+    for _ in range(2):
+        audited = await auditor.client.post(
+            f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+            headers=auditor.headers(),
+        )
+        assert audited.status_code == 200, audited.text
+
+    changed = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+        json={"values": {"first_name": "Marcus"}},
+        headers=auditor.headers(),
+    )
+    assert changed.status_code == 409, changed.text
+    assert changed.json()["detail"]["code"] == "row_audited"
+
+    stored = await auditor.client.get("/api/v1/seasons/2026/children/c1b")
+    assert stored.json()["row"]["first_name"] == "Kiddo"
+
+
+async def test_duplication_reports_survivor_state(
+    app: Any, auditor: Client
+) -> None:
+    """The list and detail report each member's survivor state."""
+    await _seed_duplicates(app)
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    assert group["survivor_count"] == 2
+    assert group["released_count"] == 0
+
+    decided = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/members/c1",
+        json={"decision": "not_duplicate", "confirm": True},
+        headers=auditor.headers(),
+    )
+    assert decided.status_code == 200, decided.text
+
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    assert group["survivor_count"] == 1
+    assert group["released_count"] == 1
+
+    detail = await auditor.client.get(
+        f"/api/v1/seasons/2026/duplications/{group['id']}"
+    )
+    body = detail.json()
+    assert body["survivor_count"] == 1
+    members = {member["zite_record_id"]: member for member in body["members"]}
+    assert members["c1"]["state"] == "released"
+    assert members["c1"]["row_key"] == "c1"
+    assert members["c1"]["row_status"] == "new"
+    assert members["c1b"]["state"] == "surviving"
+    assert members["c1b"]["row_key"] == "c1b"
+    assert members["c1b"]["row_status"] == "new"
+
+
+async def test_duplication_two_surviving_entries_is_409(
+    app: Any, auditor: Client
+) -> None:
+    """Two undecided members make the audit refuse the group."""
+    await _seed_duplicates(app)
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    audited = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+        headers=auditor.headers(),
+    )
+    assert audited.status_code == 409, audited.text
+    assert (
+        "more than one surviving entry" in audited.json()["detail"]["message"]
+    )
+
+
+async def test_split_family_children_are_assigned(
+    app: Any, auditor: Client
+) -> None:
+    """A split family's child moves to the released family."""
+    await _seed_family_duplicates(app)
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    assert group["entity"] == "family"
+    released = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/members/f1",
+        json={"decision": "not_duplicate", "confirm": True},
+        headers=auditor.headers(),
+    )
+    assert released.status_code == 200, released.text
+    members = {
+        member["zite_record_id"]: member
+        for member in released.json()["members"]
+    }
+    new_family_id = int(members["f1"]["assigned_id"])
+    assert new_family_id != 1
+
+    assigned = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/children",
+        json={"assignments": {"c1": new_family_id}},
+        headers=auditor.headers(),
+    )
+    assert assigned.status_code == 200, assigned.text
+    children = {
+        child["zite_record_id"]: child for child in assigned.json()["children"]
+    }
+    assert children["c1"]["family_id"] == new_family_id
+
+    stored = await auditor.client.get("/api/v1/seasons/2026/children/c1")
+    assert stored.json()["row"]["family_id"] == new_family_id
+    assert stored.json()["row"]["angel_id"] == f"{new_family_id}A"
+
+    unknown_child = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/children",
+        json={"assignments": {"ghost": new_family_id}},
+        headers=auditor.headers(),
+    )
+    assert unknown_child.status_code == 404, unknown_child.text
+    unknown_group = await auditor.client.post(
+        "/api/v1/seasons/2026/duplications/nope/children",
+        json={"assignments": {"c1": new_family_id}},
+        headers=auditor.headers(),
+    )
+    assert unknown_group.status_code == 404, unknown_group.text
 
 
 async def test_duplications_list_paginates(app: Any, auditor: Client) -> None:
@@ -2377,13 +2624,12 @@ async def test_audited_duplication_unblocks_the_audit(
     await _seed_duplicates(app)
     listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
     group = listing.json()["items"][0]
-    for record_id in ("c1", "c1b"):
-        decided = await auditor.client.post(
-            f"/api/v1/seasons/2026/duplications/{group['id']}/members/{record_id}",
-            json={"decision": "not_duplicate", "confirm": True},
-            headers=auditor.headers(),
-        )
-        assert decided.status_code == 200, decided.text
+    decided = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/members/c1",
+        json={"decision": "not_duplicate", "confirm": True},
+        headers=auditor.headers(),
+    )
+    assert decided.status_code == 200, decided.text
     audited = await auditor.client.post(
         f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
         headers=auditor.headers(),

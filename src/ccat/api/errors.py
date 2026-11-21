@@ -16,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from ccat import audit as _audit
 from ccat.audit import AuditError
 from ccat.clarify.extract import ClarifyError
 from ccat.db.artifacts import ArtifactError
@@ -30,6 +31,12 @@ from ccat.services.db_clarify import StaleDraftError
 from ccat.zite import ZiteError
 
 logger = logging.getLogger("ccat.api")
+
+#: ``RowAuditedError`` lands with the duplication-audit service lane; the
+#: fallback keeps this module importable until the two branches meet.
+RowAuditedError: Any = getattr(
+    _audit, "RowAuditedError", type("RowAuditedError", (Exception,), {})
+)
 
 
 class ApiError(Exception):
@@ -89,6 +96,8 @@ def _domain_status(error: Exception) -> tuple[int, str]:
     """
     if isinstance(error, StaleRowVersionError | StaleDraftError):
         return 412, "stale_version"
+    if isinstance(error, RowAuditedError):
+        return 409, "row_audited"
     if isinstance(error, EntityRemovalError | JobConflictError):
         return 409, "conflict"
     if isinstance(error, JobNotFound):
