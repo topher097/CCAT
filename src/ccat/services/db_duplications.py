@@ -168,6 +168,65 @@ def filter_groups(
     ]
 
 
+async def pending_groups_by_row(
+    repo: SeasonStoreRepository,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Map each audit row key to the duplicate group that still needs audit.
+
+    Args:
+        repo: The season-bound repository.
+
+    Returns:
+        ``{entity: {row_key: {"id": ..., "group_key": ..., "status": ...}}}``
+        for every group whose status is not ``audited``.  The row key is
+        the entity's own audit key (``zite_record_id`` for children and
+        sponsors, ``family_id`` for families).  A member with no final
+        row contributes nothing.
+    """
+    groups = await _groups(repo)
+    decisions = await _decisions(repo)
+    states = await _states(repo)
+    finals = await _final_rows(repo)
+    keys = {entity: ENTITY_SPECS[entity]["key"] for entity in _ENTITIES}
+    pending: dict[str, dict[str, dict[str, Any]]] = {
+        entity: {} for entity in _ENTITIES
+    }
+    for group in groups:
+        status = _group_status(group, decisions, states)
+        if status == STATUS_AUDITED:
+            continue
+        family_row = _group_family_row(group, finals["family"])
+        entry = {
+            "id": group.id,
+            "group_key": group.group_key,
+            "status": status,
+        }
+        key_column = keys[group.entity]
+        for member in group.members:
+            row = _member_row(group, member, finals, family_row)
+            if row is None:
+                continue
+            pending[group.entity][str(row.get(key_column))] = entry
+    return pending
+
+
+async def status_counts(repo: SeasonStoreRepository) -> dict[str, int]:
+    """Count the duplicate groups per status.
+
+    Args:
+        repo: The season-bound repository.
+
+    Returns:
+        ``{"pending": n, "resolved": n, "audited": n}``; every key is
+        present, zero when no group has that status.
+    """
+    counts = {"pending": 0, "resolved": 0, "audited": 0}
+    for group in await list_groups(repo):
+        status = str(group["status"])
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
 async def group_neighbours(
     repo: SeasonStoreRepository,
     wanted_id: str,
@@ -1149,5 +1208,7 @@ __all__ = [
     "group_neighbours",
     "list_groups",
     "mark_audited",
+    "pending_groups_by_row",
+    "status_counts",
     "sync_pending_angel_letters",
 ]

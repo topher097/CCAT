@@ -31,7 +31,7 @@ from ccat.api.dto import (
 from ccat.api.errors import ApiError
 from ccat.db.repositories import SeasonStoreRepository
 from ccat.db.errors import StaleRowVersionError
-from ccat.services import db_audit
+from ccat.services import db_audit, db_duplications
 from ccat.services.audit import SavePatch
 
 if TYPE_CHECKING:
@@ -156,10 +156,21 @@ async def _detail_payload(
         )
         submissions = list(groups.get(group_key, []))
     previous, next_row = db_audit.neighbours(entity, rows, key, q, status)
+    public = _public_row(entity, existing)
+    pending = (await db_duplications.pending_groups_by_row(repo))[entity]
+    entry = pending.get(str(existing.get(spec_key)))
+    public["duplicate_pending"] = entry is not None
+    public["duplicate_group_id"] = entry["id"] if entry else None
+    if entity == "child":
+        counts = await repo.family_child_counts()
+        family_id = existing.get("family_id")
+        public["family_child_count"] = (
+            counts.get(int(family_id), 0) if family_id is not None else 0
+        )
     return EntityDetail(
         entity=entity,
         key=str(existing.get(spec_key)),
-        row=_public_row(entity, existing),
+        row=public,
         baseline=canonicalize(entity, baseline),
         submissions=submissions,
         status=str(existing.get("status") or "new"),
@@ -254,6 +265,7 @@ async def list_children(
     page_size: int = Query(50, ge=1, le=200),
     q: str = "",
     status: str | None = None,
+    family_id: int | None = None,
 ) -> EntityListPage:
     """List children — ignored/orphan/raw-missing rows included (§5.2).
 
@@ -264,11 +276,13 @@ async def list_children(
         page_size: Page size (max 200).
         q: Search on name/email/id.
         status: Stored-status filter.
+        family_id: Exact family filter; the search query only ever
+            matches a family id as a substring.
 
     Returns:
         One page of rows.
     """
-    return await _list("child", repo, page, page_size, q, status)
+    return await _list("child", repo, page, page_size, q, status, family_id)
 
 
 async def _list(
@@ -278,6 +292,7 @@ async def _list(
     page_size: int,
     q: str,
     status: str | None,
+    family_id: int | None = None,
 ) -> EntityListPage:
     """Shared list implementation (sort → filter → paginate → canonicalize).
 
@@ -288,12 +303,19 @@ async def _list(
         page_size: Page size.
         q: Search query.
         status: Stored-status filter.
+        family_id: Exact family filter (children only).
 
     Returns:
         The page DTO.
     """
     rows = await repo.final_rows(entity)
     rows = db_audit.ordered_rows(entity, rows, q, status)
+    if family_id is not None:
+        rows = [
+            row
+            for row in rows
+            if str(row.get("family_id") or "") == str(family_id)
+        ]
     filtered = rows
     start = (page - 1) * page_size
     items = [
@@ -304,6 +326,7 @@ async def _list(
         for item in items:
             item["child_count"] = counts.get(int(item["family_id"]), 0)
     elif entity == "child":
+        counts = await repo.family_child_counts()
         raw_ids = {
             str(row.get("zite_record_id") or "")
             for row in await repo.raw_rows("child")
@@ -312,6 +335,16 @@ async def _list(
             item["raw_missing"] = (
                 str(item.get("zite_record_id") or "") not in raw_ids
             )
+            family_id = item.get("family_id")
+            item["family_child_count"] = (
+                counts.get(int(family_id), 0) if family_id is not None else 0
+            )
+    pending = (await db_duplications.pending_groups_by_row(repo))[entity]
+    key_column = _KEY_COLUMN[entity]
+    for item in items:
+        entry = pending.get(str(item.get(key_column)))
+        item["duplicate_pending"] = entry is not None
+        item["duplicate_group_id"] = entry["id"] if entry else None
     if entity in {"family", "sponsor"}:
         statuses = await db_audit.validation_statuses(repo, entity, filtered)
         for item in items:
@@ -435,6 +468,19 @@ def _detail_routes(segment: str, entity: str) -> None:
             field: getattr(body, field) for field in body.model_fields_set
         }
         patch = SavePatch(**decanonicalize_patch(provided))
+        if body.status == "audited":
+            entry = (await db_duplications.pending_groups_by_row(repo))[
+                entity
+            ].get(str(key))
+            if entry is not None:
+                raise ApiError(
+                    409,
+                    "duplicate_pending",
+                    "this row belongs to a duplicate group that is still"
+                    " awaiting adjudication",
+                    group_id=entry["id"],
+                    group_key=entry["group_key"],
+                )
         try:
             await db_audit.save_entity_db(
                 repo,

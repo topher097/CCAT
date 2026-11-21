@@ -2650,7 +2650,7 @@
     },
     "/api/v1/seasons/{season}/children": {
       "get": {
-        "description": "List children \u2014 ignored/orphan/raw-missing rows included (\u00a75.2).\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: Search on name/email/id.\n    status: Stored-status filter.\n\nReturns:\n    One page of rows.",
+        "description": "List children \u2014 ignored/orphan/raw-missing rows included (\u00a75.2).\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: Search on name/email/id.\n    status: Stored-status filter.\n    family_id: Exact family filter; the search query only ever\n        matches a family id as a substring.\n\nReturns:\n    One page of rows.",
         "operationId": "list_children_api_v1_seasons__season__children_get",
         "parameters": [
           {
@@ -2709,6 +2709,22 @@
                 }
               ],
               "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "family_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Family Id"
             }
           }
         ],

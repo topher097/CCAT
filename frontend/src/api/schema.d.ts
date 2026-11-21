@@ -519,6 +519,8 @@ export interface paths {
          *         page_size: Page size (max 200).
          *         q: Search on name/email/id.
          *         status: Stored-status filter.
+         *         family_id: Exact family filter; the search query only ever
+         *             matches a family id as a substring.
          *
          *     Returns:
          *         One page of rows.
@@ -2817,6 +2819,7 @@ export interface operations {
                 page_size?: number;
                 q?: string;
                 status?: string | null;
+                family_id?: number | null;
             };
             header?: never;
             path: {

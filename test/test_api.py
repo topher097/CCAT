@@ -1838,6 +1838,17 @@ async def _seed_duplicates(app: Any) -> None:
         await engine.dispose()
 
 
+async def _seed_children(app: Any, children: list[dict[str, Any]]) -> None:
+    """Replace the stored final children through migrate ownership."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(repo, children=children)
+    finally:
+        await engine.dispose()
+
+
 async def test_duplications_list_and_detail(app: Any, auditor: Client) -> None:
     """The Duplications list and detail expose the raw and screened rows."""
     await _seed_duplicates(app)
@@ -2016,3 +2027,165 @@ async def test_duplication_mark_audited(app: Any, auditor: Client) -> None:
     rows = {row["zite_record_id"]: row for row in children.json()["items"]}
     assert rows["c1"]["status"] == "audited"
     assert rows["c1"]["audited_at"]
+
+
+async def test_children_list_reports_family_child_count(
+    app: Any, auditor: Client
+) -> None:
+    """A child row carries its angel id and the size of its family."""
+    await _seed_default(app)
+    await _seed_children(
+        app,
+        [
+            child_row("c1", angel_id="1A"),
+            child_row("c2", first_name="Lee", angel_id="1B"),
+            child_row("orphan", family_id=None),
+        ],
+    )
+    response = await auditor.client.get("/api/v1/seasons/2026/children")
+    assert response.status_code == 200, response.text
+    rows = {row["zite_record_id"]: row for row in response.json()["items"]}
+    assert rows["c1"]["angel_id"] == "1A"
+    assert rows["c1"]["family_child_count"] == 2
+    assert rows["c2"]["family_child_count"] == 2
+    assert rows["orphan"]["family_child_count"] == 0
+
+
+async def test_children_list_filters_one_family_exactly(
+    app: Any, auditor: Client
+) -> None:
+    """The family filter matches the family id, not a substring of it."""
+    await _seed_default(app)
+    await _seed_children(
+        app,
+        [
+            child_row("c1", family_id=1),
+            child_row("c2", family_id=1),
+            child_row("c10", family_id=10),
+            child_row("c11", family_id=11),
+            child_row("other", family_id=2, first_name="Anna1"),
+        ],
+    )
+    response = await auditor.client.get(
+        "/api/v1/seasons/2026/children?family_id=1"
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 2
+    assert sorted(row["zite_record_id"] for row in body["items"]) == [
+        "c1",
+        "c2",
+    ]
+
+
+async def test_child_detail_reports_family_child_count(
+    app: Any, auditor: Client
+) -> None:
+    """The child detail row carries its family child count too."""
+    await _seed_default(app)
+    await _seed_children(
+        app,
+        [
+            child_row("c1", angel_id="1A"),
+            child_row("c2", first_name="Lee", angel_id="1B"),
+        ],
+    )
+    response = await auditor.client.get("/api/v1/seasons/2026/children/c1")
+    assert response.status_code == 200, response.text
+    assert response.json()["row"]["family_child_count"] == 2
+
+
+async def test_children_list_reports_open_duplicate_group(
+    app: Any, auditor: Client
+) -> None:
+    """Group members carry the open group; other rows carry none."""
+    await _seed_duplicates(app)
+    await _seed_children(
+        app,
+        [
+            child_row("c1", angel_id=None),
+            child_row("c1b", angel_id="1A"),
+            child_row("c3", angel_id="1B"),
+        ],
+    )
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+
+    children = await auditor.client.get("/api/v1/seasons/2026/children")
+    rows = {row["zite_record_id"]: row for row in children.json()["items"]}
+    for record_id in ("c1", "c1b"):
+        assert rows[record_id]["duplicate_pending"] is True
+        assert rows[record_id]["duplicate_group_id"] == group["id"]
+    assert rows["c3"]["duplicate_pending"] is False
+    assert rows["c3"]["duplicate_group_id"] is None
+
+
+async def test_marking_pending_duplicate_audited_is_409(
+    app: Any, auditor: Client
+) -> None:
+    """An audit of a row in an open duplicate group is refused."""
+    await _seed_duplicates(app)
+    response = await auditor.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"status": "audited"},
+        headers=auditor.headers() | {"If-Match": "1"},
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "duplicate_pending"
+    assert detail["group_id"]
+    assert detail["group_key"] == "fam@example.com|Kiddo"
+
+    current = await auditor.client.get("/api/v1/seasons/2026/children/c1")
+    assert current.json()["status"] == "new"
+
+
+async def test_audited_duplication_unblocks_the_audit(
+    app: Any, auditor: Client
+) -> None:
+    """Once its group is audited, the row may be marked audited."""
+    await _seed_duplicates(app)
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    for record_id in ("c1", "c1b"):
+        decided = await auditor.client.post(
+            f"/api/v1/seasons/2026/duplications/{group['id']}/members/{record_id}",
+            json={"decision": "not_duplicate", "confirm": True},
+            headers=auditor.headers(),
+        )
+        assert decided.status_code == 200, decided.text
+    audited = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+        headers=auditor.headers(),
+    )
+    assert audited.status_code == 200, audited.text
+
+    children = await auditor.client.get("/api/v1/seasons/2026/children")
+    rows = {row["zite_record_id"]: row for row in children.json()["items"]}
+    assert rows["c1"]["duplicate_pending"] is False
+    assert rows["c1"]["duplicate_group_id"] is None
+
+    current = await auditor.client.get("/api/v1/seasons/2026/children/c1")
+    version = current.json()["row_version"]
+    patched = await auditor.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"status": "audited"},
+        headers=auditor.headers() | {"If-Match": str(version)},
+    )
+    assert patched.status_code == 200, patched.text
+
+
+async def test_overview_reports_duplication_counts(
+    app: Any, auditor: Client
+) -> None:
+    """The overview carries the group totals per status."""
+    await _seed_duplicates(app)
+    response = await auditor.client.get("/api/v1/seasons/2026/overview")
+    assert response.status_code == 200, response.text
+    duplication = response.json()["entities"]["duplication"]
+    assert duplication["total"] == 1
+    assert duplication["by_status"] == {
+        "pending": 1,
+        "resolved": 0,
+        "audited": 0,
+    }

@@ -10,6 +10,7 @@ from ccat.api.deps import season_repo
 from ccat.api.dto import Overview, SeasonView
 from ccat.db.models import AddressCheck, EmailCheck, Job, Season
 from ccat.db.repositories import SeasonStoreRepository
+from ccat.services import db_duplications
 
 if TYPE_CHECKING:
     from ccat.db.uow import UnitOfWork
@@ -154,6 +155,11 @@ async def overview(
             if stamp and (revision is None or str(stamp) > revision):
                 revision = str(stamp)
     duplicate_rows = await repo.duplicate_log_rows()
+    duplication = await db_duplications.status_counts(repo)
+    entities["duplication"] = {
+        "total": sum(duplication.values()),
+        "by_status": duplication,
+    }
     dob_rows = await repo.dob_log_rows()
     async with uow.session() as session:
         season_id_row = await session.scalar(
