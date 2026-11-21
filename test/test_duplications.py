@@ -1045,8 +1045,14 @@ def test_mark_audited_refuses_a_stale_expected_version(
                         expected_version=999,
                     )
                 children = await _rows(repo, "child")
+                states = await repo.duplication_state_rows()
+                after = await _group(repo, "child")
             assert children["c1b"]["first_name"] == "Kiddo"
             assert children["c1b"]["status"] == "new"
+            # The state row is written last, so a failed audit leaves the
+            # group resolved rather than audited.
+            assert states == []
+            assert after["status"] == "resolved"
         finally:
             await uow.engine.dispose()
 

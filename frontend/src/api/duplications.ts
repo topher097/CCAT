@@ -3,8 +3,8 @@
 import { api } from './client'
 import type { Schemas } from './client'
 
-// These fields arrive with the next schema refresh; intersect now so the
-// file stays correct once the generated types include them.
+// The generated schema carries these fields; the intersections narrow the
+// member state to its three values.
 export type DuplicationListItem = Schemas['DuplicationListItem'] & {
   survivor_count: number
   released_count: number
