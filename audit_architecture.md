@@ -258,6 +258,19 @@ adjudication rules; this section describes how they are exposed.
   identity skeleton and module-owned markers; unignore re-seeds the data
   columns from the raw baseline (existing edits to those rows are lost —
   the same destructive rule the removed NiceGUI tool applied).
+- An audited row's values are final. A patch that changes any value on a
+  row whose stored status is `audited` is refused with `409 row_audited`,
+  and so is ignoring such a row. Undoing the audit (`status: "new"`) is
+  the admin-only override (`403 admin_required`): an admin undoes the
+  audit, changes the row, then marks it audited again. The rule lives in
+  the audit route, not in the save service, so the duplication group's own
+  audit still reconciles its member rows through
+  `services.db_audit.save_entity_db`.
+- "Mark audited" stays reachable whenever the operation is legitimate.
+  When the row still carries unsaved edits the SPA asks first: save them
+  and mark the row audited in one PATCH, or mark the stored values
+  audited without them. The duplication group's "Mark audited" asks the
+  same question before it saves the pending decisions.
 - `audited_at` is stamped on every save, exactly as before. The human
   audit authority remains `status == "audited"`; there is no replacement
   Boolean and no reuse of the audit timestamp as a generic "last touched"
