@@ -7,6 +7,7 @@ file on disk and the in-memory configuration agree.
 """
 
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,13 +57,13 @@ def _config_tree(tmp_path: Path) -> dict[str, Any]:
 
 
 @pytest.fixture
-def setup(tmp_path: Path) -> Setup:
+async def setup(tmp_path: Path) -> AsyncIterator[Setup]:
     """One migrated, seeded app started with a tmp config file.
 
     Args:
         tmp_path: Per-test temporary directory.
 
-    Returns:
+    Yields:
         The app, its validated config, and the config file path.
     """
     data = _config_tree(tmp_path)
@@ -75,9 +76,12 @@ def setup(tmp_path: Path) -> Setup:
             cfg.storage.database_url.replace("sqlite+aiosqlite", "sqlite")
         )
     )
-    return Setup(
-        create_app(cfg, config_path=str(config_file)), cfg, config_file
-    )
+    application = create_app(cfg, config_path=str(config_file))
+    try:
+        yield Setup(application, cfg, config_file)
+    finally:
+        # End the aiosqlite worker thread with the test's event loop.
+        await application.state.uow.engine.dispose()
 
 
 async def test_get_returns_effective_tree_and_path(setup: Setup) -> None:

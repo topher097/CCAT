@@ -263,8 +263,15 @@ class Client:
 
 
 @pytest.fixture
-def app(tmp_path: Path) -> Any:
-    """One migrated, seeded app instance (dev auth mode)."""
+async def app(tmp_path: Path) -> AsyncIterator[Any]:
+    """One migrated, seeded app instance (dev auth mode).
+
+    Args:
+        tmp_path: Per-test temporary directory.
+
+    Yields:
+        The FastAPI app.
+    """
     cfg = _cfg(tmp_path)
     run_migrations(cfg.storage.database_url)
     from ccat.db.engine import create_sync_engine
@@ -275,24 +282,39 @@ def app(tmp_path: Path) -> Any:
             cfg.storage.database_url.replace("sqlite+aiosqlite", "sqlite")
         )
     )
-    return create_app(cfg)
+    application = create_app(cfg)
+    try:
+        yield application
+    finally:
+        # End the aiosqlite worker thread with the test's event loop.
+        await application.state.uow.engine.dispose()
 
 
 @pytest.fixture
-def oidc_app(app: Any) -> Any:
+async def oidc_app(app: Any) -> AsyncIterator[Any]:
     """One app instance in a non-dev auth mode (production posture).
 
     Shares the seeded database with :func:`app`; only the auth mode
     differs, so the strict session rules stay testable.
+
+    Args:
+        app: The seeded app.
+
+    Yields:
+        The app in OIDC auth mode.
     """
     cfg = app.state.cfg
-    return create_app(
+    application = create_app(
         cfg.model_copy(
             update={
                 "api": cfg.api.model_copy(update={"auth_mode": "oidc"}),
             }
         )
     )
+    try:
+        yield application
+    finally:
+        await application.state.uow.engine.dispose()
 
 
 async def _session_token(
