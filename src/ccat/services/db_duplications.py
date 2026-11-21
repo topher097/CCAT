@@ -29,10 +29,11 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ccat.audit import AuditError
+from ccat.audit import AuditError, RowAuditedError
 from ccat.audit.store import (
     ENTITY_SPECS,
     STATUS_AUDITED,
+    STATUS_NEW,
     _as_int,
     _as_text,
     _default_row,
@@ -45,6 +46,8 @@ from ccat.services import db_audit
 from ccat.services.audit import SavePatch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from ccat.config import Config
     from ccat.db.repositories import SeasonStoreRepository
 
@@ -111,6 +114,7 @@ async def list_groups(repo: SeasonStoreRepository) -> list[dict[str, Any]]:
     states = await _states(repo)
     summaries: list[dict[str, Any]] = []
     for group in groups:
+        classified = _classify_members(group, decisions)
         decided = sum(
             1
             for member in group.members
@@ -127,6 +131,8 @@ async def list_groups(repo: SeasonStoreRepository) -> list[dict[str, Any]]:
                 "group_key": group.group_key,
                 "member_count": len(group.members),
                 "decided_count": decided,
+                "survivor_count": len(classified["surviving"]),
+                "released_count": len(classified["released"]),
                 "status": _group_status(group, decisions, states),
                 "survivor_record_id": str(
                     (survivor or {}).get("zite_record_id") or ""
@@ -195,7 +201,7 @@ async def pending_groups_by_row(
         status = _group_status(group, decisions, states)
         if status == STATUS_AUDITED:
             continue
-        family_row = _group_family_row(group, finals["family"])
+        family_row = _group_family_row(group, finals["family"], decisions)
         entry = {
             "id": group.id,
             "group_key": group.group_key,
@@ -203,7 +209,7 @@ async def pending_groups_by_row(
         }
         key_column = keys[group.entity]
         for member in group.members:
-            row = _member_row(group, member, finals, family_row)
+            row = _member_row(group, member, finals, family_row, decisions)
             if row is None:
                 continue
             pending[group.entity][str(row.get(key_column))] = entry
@@ -293,11 +299,18 @@ async def group_detail(
         return None
     finals = await _final_rows(repo)
     decisions = await _decisions(repo)
-    family_row = _group_family_row(group, finals["family"])
+    classified = _classify_members(group, decisions)
+    member_states = {
+        str(member.get("zite_record_id") or ""): state
+        for state, members in classified.items()
+        for member in members
+    }
+    key_column = ENTITY_SPECS[group.entity]["key"]
+    family_row = _group_family_row(group, finals["family"], decisions)
     members: list[dict[str, Any]] = []
     for member in group.members:
         record_id = str(member.get("zite_record_id") or "")
-        screened = _member_row(group, member, finals, family_row)
+        screened = _member_row(group, member, finals, family_row, decisions)
         decision = _decision_for(decisions, group, member)
         members.append(
             {
@@ -314,6 +327,11 @@ async def group_detail(
                 "conflict_details": member.get("conflict_details"),
                 "raw": _raw_record(member),
                 "screened": screened,
+                "state": member_states.get(record_id),
+                "row_key": (
+                    str(screened.get(key_column)) if screened else None
+                ),
+                "row_status": screened.get("status") if screened else None,
                 "decision": decision["decision"] if decision else None,
                 "assigned_id": decision["assigned_id"] if decision else None,
                 "decided_by": decision["actor"] if decision else None,
@@ -331,8 +349,10 @@ async def group_detail(
         "entity": group.entity,
         "group_key": group.group_key,
         "status": _group_status(group, decisions, states),
+        "survivor_count": len(classified["surviving"]),
         "audited_at": (state or {}).get("audited_at"),
         "members": members,
+        "children": _group_children(group, decisions, finals),
     }
 
 
@@ -386,7 +406,8 @@ async def decide(
         raise AuditError(
             f"unknown duplication member {record_id!r} in group {wanted_id!r}"
         )
-    standing = _decision_for(await _decisions(repo), group, member)
+    decisions = await _decisions(repo)
+    standing = _decision_for(decisions, group, member)
     if standing is not None and standing["decision"] == decision:
         # The same decision already stands: a retry after a lost response
         # changes nothing and adds no trail row.
@@ -394,11 +415,13 @@ async def decide(
         assert detail is not None
         return detail
     if decision == DECISION_IGNORE:
-        await _ignore_member(repo, cfg, group, member, actor, expected_version)
+        await _ignore_member(
+            repo, cfg, group, member, actor, expected_version, decisions
+        )
         assigned_id = None
     else:
         assigned_id = await _release_member(
-            repo, cfg, group, member, actor, expected_version
+            repo, cfg, group, member, actor, expected_version, decisions
         )
     await repo.record_duplication_audit(
         group.sheet,
@@ -418,66 +441,180 @@ async def mark_audited(
     cfg: Config,
     wanted_id: str,
     actor: str,
+    values: dict[str, Any] | None = None,
+    expected_version: int | None = None,
 ) -> dict[str, Any]:
-    """Mark a resolved duplication audited and reconcile its final rows.
+    """Finalize a duplicate group on its surviving entry.
 
-    The group's members become audited (``status`` and ``audited_at``)
-    and the affected family's and sponsor's angel columns are
-    re-derived, so the ``final_*`` tables agree with the adjudication.
-    The recorded group state stays the flag that says so.
+    The surviving entry is the one submission the auditor left
+    undecided; every other member is closed out per its decision.
+    The surviving entry is saved once, with the carried values and the
+    audited status, and it is saved last.  A released member's row is
+    forced back to ``new`` so it awaits its own audit; a discarded
+    member's row stays ignored and untouched.  The affected angel
+    columns are re-derived, and the group's state row is recorded last.
 
     Args:
         repo: The season-bound repository.
         cfg: Pipeline configuration.
         wanted_id: The group's id.
         actor: Requesting user identity.
+        values: The reviewed ``Current (editable)`` values for the
+            surviving entry's row; keys are legacy editable columns.
+        expected_version: The caller's expected ``row_version`` for the
+            surviving entry's row.
 
     Returns:
         The updated group detail.
 
     Raises:
-        AuditError: For an unknown group, a group with an undecided
-            member, or a member the audit refuses to audit.
+        AuditError: For an unknown group, a group without exactly one
+            surviving entry, an unknown field, or a missing stored row.
+        RowAuditedError: When values would change an already audited
+            surviving entry.
+        StaleRowVersionError: When the surviving row changed since the
+            caller's read.
     """
-    groups = await _groups(repo)
-    group = next((g for g in groups if g.id == wanted_id), None)
+    group = next((g for g in await _groups(repo) if g.id == wanted_id), None)
     if group is None:
         raise AuditError(f"unknown duplication group {wanted_id!r}")
     decisions = await _decisions(repo)
-    undecided = [
-        member
-        for member in group.members
-        if _decision_for(decisions, group, member) is None
-    ]
-    if undecided:
+    classified = _classify_members(group, decisions)
+    surviving = classified["surviving"]
+    if not surviving:
         raise AuditError(
-            "the duplication still has undecided members; resolve every"
-            " member before marking it audited"
+            "this group has no surviving entry; discard or release every"
+            " submission before marking it audited"
         )
+    if len(surviving) > 1:
+        raise AuditError(
+            "this group has more than one surviving entry; discard or"
+            " release all but one submission before marking it audited"
+        )
+    entity = group.entity
+    spec = ENTITY_SPECS[entity]
+    key_column = spec["key"]
+    carried = {
+        field: value
+        for field, value in (values or {}).items()
+        if field != "status"
+    }
+    unknown = sorted(
+        set(carried) - set(spec["editable"]) - {"clarification_notes"}
+    )
+    if unknown:
+        raise AuditError(f"unknown {entity} fields: {unknown}")
     finals = await _final_rows(repo)
-    family_row = _group_family_row(group, finals["family"])
-    key_column = ENTITY_SPECS[group.entity]["key"]
-    affected: list[int | None] = []
-    for member in group.members:
-        row = _member_row(group, member, finals, family_row)
-        if row is None:
+    family_row = _group_family_row(group, finals["family"], decisions)
+    surviving_row = _member_row(
+        group, surviving[0], finals, family_row, decisions
+    )
+    if surviving_row is None:
+        raise AuditError(
+            f"no stored {entity} row for the surviving entry"
+            f" {surviving[0].get('zite_record_id')!r}"
+        )
+    surviving_key = str(surviving_row.get(key_column))
+    if carried and surviving_row.get("status") == STATUS_AUDITED:
+        raise RowAuditedError(
+            "the surviving entry is already audited; its values are final"
+        )
+    # A family group's members share one row, so resolve every member
+    # first and close each distinct row out once.
+    rows: dict[str, tuple[dict[str, Any], str]] = {}
+    for state in ("released", "discarded"):
+        for member in classified[state]:
+            row = _member_row(group, member, finals, family_row, decisions)
+            if row is not None:
+                rows.setdefault(str(row.get(key_column)), (row, state))
+    rows[surviving_key] = (surviving_row, "surviving")
+    for key, (row, state) in rows.items():
+        if key == surviving_key or as_bool(row.get("ignore")):
             continue
-        if as_bool(row.get("ignore")):
-            # An ignored row stays ignored; the audit save would only
-            # reseed it.
-            continue
+        if state == "released":
+            await _override_status(
+                repo, entity, row[key_column], STATUS_NEW, actor
+            )
+    if not as_bool(surviving_row.get("ignore")):
         await db_audit.save_entity_db(
             repo,
             cfg,
-            group.entity,
-            row[key_column],
-            SavePatch(status=STATUS_AUDITED),
+            entity,
+            surviving_row[key_column],
+            SavePatch(**carried, status=STATUS_AUDITED),
             actor,
-            expected_version=row.get("_row_version"),
+            expected_version=(
+                expected_version
+                if expected_version is not None
+                else surviving_row.get("_row_version")
+            ),
         )
-        affected.append(_as_int(row.get("family_id")))
-    await _refresh_angel_columns(repo, actor, affected)
+    await _refresh_angel_columns(
+        repo, actor, [_as_int(row.get("family_id")) for row, _ in rows.values()]
+    )
     await repo.record_duplication_state(group.sheet, group.group_key, actor)
+    detail = await group_detail(repo, wanted_id)
+    assert detail is not None
+    return detail
+
+
+async def assign_group_children(
+    repo: SeasonStoreRepository,
+    wanted_id: str,
+    actor: str,
+    assignments: dict[str, int],
+) -> dict[str, Any]:
+    """Move a split family's children to the family the auditor chose.
+
+    Args:
+        repo: The season-bound repository.
+        wanted_id: The family group's id.
+        actor: Requesting user identity.
+        assignments: Child ``zite_record_id`` -> target ``family_id``.
+
+    Returns:
+        The updated group detail.
+
+    Raises:
+        AuditError: For an unknown group or child, a group that is not a
+            family, a target family outside the group, or a child that
+            is not in the group.
+    """
+    group = next((g for g in await _groups(repo) if g.id == wanted_id), None)
+    if group is None:
+        raise AuditError(f"unknown duplication group {wanted_id!r}")
+    if group.entity != "family":
+        raise AuditError(
+            f"duplication group {wanted_id!r} is not a family group"
+        )
+    decisions = await _decisions(repo)
+    family_ids = _family_ids(group, decisions, await repo.final_rows("family"))
+    if not family_ids:
+        raise AuditError(
+            f"no stored family row for duplication group {group.group_key!r}"
+        )
+    child_rows = await repo.final_rows("child")
+    by_record = {
+        str(row.get("zite_record_id") or ""): row for row in child_rows
+    }
+    for record_id, family_id in assignments.items():
+        row = by_record.get(str(record_id))
+        if row is None:
+            raise AuditError(f"unknown child {record_id!r}")
+        if family_id not in family_ids:
+            raise AuditError(f"family {family_id!r} is not part of this group")
+        current = _as_int(row.get("family_id"))
+        if current not in family_ids:
+            raise AuditError(f"child {record_id!r} is not in this group")
+        if current == family_id:
+            continue
+        row["family_id"] = family_id
+        row["angel_id"] = _free_letter(
+            family_id,
+            _used_letters(family_id, child_rows, exclude=str(record_id)),
+        )
+    await repo.commit_finals("duplication", "child", child_rows, actor)
+    await _refresh_angel_columns(repo, actor, family_ids)
     detail = await group_detail(repo, wanted_id)
     assert detail is not None
     return detail
@@ -557,6 +694,7 @@ async def _ignore_member(
     member: dict[str, Any],
     actor: str,
     expected_version: int | None,
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
 ) -> None:
     """Ignore one group member through the ordinary ignore action.
 
@@ -567,13 +705,14 @@ async def _ignore_member(
         member: The audited group member.
         actor: Requesting user identity.
         expected_version: The caller's expected ``row_version``.
+        decisions: The member decisions.
 
     Raises:
         AuditError: When the member has no stored row to ignore.
     """
     finals = await _final_rows(repo)
-    family_row = _group_family_row(group, finals["family"])
-    row = _member_row(group, member, finals, family_row)
+    family_row = _group_family_row(group, finals["family"], decisions)
+    row = _member_row(group, member, finals, family_row, decisions)
     if row is None:
         raise AuditError(
             f"no stored row to ignore for {member.get('zite_record_id')!r}"
@@ -597,6 +736,7 @@ async def _release_member(
     member: dict[str, Any],
     actor: str,
     expected_version: int | None,
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
 ) -> str | None:
     """Give one group member a unique id of its own.
 
@@ -607,6 +747,7 @@ async def _release_member(
         member: The audited group member.
         actor: Requesting user identity.
         expected_version: The caller's expected ``row_version``.
+        decisions: The member decisions.
 
     Returns:
         The unique id the member received, when it received one.
@@ -621,7 +762,7 @@ async def _release_member(
     if group.entity == "sponsor":
         return await _release_sponsor(repo, member, actor, expected_version)
     return await _release_family(
-        repo, cfg, group, member, actor, expected_version
+        repo, cfg, group, member, actor, expected_version, decisions
     )
 
 
@@ -744,14 +885,14 @@ async def _release_family(
     member: dict[str, Any],
     actor: str,
     expected_version: int | None,
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
 ) -> str:
     """Release a duplicate family submission as its own family.
 
     The group's submissions share one ``family_id``, so a released
     submission becomes a new family row with a new id, seeded from its
     own raw record.  The group's children stay with the original
-    family: their email matches both registrations, so no child can be
-    attributed to the new one without a human decision.
+    family; the auditor moves any of them to the new family afterwards.
 
     Args:
         repo: The season-bound repository.
@@ -760,6 +901,7 @@ async def _release_family(
         member: The audited group member.
         actor: Requesting user identity.
         expected_version: The caller's expected ``row_version``.
+        decisions: The member decisions.
 
     Returns:
         The new family id.
@@ -768,7 +910,7 @@ async def _release_family(
         AuditError: When the group has no stored family row.
     """
     family_rows = await repo.final_rows("family")
-    existing = _group_family_row(group, family_rows)
+    existing = _group_family_row(group, family_rows, decisions)
     if existing is None:
         raise AuditError(
             f"no stored family row for duplication group {group.group_key!r}"
@@ -802,10 +944,45 @@ async def _release_family(
     return str(new_family_id)
 
 
+async def _override_status(
+    repo: SeasonStoreRepository,
+    entity: str,
+    key: str | int,
+    status: str,
+    actor: str,
+) -> None:
+    """Force one member's row status (the group's adjudication overrides it).
+
+    ``db_audit.save_entity_db`` re-derives every non-audited status
+    through ``status_of``, so the released member's ``new`` status is
+    written directly.  ``status`` is a control column, which the audit
+    module may write.
+
+    Args:
+        repo: The season-bound repository.
+        entity: "child", "family", or "sponsor".
+        key: The entity's key.
+        status: The status to write.
+        actor: Requesting user identity.
+
+    Raises:
+        AuditError: When the row does not exist.
+    """
+    rows = await repo.final_rows(entity)
+    key_column = ENTITY_SPECS[entity]["key"]
+    row = next(
+        (item for item in rows if str(item.get(key_column)) == str(key)), None
+    )
+    if row is None:
+        raise AuditError(f"unknown {entity} {key!r}")
+    row["status"] = status
+    await repo.commit_finals("audit", entity, rows, actor)
+
+
 async def _refresh_angel_columns(
     repo: SeasonStoreRepository,
     actor: str,
-    family_ids: list[int | None],
+    family_ids: Iterable[int | None],
 ) -> None:
     """Re-derive the angel columns a duplication decision changed.
 
@@ -938,6 +1115,36 @@ async def _states(
     }
 
 
+def _classify_members(
+    group: _Group,
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Split a group's members by their decision.
+
+    Args:
+        group: The duplicate group.
+        decisions: The member decisions.
+
+    Returns:
+        ``{"surviving": [...], "released": [...], "discarded": [...]}``;
+        a member with no decision is a candidate to survive.
+    """
+    classified: dict[str, list[dict[str, Any]]] = {
+        "surviving": [],
+        "released": [],
+        "discarded": [],
+    }
+    for member in group.members:
+        decision = _decision_for(decisions, group, member)
+        if decision is None:
+            classified["surviving"].append(member)
+        elif decision["decision"] == DECISION_IGNORE:
+            classified["discarded"].append(member)
+        else:
+            classified["released"].append(member)
+    return classified
+
+
 def _group_status(
     group: _Group,
     decisions: dict[tuple[str, str, str], dict[str, Any]],
@@ -951,17 +1158,14 @@ def _group_status(
         states: The recorded group states.
 
     Returns:
-        The group's state.
+        The group's state; a group is resolved once exactly one
+        submission is still undecided.
     """
     state = states.get((group.sheet, group.group_key))
     if state is not None:
         return str(state.get("status") or "audited")
-    decided = sum(
-        1
-        for member in group.members
-        if _decision_for(decisions, group, member) is not None
-    )
-    return "resolved" if decided == len(group.members) else "pending"
+    surviving = _classify_members(group, decisions)["surviving"]
+    return "resolved" if len(surviving) == 1 else "pending"
 
 
 def _decision_for(
@@ -990,17 +1194,21 @@ def _member_row(
     member: dict[str, Any],
     finals: dict[str, list[dict[str, Any]]],
     family_row: dict[str, Any] | None,
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Return the final row that represents one group member.
 
     Children and sponsors own their row; a family group's submissions
-    share the group's single family row.
+    share the group's single family row, except a released submission,
+    which owns the new family row its decision created.
 
     Args:
         group: The member's duplicate group.
         member: The audited group member.
         finals: Every final store.
-        family_row: The group's family row, when the group is a family.
+        family_row: The group's shared family row, when the group is a
+            family.
+        decisions: The member decisions.
 
     Returns:
         The member's final row, or None when it has none.
@@ -1011,6 +1219,20 @@ def _member_row(
     elif group.entity == "sponsor":
         entity = "sponsor"
     else:
+        decision = _decision_for(decisions, group, member)
+        if decision is not None and decision["decision"] == (
+            DECISION_NOT_DUPLICATE
+        ):
+            family_id = _as_int(decision.get("assigned_id"))
+            if family_id is not None:
+                return next(
+                    (
+                        row
+                        for row in finals["family"]
+                        if _as_int(row.get("family_id")) == family_id
+                    ),
+                    None,
+                )
         return family_row
     return next(
         (
@@ -1023,30 +1245,116 @@ def _member_row(
 
 
 def _group_family_row(
-    group: _Group, family_rows: list[dict[str, Any]]
+    group: _Group,
+    family_rows: list[dict[str, Any]],
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Return the single final family row a family group shares.
+
+    A released family submission owns a new row whose ``family_id`` its
+    decision recorded; excluding it is what separates the two rows
+    when the flagged survivor is the released one (both rows then carry
+    the same ``zite_record_id``).
 
     Args:
         group: The duplicate group.
         family_rows: Every final family row.
+        decisions: The member decisions.
 
     Returns:
-        The group's family row, or None when it has none.
+        The group's shared family row, or None when it has none.
     """
     if group.entity != "family":
         return None
-    survivor = next(
-        (m for m in group.members if as_bool(m.get("survivor"))), None
-    )
-    record_id = str((survivor or {}).get("zite_record_id") or "")
-    for row in family_rows:
-        if str(row.get("zite_record_id") or "") == record_id:
+    released = {
+        family_id
+        for member in _classify_members(group, decisions)["released"]
+        for family_id in [
+            _as_int(
+                (_decision_for(decisions, group, member) or {}).get(
+                    "assigned_id"
+                )
+            )
+        ]
+        if family_id is not None
+    }
+    candidates = [
+        row
+        for row in family_rows
+        if _as_int(row.get("family_id")) not in released
+    ]
+    record_ids = {
+        str(member.get("zite_record_id") or "") for member in group.members
+    }
+    for row in candidates:
+        if str(row.get("zite_record_id") or "") in record_ids:
             return row
-    for row in family_rows:
+    for row in candidates:
         if str(row.get("primary_email") or "") == group.group_key:
             return row
     return None
+
+
+def _family_ids(
+    group: _Group,
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
+    family_rows: list[dict[str, Any]],
+) -> list[int]:
+    """Return the family ids a family group's submissions now span.
+
+    Args:
+        group: The duplicate group.
+        decisions: The member decisions.
+        family_rows: Every final family row.
+
+    Returns:
+        The shared family's id plus every released family's id; empty
+        for a child or sponsor group.
+    """
+    if group.entity != "family":
+        return []
+    family_ids: list[int] = []
+    shared = _group_family_row(group, family_rows, decisions)
+    shared_id = _as_int((shared or {}).get("family_id"))
+    if shared_id is not None:
+        family_ids.append(shared_id)
+    for member in _classify_members(group, decisions)["released"]:
+        assigned = _as_int(
+            (_decision_for(decisions, group, member) or {}).get("assigned_id")
+        )
+        if assigned is not None and assigned not in family_ids:
+            family_ids.append(assigned)
+    return family_ids
+
+
+def _group_children(
+    group: _Group,
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
+    finals: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Return a family group's children, across all its families.
+
+    Args:
+        group: The duplicate group.
+        decisions: The member decisions.
+        finals: Every final store.
+
+    Returns:
+        One entry per child of the shared or a released family; empty
+        for a child or sponsor group.
+    """
+    family_ids = _family_ids(group, decisions, finals["family"])
+    return [
+        {
+            "zite_record_id": str(row.get("zite_record_id") or ""),
+            "first_name": row.get("first_name"),
+            "dob": row.get("dob"),
+            "family_id": _as_int(row.get("family_id")),
+            "angel_id": row.get("angel_id"),
+        }
+        for row in finals["child"]
+        if _as_int(row.get("family_id")) in family_ids
+    ]
 
 
 def _raw_record(member: dict[str, Any]) -> dict[str, Any]:
@@ -1201,6 +1509,7 @@ def _angel_sort_key(angel_id: str) -> tuple[int, str]:
 __all__ = [
     "DECISION_IGNORE",
     "DECISION_NOT_DUPLICATE",
+    "assign_group_children",
     "decide",
     "filter_groups",
     "group_detail",
