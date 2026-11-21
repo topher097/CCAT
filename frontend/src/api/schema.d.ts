@@ -578,7 +578,9 @@ export interface paths {
          *
          *     Raises:
          *         ApiError: 412 missing/stale If-Match (stale carries the
-         *             fresh row + current version); 409 domain refusals.
+         *             fresh row + current version); 409 domain refusals,
+         *             including an audited row whose values are final; 403
+         *             when a non-admin undoes an audit.
          */
         patch: operations["patch_entity_api_v1_seasons__season__children__key__patch"];
         trace?: never;
@@ -1051,11 +1053,55 @@ export interface paths {
          * Audit Duplication
          * @description Mark a resolved duplication audited (auditor).
          *
-         *     The group's members become audited and the affected ``final_*``
-         *     tables are reconciled with the adjudication.
+         *     The group's surviving entry (its single undecided submission) is
+         *     audited with the carried ``Current (editable)`` values, and every
+         *     member's row status is overridden by the group's adjudication.  The
+         *     body is optional: without it the surviving entry's stored row is
+         *     finalized as it stands.
          *
          *     Args:
          *         group_id: The group's id.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         q: The list's search query (for the neighbours).
+         *         entity: Restrict to "child", "family", or "sponsor" (for the
+         *             neighbours).
+         *         user: The authenticated identity.
+         *         body: The reviewed values under canonical DTO names, and the
+         *             surviving entry's expected ``row_version``.
+         *
+         *     Returns:
+         *         The updated group detail.
+         *
+         *     Raises:
+         *         ApiError: 404 for an unknown group; 409 when the group has zero
+         *             or more than one surviving entry; 409 when the surviving
+         *             entry is already audited and values were carried; 412 when a
+         *             stored row changed since the read.
+         */
+        post: operations["audit_duplication_api_v1_seasons__season__duplications__group_id__audit_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/duplications/{group_id}/children": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Assign Duplication Children
+         * @description Assign a split family's children to their families (auditor).
+         *
+         *     Args:
+         *         group_id: The group's id.
+         *         body: Child record id -> target family id.
          *         request: The current request.
          *         repo: The season-bound repository.
          *         q: The list's search query (for the neighbours).
@@ -1067,10 +1113,10 @@ export interface paths {
          *         The updated group detail.
          *
          *     Raises:
-         *         ApiError: 404 for an unknown group; 409 while a member is
-         *             undecided; 412 when a stored row changed since the read.
+         *         ApiError: 404 for an unknown group or child; 412 when a stored
+         *             row changed since the read.
          */
-        post: operations["audit_duplication_api_v1_seasons__season__duplications__group_id__audit_post"];
+        post: operations["assign_duplication_children_api_v1_seasons__season__duplications__group_id__children_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1190,7 +1236,9 @@ export interface paths {
          *
          *     Raises:
          *         ApiError: 412 missing/stale If-Match (stale carries the
-         *             fresh row + current version); 409 domain refusals.
+         *             fresh row + current version); 409 domain refusals,
+         *             including an audited row whose values are final; 403
+         *             when a non-admin undoes an audit.
          */
         patch: operations["patch_entity_api_v1_seasons__season__families__key__patch"];
         trace?: never;
@@ -1412,7 +1460,9 @@ export interface paths {
          *
          *     Raises:
          *         ApiError: 412 missing/stale If-Match (stale carries the
-         *             fresh row + current version); 409 domain refusals.
+         *             fresh row + current version); 409 domain refusals,
+         *             including an audited row whose values are final; 403
+         *             when a non-admin undoes an audit.
          */
         patch: operations["patch_entity_api_v1_seasons__season__sponsors__key__patch"];
         trace?: never;
@@ -1758,6 +1808,60 @@ export interface components {
             subject?: string | null;
         };
         /**
+         * DuplicationAuditRequest
+         * @description The reviewed values carried by a group's audit.
+         *
+         *     Attributes:
+         *         values: The ``Current (editable)`` values under canonical names.
+         *         expected_version: The surviving entry's expected ``row_version``.
+         */
+        DuplicationAuditRequest: {
+            /** Expected Version */
+            expected_version?: number | null;
+            /** Values */
+            values?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /**
+         * DuplicationChild
+         * @description One child attributed to a duplicate family group.
+         *
+         *     Attributes:
+         *         zite_record_id: The child's raw submission.
+         *         first_name: The child's first name.
+         *         dob: The child's date of birth.
+         *         family_id: The family the child currently belongs to.
+         *         angel_id: The child's current angel letter.
+         */
+        DuplicationChild: {
+            /** Angel Id */
+            angel_id?: string | null;
+            /** Dob */
+            dob?: string | null;
+            /** Family Id */
+            family_id?: number | null;
+            /** First Name */
+            first_name?: string | null;
+            /** Zite Record Id */
+            zite_record_id: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DuplicationChildrenRequest
+         * @description A split family's child assignments.
+         *
+         *     Attributes:
+         *         assignments: Child record id -> target family id.
+         */
+        DuplicationChildrenRequest: {
+            /** Assignments */
+            assignments?: {
+                [key: string]: number;
+            };
+        };
+        /**
          * DuplicationDecisionRequest
          * @description One duplication-audit decision.
          *
@@ -1789,12 +1893,16 @@ export interface components {
          *         status: "pending", "resolved", or "audited".
          *         audited_at: When the group was marked audited.
          *         members: The group's submissions.
+         *         survivor_count: Members left undecided (candidates to survive).
+         *         children: The group's children (family groups).
          *         previous: The group before this one in the list's order.
          *         next: The group after this one in the list's order.
          */
         DuplicationDetail: {
             /** Audited At */
             audited_at?: string | null;
+            /** Children */
+            children?: components["schemas"]["DuplicationChild"][];
             /** Entity */
             entity: string;
             /** Group Key */
@@ -1809,6 +1917,11 @@ export interface components {
             sheet: string;
             /** Status */
             status: string;
+            /**
+             * Survivor Count
+             * @default 0
+             */
+            survivor_count: number;
         } & {
             [key: string]: unknown;
         };
@@ -1823,6 +1936,8 @@ export interface components {
          *         group_key: The duplicate group's key.
          *         member_count: Submissions in the group.
          *         decided_count: Members the audit already resolved.
+         *         survivor_count: Members left undecided (candidates to survive).
+         *         released_count: Members released with ``not_duplicate``.
          *         status: "pending" or "resolved".
          *         survivor_record_id: The group's surviving submission.
          *         conflict_columns: Columns whose values differ across the group.
@@ -1843,10 +1958,20 @@ export interface components {
             id: string;
             /** Member Count */
             member_count: number;
+            /**
+             * Released Count
+             * @default 0
+             */
+            released_count: number;
             /** Sheet */
             sheet: string;
             /** Status */
             status: string;
+            /**
+             * Survivor Count
+             * @default 0
+             */
+            survivor_count: number;
             /**
              * Survivor Record Id
              * @default
@@ -1897,6 +2022,9 @@ export interface components {
          *         decided_by: The actor who decided.
          *         decided_at: When the decision was recorded.
          *         row_version: The screened row's optimistic-concurrency version.
+         *         state: "surviving", "released", or "discarded".
+         *         row_key: The key of the final row representing the member.
+         *         row_status: That row's stored status.
          */
         DuplicationMember: {
             /** Assigned Id */
@@ -1917,12 +2045,24 @@ export interface components {
             raw?: {
                 [key: string]: unknown;
             };
+            /**
+             * Row Key
+             * @default
+             */
+            row_key: string;
+            /** Row Status */
+            row_status?: string | null;
             /** Row Version */
             row_version?: number | null;
             /** Screened */
             screened?: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * State
+             * @default surviving
+             */
+            state: string;
             /**
              * Survivor
              * @default false
@@ -3440,7 +3580,50 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["DuplicationAuditRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DuplicationDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    assign_duplication_children_api_v1_seasons__season__duplications__group_id__children_post: {
+        parameters: {
+            query?: {
+                q?: string;
+                entity?: string | null;
+            };
+            header?: never;
+            path: {
+                group_id: string;
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DuplicationChildrenRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

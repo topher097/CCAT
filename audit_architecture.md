@@ -316,7 +316,8 @@ beside the screened result (the `final_*` row the member landed in).
 | `GET /seasons/{season}/duplications` | The group list (paginated, searchable, filterable by entity) |
 | `GET /seasons/{season}/duplications/{id}` | One group's raw and screened members |
 | `POST /seasons/{season}/duplications/{id}/members/{record_id}` | One confirmed decision |
-| `POST /seasons/{season}/duplications/{id}/audit` | Mark the resolved group audited |
+| `POST /seasons/{season}/duplications/{id}/audit` | Mark the group audited |
+| `POST /seasons/{season}/duplications/{id}/children` | A split family's child assignments |
 
 A group id is the SHA-256 of `(sheet, group_key)` truncated to 16 hex
 characters, so it survives a new screening run that redetects the group.
@@ -330,14 +331,34 @@ decisions in its header.
 |---|---|
 | Field | The field's label and its conflict marker |
 | Raw submission (one per member) | The member's verbatim submission value |
-| Current (editable) | The group's current screened value; editable, and saved through the ordinary audit PATCH |
+| Current (editable) | The surviving entry's screened value; editable, and carried by the group's audit request |
 
 A field **conflicts** when the submissions disagree on it. Matching
 values do not conflict, and neither does a field one submission leaves
 blank while another fills in. Conflicting rows carry the `diff-changed`
 highlight, exactly like the child audit page marks a changed field.
 
-Two decisions are available per member:
+#### 10.5.1 The three states of a submission
+
+Every submission in a group ends in exactly one of three states, and the
+auditor's **decisions** decide which:
+
+| state | how a submission gets there | what it means |
+|---|---|---|
+| **surviving entry** | the auditor leaves it undecided | this submission *is* the entity; the group is audited with it |
+| **released** | the auditor marks it *not duplicate* | it is genuinely another entity: it leaves the group, gets its own id, and becomes an ordinary row in the audit with status `new` |
+| **discarded** | the auditor marks it *ignore* | the submission is thrown away: its row is reduced to the identity skeleton |
+
+The **surviving entry is the one submission the auditor left undecided**.
+The duplicate log's `survivor` flag is the screening run's *suggestion*:
+it picks the default `Current (editable)` column and it is badged
+`suggested survivor` in the member table, but it is not the authority.
+The auditor may discard the flagged survivor; another undecided
+submission then survives.
+
+Two decisions are available per member, and every member keeps both —
+including the flagged survivor, which may be discarded or released like
+any other submission:
 
 - `not_duplicate` — the member is a unique entity. It receives a unique
   id of its own: a child gets the lowest free angel letter in its
@@ -346,15 +367,14 @@ Two decisions are available per member:
   `potential_duplicate` is cleared.
 - `ignore` — the member is ignored, through the ordinary audit ignore
   action (`services.db_audit.ignore_entity_db`), so the destructive
-  skeleton reset and the un-ignore reseed are unchanged.
+  skeleton reset and the un-ignore reseed are unchanged. On a family
+  group this discards the **whole family**: the group's submissions share
+  one family row.
 
 Every decision is appended to the `duplication_audit` table (season,
 sheet, group key, member, decision, assigned id, actor, timestamp). The
 trail is append-only: a re-decision adds a row. The current decision of
-a member is its newest trail row. The group's current row is the
-survivor's `final_*` row (the submission that owns the angel letter), so
-editing the current column edits that row through the ordinary audit
-PATCH.
+a member is its newest trail row.
 
 `final_child.angel_id` is not unique while a group is pending: every
 member of a pending child group carries the group's single letter, so the
@@ -364,36 +384,80 @@ info-sheet generation writes one sheet per angel. The screening run
 assigns the shared letter after its AI commits (`sync_pending_angel_letters`),
 because the AI commits carry the prepared (letterless) duplicate rows.
 
-A released family submission becomes a new family row with a new
-`family_id`; the group's children stay with the original family, because
-their email matches both registrations and no child can be attributed to
-the new one without a human decision.
+#### 10.5.2 Marking the group audited
 
-#### 10.5.1 The group's state
+A group is `pending` (the number of undecided submissions is not exactly
+one), `resolved` (exactly one submission is undecided) or `audited` (the
+auditor signed the group off). The first two are derived from the
+decision trail; `audited` is recorded in the `duplication_state` table
+(season, sheet, group key, status, audited at and by, reconciled at).
 
-A group is `pending` (a member is undecided), `resolved` (every member is
-decided) or `audited` (the auditor signed the group off). The first two
-are derived from the decision trail; `audited` is recorded in the
-`duplication_state` table (season, sheet, group key, status, audited at
-and by, reconciled at).
+**Mark audited** (`POST /duplications/{id}/audit`) takes an optional body:
 
-**Mark audited** (`POST /duplications/{id}/audit`) refuses while a member
-is undecided, then:
+```json
+{ "values": { "first_name": "Marcus" }, "expected_version": 7 }
+```
 
-1. marks every non-ignored member's `final_*` row `audited` through the
-   ordinary audit save (`services.db_audit.save_entity_db`), so the
-   ownership matrix, the `audited_at` stamp and the status derivation
-   are unchanged;
-2. re-derives the affected family's and sponsor's angel columns
+`values` are the surviving entry's reviewed `Current (editable)` values
+(canonical DTO names; the route maps them back to the legacy columns) and
+`expected_version` is that row's `row_version`. Without `values` the
+stored row is finalized as it stands. The audit then, in order:
+
+1. refuses unless exactly one submission is undecided — zero leaves the
+   group without a surviving entry ("this group has no surviving entry;
+   …"), two or more leave it with more than one ("this group has more
+   than one surviving entry; …");
+2. closes out the other members — a released member's row status is
+   overridden to `new` (it keeps its data and becomes editable again, so
+   the auditor signs it off on its own page), a discarded member stays
+   `ignored` and untouched;
+3. saves the **surviving entry once**, with the carried values and the
+   `audited` status in the same save (`services.db_audit.save_entity_db`),
+   so the ownership matrix, the `audited_at` stamp and the status
+   derivation are unchanged;
+4. re-derives the angel columns of every affected family
    (`_refresh_angel_columns`), because the rollup counts only audited
    children and the audit save never touches assignment columns;
-3. records the group's audited state — the flag that says the affected
+5. records the group's audited state — the flag that says the affected
    `final_*` tables were reconciled with the adjudication.
 
-An ignored member stays ignored: the audit save forces the stored
-`ignore` flag back and would only reseed the row.
+Each distinct row is saved at most once, so a family group whose
+submissions share one family row audits cleanly.
 
-#### 10.5.2 Navigation
+**The group's adjudication outranks a row-level audit.** It sets every
+member's status regardless of what that row's status was before: a
+released member that was audited on its own goes back to `new`. It does
+**not** get to rewrite the values of an already-audited surviving entry:
+the audit re-affirms it without values (auditing the same group twice
+stays `200`) and refuses a carried value change with `409 row_audited` —
+the same code and meaning as the row pages, pointing at the admin
+override. The row page's `duplicate_pending` guard is unchanged.
+
+The group's audit is not one transaction: it is several commits, and the
+group state row is written last. A crash halfway leaves a partially
+overridden group, which the group's own `audited` flag does not record.
+
+#### 10.5.3 A split family's children
+
+A family submission says nothing about its children: the link is the
+child's `primary_email`, resolved once and then frozen, and `family_id`
+is not editable. Nothing in the data says which of two same-email
+registrations a child belongs to, so the attribution is the auditor's
+decision.
+
+When a family group is split, the group page lists the group's children
+(`GET /duplications/{id}` → `children`) and the auditor assigns each one
+to the surviving family or to the released family
+(`POST /duplications/{id}/children` with
+`{"assignments": {"<child record id>": <family id>}}`). The server writes
+the child's new `family_id`, re-issues its angel letter in that family
+(the letter is prefixed with the family id, so a child moved to family 2
+becomes `2A`), and re-derives **both** families' rollups. Children the
+auditor leaves alone stay with the surviving family, and the page says
+so. The duplication module is the only writer of a child's `family_id`
+outside preparation, exactly as it already is of a child's `angel_id`.
+
+#### 10.5.4 Navigation
 
 The audit lists keep their filters in the query string, so a detail
 link carries them and the back button restores the place in the table

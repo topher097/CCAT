@@ -26,7 +26,8 @@ from ccat.api.dto import (
     canonicalize,
     decanonicalize_patch,
 )
-from ccat.api.errors import ApiError, RowAuditedError
+from ccat.api.errors import ApiError
+from ccat.audit import RowAuditedError
 from ccat.db.errors import StaleRowVersionError
 from ccat.db.repositories import SeasonStoreRepository
 from ccat.services import db_duplications
