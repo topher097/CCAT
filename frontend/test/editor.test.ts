@@ -50,15 +50,27 @@ function childDetail(overrides: Record<string, unknown> = {}) {
   }
 }
 
-async function mountEditor(entity: 'child' | 'sponsor' | 'family', key = 'c1') {
+async function mountEditor(
+  entity: 'child' | 'sponsor' | 'family',
+  key = 'c1',
+  admin = false,
+) {
   const { wrapper } = await mountRouted(EntityEditor, {
     path: `/audit/${entity === 'child' ? 'children' : entity === 'family' ? 'families' : 'sponsors'}/${key}`,
     props: { entity, entityKey: key },
     setup: () => {
-      useSessionStore().season = {
+      const session = useSessionStore()
+      session.season = {
         id: 1,
         name: '2026',
         xmas_date: '2026-12-25',
+      }
+      if (admin) {
+        session.me = {
+          username: 'cmendres',
+          roles: ['admin', 'coordinator', 'auditor'],
+          csrf_token: 't',
+        }
       }
     },
   })
@@ -394,11 +406,16 @@ describe('entity editor', () => {
         return jsonResponse(200, childDetail())
       },
     ])
-    const wrapper = await mountEditor('child')
+    const wrapper = await mountEditor('child', 'c1', true)
     await flushPromises()
 
     await wrapper.get('input[name="first_name"]').setValue('Anna')
     await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('Unsaved changes')
+    // Nothing is patched until the auditor chooses.
+    expect(patchCall(fetchMock)).toBeUndefined()
+
+    await wrapper.get('[data-testid="confirm"]').trigger('click')
     await flushPromises()
 
     const call = patchCall(fetchMock)
@@ -409,6 +426,187 @@ describe('entity editor', () => {
     )
     expect(wrapper.get('[data-testid="save-notice"]').text()).toContain(
       'Marked audited',
+    )
+  })
+
+  it('marks a clean row audited straight away', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (!url.includes('/children/c1')) return undefined
+        if (init.method === 'PATCH') {
+          return jsonResponse(
+            200,
+            childDetail({
+              row: { ...CHILD_ROW, status: 'audited' },
+              status: 'audited',
+              row_version: 4,
+            }),
+          )
+        }
+        return jsonResponse(200, childDetail())
+      },
+    ])
+    const wrapper = await mountEditor('child')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(bodyOf(patchCall(fetchMock)!)).toEqual({ status: 'audited' })
+  })
+
+  it('marks the stored values audited when the auditor discards edits', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (!url.includes('/children/c1')) return undefined
+        if (init.method === 'PATCH') {
+          return jsonResponse(
+            200,
+            childDetail({
+              row: { ...CHILD_ROW, status: 'audited' },
+              status: 'audited',
+              row_version: 4,
+            }),
+          )
+        }
+        return jsonResponse(200, childDetail())
+      },
+    ])
+    const wrapper = await mountEditor('child')
+    await flushPromises()
+
+    await wrapper.get('input[name="first_name"]').setValue('Anna')
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await wrapper.get('[data-testid="alternate"]').trigger('click')
+    await flushPromises()
+
+    expect(bodyOf(patchCall(fetchMock)!)).toEqual({ status: 'audited' })
+  })
+
+  it('patches nothing when the unsaved-changes dialog is cancelled', async () => {
+    const fetchMock = mockRoutes([
+      (url) => (url.includes('/children/c1') ? jsonResponse(200, childDetail()) : undefined),
+    ])
+    const wrapper = await mountEditor('child')
+    await flushPromises()
+
+    await wrapper.get('input[name="first_name"]').setValue('Anna')
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await wrapper
+      .findAll('[role="dialog"] button')
+      .find((button) => button.text() === 'Cancel')!
+      .trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(
+      fetchMock.mock.calls.filter(
+        (call) => (call[1] as RequestInit).method === 'PATCH',
+      ),
+    ).toHaveLength(0)
+  })
+
+  it('locks an audited row for a non-admin', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/children/c1')
+          ? jsonResponse(
+              200,
+              childDetail({
+                row: { ...CHILD_ROW, status: 'audited' },
+                status: 'audited',
+              }),
+            )
+          : undefined,
+    ])
+    const wrapper = await mountEditor('child')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="audited-lock"]').text()).toContain(
+      'values are final',
+    )
+    expect(wrapper.find('[data-testid="mark-audited"]').exists()).toBe(false)
+    expect(
+      (wrapper.get('input[name="first_name"]').element as HTMLInputElement)
+        .disabled,
+    ).toBe(true)
+    expect(
+      (
+        wrapper.get('textarea[name="clarification_notes"]')
+          .element as HTMLTextAreaElement
+      ).disabled,
+    ).toBe(true)
+    expect(
+      (wrapper.get('[data-testid="save"]').element as HTMLButtonElement)
+        .disabled,
+    ).toBe(true)
+    const headerSave = wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Save changes')
+    expect((headerSave!.element as HTMLButtonElement).disabled).toBe(true)
+    expect(
+      (wrapper.get('[data-testid="ignore-toggle"]').element as HTMLButtonElement)
+        .disabled,
+    ).toBe(true)
+  })
+
+  it('reports an audited-row refusal on save', async () => {
+    mockRoutes([
+      (url, init) => {
+        if (!url.includes('/children/c1')) return undefined
+        if (init.method === 'PATCH') {
+          return jsonResponse(409, {
+            detail: {
+              code: 'row_audited',
+              message: 'this row is audited; its values are final',
+            },
+          })
+        }
+        return jsonResponse(200, childDetail())
+      },
+    ])
+    const wrapper = await mountEditor('child')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="save-error"]').text()).toContain(
+      'values are final',
+    )
+  })
+
+  it('reports the admin-only refusal when the server refuses an undo', async () => {
+    mockRoutes([
+      (url, init) => {
+        if (!url.includes('/children/c1')) return undefined
+        if (init.method === 'PATCH') {
+          return jsonResponse(403, {
+            detail: {
+              code: 'admin_required',
+              message: 'only an admin may undo an audit',
+            },
+          })
+        }
+        return jsonResponse(
+          200,
+          childDetail({
+            row: { ...CHILD_ROW, status: 'audited' },
+            status: 'audited',
+          }),
+        )
+      },
+    ])
+    // The demo admin still gets the server's refusal; the message path is shared.
+    const wrapper = await mountEditor('child', 'c1', true)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="save-error"]').text()).toContain(
+      'Only an admin may undo an audit',
     )
   })
 
@@ -435,7 +633,7 @@ describe('entity editor', () => {
         )
       },
     ])
-    const wrapper = await mountEditor('child')
+    const wrapper = await mountEditor('child', 'c1', true)
     await flushPromises()
 
     await wrapper.get('[data-testid="mark-audited"]').trigger('click')

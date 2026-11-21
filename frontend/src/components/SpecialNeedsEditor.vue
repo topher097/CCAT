@@ -8,7 +8,7 @@ import {
   type SpecialNeedsSelection,
 } from '../utils/specialNeeds'
 
-const props = defineProps<{ modelValue: string | null }>()
+const props = defineProps<{ modelValue: string | null; disabled?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [value: string | null] }>()
 
 const selection = ref<SpecialNeedsSelection>(
@@ -56,6 +56,7 @@ function setOther(text: string): void {
         type="checkbox"
         :checked="selection.fixed.has(option)"
         :name="`special-needs-${option}`"
+        :disabled="disabled"
         @change="toggle(option)"
       />
       {{ option }}
@@ -66,6 +67,7 @@ function setOther(text: string): void {
         type="text"
         name="special-needs-other-text"
         :value="selection.other"
+        :disabled="disabled"
         @input="setOther(($event.target as HTMLInputElement).value)"
       />
     </label>

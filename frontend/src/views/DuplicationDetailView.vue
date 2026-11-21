@@ -35,6 +35,7 @@ const submitError = ref<string | null>(null)
 const notice = ref<string | null>(null)
 const stale = ref(false)
 const ignoreTarget = ref<DuplicationMember | null>(null)
+const auditConfirm = ref(false)
 
 /** Identity fields live in the column header, not in the field rows. */
 const IDENTITY_FIELDS = new Set(['zite_record_id', 'zite_created_at', 'created'])
@@ -90,15 +91,15 @@ const canMarkAudited = computed(
   () =>
     detail.value !== null &&
     detail.value.status !== 'audited' &&
-    members.value.every((member) => decisionOf(member) !== null) &&
-    !isDirty.value,
+    members.value.every((member) => decisionOf(member) !== null),
 )
 const auditHint = computed(() => {
   if (!detail.value) return 'Resolve every member first.'
   if (detail.value.status === 'audited') {
     return 'The group is audited; auditing again reconciles the final rows again.'
   }
-  if (isDirty.value) return 'Save or discard your changes first.'
+  if (isDirty.value)
+    return 'Marks the group audited; you choose whether to save the unsaved changes first.'
   return 'Marks the group audited and reconciles the affected final rows.'
 })
 
@@ -266,8 +267,18 @@ function confirmIgnore(): void {
   if (target) toggleDecision(target, 'ignore')
 }
 
-/** Mark the group audited; the server reconciles the affected rows. */
+/** Ask what to do with unsaved changes, then mark the group audited. */
 async function markAudited(): Promise<void> {
+  if (!detail.value || saving.value) return
+  if (isDirty.value) {
+    auditConfirm.value = true
+    return
+  }
+  await performAudit()
+}
+
+/** Mark the group audited; the server reconciles the affected rows. */
+async function performAudit(): Promise<void> {
   if (!detail.value || saving.value) return
   saving.value = true
   submitError.value = null
@@ -343,6 +354,22 @@ async function save(): Promise<void> {
   } finally {
     saving.value = false
   }
+}
+
+/** Save the pending edits, then audit the group. */
+async function confirmAuditSave(): Promise<void> {
+  auditConfirm.value = false
+  await save()
+  if (submitError.value) return
+  await performAudit()
+}
+
+/** Drop local edits and member decisions, then audit the stored values. */
+async function confirmAuditDiscard(): Promise<void> {
+  auditConfirm.value = false
+  pending.value = new Map()
+  resetDraft()
+  await performAudit()
 }
 
 watch(groupId, () => void load())
@@ -566,6 +593,17 @@ onMounted(() => {
         dangerous
         @confirm="confirmIgnore"
         @cancel="ignoreTarget = null"
+      />
+
+      <ConfirmDialog
+        :open="auditConfirm"
+        title="Unsaved changes"
+        message="This group has unsaved changes. Save them and mark the group audited, or mark the stored values audited without them."
+        confirm-label="Save and mark audited"
+        alternate-label="Mark audited without saving"
+        @confirm="confirmAuditSave"
+        @alternate="confirmAuditDiscard"
+        @cancel="auditConfirm = false"
       />
     </template>
   </section>

@@ -332,10 +332,10 @@ describe('duplication detail', () => {
 
     await wrapper.get('[data-testid="not-duplicate"]').trigger('click')
     await flushPromises()
-    // An unsaved decision keeps the button disabled too.
+    // Unsaved decisions no longer block the button; a click asks what to do.
     expect(
       wrapper.get('[data-testid="mark-audited"]').attributes('disabled'),
-    ).toBeDefined()
+    ).toBeUndefined()
 
     await wrapper.get('[data-testid="save"]').trigger('click')
     await flushPromises()
@@ -353,6 +353,67 @@ describe('duplication detail', () => {
         String(call[0]).endsWith('/audit'),
     )
     expect(String(post![0])).toBe('/api/v1/seasons/2026/duplications/g1/audit')
+    expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
+      'marked audited',
+    )
+  })
+
+  it('asks what to do with unsaved changes before auditing the group', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (init.method === 'POST' && url.endsWith('/audit'))
+          return jsonResponse(
+            200,
+            { ...detail(), status: 'audited', audited_at: '2026-11-20T10:00:00Z' },
+          )
+        if (init.method === 'POST' && url.endsWith('/members/r1'))
+          return jsonResponse(200, detail([member({ decision: 'not_duplicate' })]))
+        if (url.includes('/duplications/g1')) return jsonResponse(200, detail())
+        return undefined
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="not-duplicate"]').trigger('click')
+    expect(
+      wrapper.get('[data-testid="mark-audited"]').attributes('disabled'),
+    ).toBeUndefined()
+
+    // Cancel changes nothing.
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('Unsaved changes')
+    await wrapper
+      .findAll('[role="dialog"] button')
+      .find((button) => button.text() === 'Cancel')!
+      .trigger('click')
+    await flushPromises()
+    expect(
+      fetchMock.mock.calls.some(
+        (call) => (call[1] as RequestInit).method === 'POST',
+      ),
+    ).toBe(false)
+
+    // Save and mark audited saves the decision first, then audits.
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await wrapper.get('[data-testid="confirm"]').trigger('click')
+    await flushPromises()
+
+    const posts = fetchMock.mock.calls.filter(
+      (call) => (call[1] as RequestInit).method === 'POST',
+    )
+    expect(posts.map((call) => String(call[0]))).toEqual([
+      '/api/v1/seasons/2026/duplications/g1/members/r1',
+      '/api/v1/seasons/2026/duplications/g1/audit',
+    ])
+    expect(bodyOf(posts[0] as unknown[])).toEqual({
+      decision: 'not_duplicate',
+      confirm: true,
+      expected_version: 3,
+    })
     expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
       'marked audited',
     )

@@ -7,9 +7,10 @@ const props = defineProps<{
   message: string
   confirmLabel: string
   dangerous?: boolean
+  alternateLabel?: string
 }>()
 
-const emit = defineEmits<{ confirm: []; cancel: [] }>()
+const emit = defineEmits<{ confirm: []; alternate: []; cancel: [] }>()
 const dialog = ref<HTMLDivElement | null>(null)
 const confirmButton = ref<HTMLButtonElement | null>(null)
 
@@ -62,6 +63,14 @@ function onKeydown(event: KeyboardEvent): void {
       <p>{{ message }}</p>
       <div class="dialog-actions">
         <button type="button" @click="emit('cancel')">Cancel</button>
+        <button
+          v-if="alternateLabel"
+          type="button"
+          data-testid="alternate"
+          @click="emit('alternate')"
+        >
+          {{ alternateLabel }}
+        </button>
         <button
           ref="confirmButton"
           type="button"

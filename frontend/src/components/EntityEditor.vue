@@ -58,6 +58,8 @@ const neutralFields = computed(() =>
 const isDirty = computed(() => touched.value.size > 0)
 const isIgnored = computed(() => detail.value?.row.ignore === true)
 const isAudited = computed(() => detail.value?.status === 'audited')
+const isAdmin = computed(() => session.hasRole('admin'))
+const auditConfirm = ref(false)
 /** Status control sent with the next save (null = plain field save). */
 const pendingStatus = ref<'audited' | 'new' | null>(null)
 const submissions = computed<Record<string, unknown>[]>(
@@ -101,6 +103,9 @@ function duplicatePendingMessage(): string {
 }
 
 const auditHint = computed(() => {
+  if (isAudited.value) {
+    return 'This row is audited; its values are final. An admin can undo the audit to change it.'
+  }
   if (duplicatePending.value) {
     return 'This row is part of a duplicate group that still awaits audit; resolve the group in Duplications first.'
   }
@@ -250,6 +255,14 @@ async function persist(version: number): Promise<void> {
     if (next) conflict.value = next
     else if (failure instanceof ApiError && failure.code === 'duplicate_pending')
       submitError.value = duplicatePendingMessage()
+    else if (failure instanceof ApiError && failure.code === 'row_audited')
+      submitError.value =
+        'This row is audited; its values are final. An admin can undo the audit first.'
+    else if (
+      failure instanceof ApiError &&
+      (failure.code === 'admin_required' || failure.status === 403)
+    )
+      submitError.value = 'Only an admin may undo an audit.'
     else submitError.value = messageOf(failure)
   } finally {
     saving.value = false
@@ -260,10 +273,34 @@ function save(): void {
   if (detail.value) void persist(detail.value.row_version)
 }
 
-/** Mark the row audited (or undo it), keeping unsaved edits. */
+/** Mark the row audited (or undo it), asking what to do with unsaved edits. */
 function toggleAudited(): void {
   if (!detail.value) return
-  pendingStatus.value = isAudited.value ? 'new' : 'audited'
+  if (isAudited.value) {
+    pendingStatus.value = 'new'
+    void persist(detail.value.row_version)
+    return
+  }
+  if (isDirty.value) {
+    auditConfirm.value = true
+    return
+  }
+  pendingStatus.value = 'audited'
+  void persist(detail.value.row_version)
+}
+
+function confirmAuditSave(): void {
+  auditConfirm.value = false
+  if (!detail.value) return
+  pendingStatus.value = 'audited'
+  void persist(detail.value.row_version)
+}
+
+function confirmAuditDiscard(): void {
+  auditConfirm.value = false
+  if (!detail.value) return
+  resetDraft()
+  pendingStatus.value = 'audited'
   void persist(detail.value.row_version)
 }
 
@@ -355,13 +392,20 @@ onMounted(() => void load())
           <span class="muted">row version {{ detail.row_version }}</span>
         </div>
         <div class="status-line">
-          <button type="button" :disabled="saving || !isDirty" @click="save">
+          <button
+            type="button"
+            :disabled="saving || !isDirty || isAudited"
+            @click="save"
+          >
             Save changes
           </button>
           <button
+            v-if="!isAudited || isAdmin"
             type="button"
             :class="isAudited ? '' : 'primary'"
-            :disabled="saving || isIgnored || isOrphan || duplicatePending"
+            :disabled="
+              saving || (!isAudited && (isIgnored || isOrphan || duplicatePending))
+            "
             :title="auditHint"
             data-testid="mark-audited"
             @click="toggleAudited"
@@ -397,6 +441,13 @@ onMounted(() => void load())
         >
           Resolve it in Duplications
         </RouterLink>
+      </p>
+      <p v-if="isAudited" class="card" data-testid="audited-lock">
+        <strong>Audited:</strong> this row is audited and its values are final.
+        <template v-if="isAdmin">
+          Undo the audit to change it, then mark it audited again.
+        </template>
+        <template v-else>Only an admin can undo the audit to change it.</template>
       </p>
       <p v-if="entity === 'child'" class="card" data-testid="child-identity">
         <strong>Angel ID:</strong> {{ show(detail.row.angel_id) }} ·
@@ -493,6 +544,7 @@ onMounted(() => void load())
                 <SpecialNeedsEditor
                   v-if="spec.field === 'special_needs'"
                   :model-value="(draft.special_needs as string | null)"
+                  :disabled="isAudited"
                   @update:model-value="setField('special_needs', $event)"
                 />
                 <textarea
@@ -500,6 +552,7 @@ onMounted(() => void load())
                   :name="spec.field"
                   rows="3"
                   :value="(draft[spec.field] as string)"
+                  :disabled="isAudited"
                   @input="
                     setField(
                       spec.field,
@@ -512,6 +565,7 @@ onMounted(() => void load())
                   :name="spec.field"
                   :type="spec.kind === 'number' ? 'number' : spec.kind === 'date' ? 'date' : 'text'"
                   :value="(draft[spec.field] as string)"
+                  :disabled="isAudited"
                   @input="
                     setField(spec.field, ($event.target as HTMLInputElement).value)
                   "
@@ -526,6 +580,7 @@ onMounted(() => void load())
                   name="clarification_notes"
                   rows="4"
                   :value="(draft.clarification_notes as string)"
+                  :disabled="isAudited"
                   @input="
                     setField(
                       'clarification_notes',
@@ -543,13 +598,17 @@ onMounted(() => void load())
         <button
           type="button"
           class="primary"
-          :disabled="saving || !isDirty"
+          :disabled="saving || !isDirty || isAudited"
           data-testid="save"
           @click="save"
         >
           Save
         </button>
-        <button type="button" :disabled="saving || !isDirty" @click="resetDraft">
+        <button
+          type="button"
+          :disabled="saving || !isDirty || isAudited"
+          @click="resetDraft"
+        >
           Reset local edits
         </button>
         <span v-if="isDirty" class="muted">
@@ -623,7 +682,7 @@ onMounted(() => void load())
         <button
           type="button"
           :class="isIgnored ? '' : 'danger'"
-          :disabled="saving"
+          :disabled="saving || isAudited"
           data-testid="ignore-toggle"
           @click="askIgnore"
         >
@@ -649,6 +708,17 @@ onMounted(() => void load())
         :dangerous="confirmAction === 'ignore'"
         @confirm="confirmIgnore"
         @cancel="confirmAction = null"
+      />
+
+      <ConfirmDialog
+        :open="auditConfirm"
+        title="Unsaved changes"
+        message="This row has unsaved changes. Save them and mark the row audited, or mark the stored values audited without them."
+        confirm-label="Save and mark audited"
+        alternate-label="Mark audited without saving"
+        @confirm="confirmAuditSave"
+        @alternate="confirmAuditDiscard"
+        @cancel="auditConfirm = false"
       />
     </template>
   </section>
