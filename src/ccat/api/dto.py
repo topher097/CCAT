@@ -217,6 +217,8 @@ class DuplicationListItem(StrictModel):
         group_key: The duplicate group's key.
         member_count: Submissions in the group.
         decided_count: Members the audit already resolved.
+        survivor_count: Members left undecided (candidates to survive).
+        released_count: Members released with ``not_duplicate``.
         status: "pending" or "resolved".
         survivor_record_id: The group's surviving submission.
         conflict_columns: Columns whose values differ across the group.
@@ -229,6 +231,8 @@ class DuplicationListItem(StrictModel):
     group_key: str
     member_count: int
     decided_count: int
+    survivor_count: int = 0
+    released_count: int = 0
     status: str
     survivor_record_id: str = ""
     conflict_columns: list[str] = Field(default_factory=list)
@@ -260,6 +264,9 @@ class DuplicationMember(StrictModel):
         decided_by: The actor who decided.
         decided_at: When the decision was recorded.
         row_version: The screened row's optimistic-concurrency version.
+        state: "surviving", "released", or "discarded".
+        row_key: The key of the final row representing the member.
+        row_status: That row's stored status.
     """
 
     zite_record_id: str
@@ -274,6 +281,27 @@ class DuplicationMember(StrictModel):
     decided_by: str | None = None
     decided_at: str | None = None
     row_version: int | None = None
+    state: str = "surviving"
+    row_key: str = ""
+    row_status: str | None = None
+
+
+class DuplicationChild(StrictModel):
+    """One child attributed to a duplicate family group.
+
+    Attributes:
+        zite_record_id: The child's raw submission.
+        first_name: The child's first name.
+        dob: The child's date of birth.
+        family_id: The family the child currently belongs to.
+        angel_id: The child's current angel letter.
+    """
+
+    zite_record_id: str
+    first_name: str | None = None
+    dob: str | None = None
+    family_id: int | None = None
+    angel_id: str | None = None
 
 
 class DuplicationDetail(StrictModel):
@@ -287,6 +315,8 @@ class DuplicationDetail(StrictModel):
         status: "pending", "resolved", or "audited".
         audited_at: When the group was marked audited.
         members: The group's submissions.
+        survivor_count: Members left undecided (candidates to survive).
+        children: The group's children (family groups).
         previous: The group before this one in the list's order.
         next: The group after this one in the list's order.
     """
@@ -298,6 +328,8 @@ class DuplicationDetail(StrictModel):
     status: str
     audited_at: str | None = None
     members: list[DuplicationMember] = Field(default_factory=list)
+    survivor_count: int = 0
+    children: list[DuplicationChild] = Field(default_factory=list)
     previous: NeighbourView | None = None
     next: NeighbourView | None = None
 
@@ -316,6 +348,32 @@ class DuplicationDecisionRequest(StrictModel):
     decision: Literal["not_duplicate", "ignore"]
     confirm: bool
     expected_version: int | None = None
+
+
+class DuplicationAuditRequest(StrictModel):
+    """The reviewed values carried by a group's audit.
+
+    Attributes:
+        values: The ``Current (editable)`` values under canonical names.
+        expected_version: The surviving entry's expected ``row_version``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    values: dict[str, Any] | None = None
+    expected_version: int | None = None
+
+
+class DuplicationChildrenRequest(StrictModel):
+    """A split family's child assignments.
+
+    Attributes:
+        assignments: Child record id -> target family id.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    assignments: dict[str, int] = Field(default_factory=dict)
 
 
 class JobView(StrictModel):
@@ -501,6 +559,9 @@ __all__ = [
     "DbQueryResult",
     "DbTableView",
     "DraftPatch",
+    "DuplicationAuditRequest",
+    "DuplicationChild",
+    "DuplicationChildrenRequest",
     "DuplicationDecisionRequest",
     "DuplicationDetail",
     "DuplicationListItem",

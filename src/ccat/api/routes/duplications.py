@@ -15,14 +15,18 @@ from fastapi import APIRouter, Depends, Query, Request
 from ccat.api.auth import AuthUser, current_user, require_csrf, require_roles
 from ccat.api.deps import season_repo
 from ccat.api.dto import (
+    DuplicationAuditRequest,
+    DuplicationChild,
+    DuplicationChildrenRequest,
     DuplicationDecisionRequest,
     DuplicationDetail,
     DuplicationListPage,
     DuplicationMember,
     NeighbourView,
     canonicalize,
+    decanonicalize_patch,
 )
-from ccat.api.errors import ApiError
+from ccat.api.errors import ApiError, RowAuditedError
 from ccat.db.errors import StaleRowVersionError
 from ccat.db.repositories import SeasonStoreRepository
 from ccat.services import db_duplications
@@ -74,6 +78,9 @@ def _member_dto(entity: str, member: dict[str, Any]) -> DuplicationMember:
         decided_by=member.get("decided_by"),
         decided_at=member.get("decided_at"),
         row_version=member.get("row_version"),
+        state=str(member.get("state") or "surviving"),
+        row_key=str(member.get("row_key") or ""),
+        row_status=member.get("row_status"),
     )
 
 
@@ -103,6 +110,10 @@ def _detail_dto(
         members=[
             _member_dto(entity, member)
             for member in detail.get("members") or []
+        ],
+        survivor_count=int(detail.get("survivor_count") or 0),
+        children=[
+            DuplicationChild(**child) for child in detail.get("children") or []
         ],
         previous=NeighbourView(**previous) if previous else None,
         next=NeighbourView(**next_row) if next_row else None,
@@ -262,14 +273,85 @@ async def audit_duplication(
     q: str = "",
     entity: str | None = None,
     user: AuthUser = Depends(require_roles("auditor")),
+    body: DuplicationAuditRequest | None = None,
 ) -> Any:
     """Mark a resolved duplication audited (auditor).
 
-    The group's members become audited and the affected ``final_*``
-    tables are reconciled with the adjudication.
+    The group's surviving entry (its single undecided submission) is
+    audited with the carried ``Current (editable)`` values, and every
+    member's row status is overridden by the group's adjudication.  The
+    body is optional: without it the surviving entry's stored row is
+    finalized as it stands.
 
     Args:
         group_id: The group's id.
+        request: The current request.
+        repo: The season-bound repository.
+        q: The list's search query (for the neighbours).
+        entity: Restrict to "child", "family", or "sponsor" (for the
+            neighbours).
+        user: The authenticated identity.
+        body: The reviewed values under canonical DTO names, and the
+            surviving entry's expected ``row_version``.
+
+    Returns:
+        The updated group detail.
+
+    Raises:
+        ApiError: 404 for an unknown group; 409 when the group has zero
+            or more than one surviving entry; 409 when the surviving
+            entry is already audited and values were carried; 412 when a
+            stored row changed since the read.
+    """
+    cfg: Config = request.app.state.cfg
+    values = body.values if body is not None else None
+    if values is not None:
+        values = decanonicalize_patch(values)
+    try:
+        detail = await db_duplications.mark_audited(
+            repo,
+            cfg,
+            group_id,
+            user.username,
+            values=values,
+            expected_version=body.expected_version if body else None,
+        )
+    except RowAuditedError as error:
+        raise ApiError(409, "row_audited", str(error)) from error
+    except StaleRowVersionError as error:
+        raise ApiError(
+            412,
+            "stale_version",
+            str(error),
+            entity=error.entity,
+            key=str(error.key),
+            current_version=error.current_version,
+        ) from error
+    previous, next_row = await db_duplications.group_neighbours(
+        repo, group_id, q, entity
+    )
+    return _detail_dto(detail, previous, next_row)
+
+
+@router.post(
+    "/{group_id}/children",
+    response_model=DuplicationDetail,
+    dependencies=[Depends(require_csrf)],
+)
+async def assign_duplication_children(
+    group_id: str,
+    body: DuplicationChildrenRequest,
+    request: Request,
+    repo: SeasonStoreRepository = Depends(season_repo),
+    q: str = "",
+    entity: str | None = None,
+    user: AuthUser = Depends(require_roles("auditor")),
+) -> Any:
+    """Assign a split family's children to their families (auditor).
+
+    Args:
+        group_id: The group's id.
+        body: Child record id -> target family id.
         request: The current request.
         repo: The season-bound repository.
         q: The list's search query (for the neighbours).
@@ -281,13 +363,12 @@ async def audit_duplication(
         The updated group detail.
 
     Raises:
-        ApiError: 404 for an unknown group; 409 while a member is
-            undecided; 412 when a stored row changed since the read.
+        ApiError: 404 for an unknown group or child; 412 when a stored
+            row changed since the read.
     """
-    cfg: Config = request.app.state.cfg
     try:
-        detail = await db_duplications.mark_audited(
-            repo, cfg, group_id, user.username
+        detail = await db_duplications.assign_group_children(
+            repo, group_id, user.username, body.assignments
         )
     except StaleRowVersionError as error:
         raise ApiError(
