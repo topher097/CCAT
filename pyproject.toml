@@ -63,6 +63,7 @@ include = [
     "test/test_db_pipeline.py",
     "test/test_db_repo.py",
     "test/test_db_stats.py",
+    "test/test_duplications.py",
     "test/test_jobs.py",
     "test/test_remediation.py",
     "test/test_services.py",

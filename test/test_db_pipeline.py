@@ -1317,6 +1317,49 @@ def test_match_db_assigns_and_records_artifact(tmp_path: Path) -> None:
     asyncio.run(main())
 
 
+def test_match_db_counts_a_shared_angel_letter_once(tmp_path: Path) -> None:
+    """A pending duplicate shares its group's letter: one angel, not two."""
+    cfg = _match_cfg(tmp_path)
+
+    async def main() -> None:
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed_stores(
+                    repo,
+                    children=[
+                        child_row(
+                            "c1", angel_id="1A", status="audited", age_at_xmas=8
+                        ),
+                        child_row(
+                            "c2",
+                            first_name="Two",
+                            angel_id="1A",
+                            status="audited",
+                            age_at_xmas=6,
+                        ),
+                    ],
+                    families=[family_row(1)],
+                    sponsors=[sponsor_row(1, num_children=1)],
+                )
+            await db_pipeline.match(
+                cfg, "topher", {}, lambda *a, **k: None, lambda: None
+            )
+            async with uow.store(cfg, "topher") as repo:
+                families = _by_key(await repo.final_rows("family"), "family_id")
+                sponsors = _by_key(
+                    await repo.final_rows("sponsor"), "sponsor_id"
+                )
+            assert families["1"]["num_angels_in_family"] == 1
+            assert families["1"]["assigned_angel_ids"] == "1A"
+            assert sponsors["1"]["assigned_angel_ids"] == "1A"
+            assert sponsors["1"]["num_angels_assigned"] == 1
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())
+
+
 def test_match_db_commit_atomicity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

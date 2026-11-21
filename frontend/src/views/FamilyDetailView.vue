@@ -3,8 +3,10 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
 import { listEntities } from '../api/audit'
+import { useAuditNav } from '../composables/useAuditNav'
 import { useSessionStore } from '../stores/session'
 import EntityEditor from '../components/EntityEditor.vue'
+import AuditBackLink from '../components/AuditBackLink.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 
 const route = useRoute()
@@ -12,6 +14,8 @@ const session = useSessionStore()
 const key = computed(() => String(route.params.id ?? ''))
 const children = ref<Record<string, unknown>[]>([])
 const childrenError = ref<string | null>(null)
+/** The back button returns to the families list this family came from. */
+const { listUrl } = useAuditNav('/audit/families')
 
 async function loadChildren(): Promise<void> {
   const season = session.season?.name
@@ -37,8 +41,11 @@ onMounted(() => void loadChildren())
 
 <template>
   <section>
-    <p><RouterLink to="/audit/families">← All families</RouterLink></p>
-    <EntityEditor entity="family" :entity-key="key" />
+    <EntityEditor entity="family" :entity-key="key">
+      <template #back>
+        <AuditBackLink :to="listUrl" label="All families" />
+      </template>
+    </EntityEditor>
 
     <section class="card" style="margin-top: 1rem" data-testid="family-children">
       <h2 style="margin-top: 0">Children in this family</h2>

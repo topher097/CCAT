@@ -126,14 +126,10 @@ class FinalChild(RowVersionMixin, Base):
 
     __tablename__ = "final_child"
     __table_args__ = (
-        Index(
-            "uq_final_child_angel",
-            "season_id",
-            "angel_id",
-            unique=True,
-            sqlite_where=text("angel_id IS NOT NULL"),
-            postgresql_where=text("angel_id IS NOT NULL"),
-        ),
+        # Not unique: a child that is still a pending duplicate shares
+        # its group's angel letter until the duplication audit resolves
+        # it, so two rows can carry one letter for a while.
+        Index("ix_final_child_season_angel", "season_id", "angel_id"),
         Index("ix_final_child_season_family", "season_id", "family_id"),
         Index("ix_final_child_season_status", "season_id", "status"),
         Index("ix_final_child_season_ignore", "season_id", "ignore"),
@@ -471,6 +467,81 @@ class DuplicateLog(Base):
     conflict_details: OptionalStr = mapped_column(Text)
     #: JSON serialized to text, verbatim.
     record: OptionalStr = mapped_column(Text)
+
+
+class DuplicationAudit(Base):
+    """One human duplication-audit decision (the Duplications section).
+
+    Append-only: a re-decision adds a row instead of overwriting the
+    earlier one, so the trail of what was decided and by whom survives.
+    ``decision`` is ``not_duplicate`` (the member is a unique entity and
+    received its own id) or ``ignore`` (the member is ignored, exactly
+    like the entity ignore action).  ``assigned_id`` records the unique
+    id the decision gave the member (angel letter, family id, or
+    sponsor id).
+    """
+
+    __tablename__ = "duplication_audit"
+    __table_args__ = (
+        Index(
+            "ix_duplication_audit_season_group",
+            "season_id",
+            "sheet",
+            "group_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    season_id: Mapped[int] = mapped_column(
+        ForeignKey("seasons.id"), nullable=False
+    )
+    #: Legacy sheet label such as "child_submissions".
+    sheet: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The duplicate group's key (email, or email|name for children).
+    group_key: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The audited group member (one raw submission).
+    zite_record_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: "not_duplicate" or "ignore".
+    decision: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The unique id the decision assigned, when it assigned one.
+    assigned_id: OptionalStr = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: OptionalTzDateTime = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class DuplicationState(Base):
+    """One duplicate group's adjudication state (the Duplications section).
+
+    The per-member decisions live in :class:`DuplicationAudit`; this
+    table holds the group's own state.  "Audited" is the flag that the
+    affected ``final_*`` tables have been reconciled with the group's
+    adjudication, so a later reconcile run can re-apply it.
+    """
+
+    __tablename__ = "duplication_state"
+    __table_args__ = (
+        UniqueConstraint(
+            "season_id", "sheet", "group_key", name="uq_duplication_state_group"
+        ),
+        Index("ix_duplication_state_season_status", "season_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    season_id: Mapped[int] = mapped_column(
+        ForeignKey("seasons.id"), nullable=False
+    )
+    #: Legacy sheet label such as "child_submissions".
+    sheet: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The duplicate group's key (email, or email|name for children).
+    group_key: Mapped[str] = mapped_column(Text, nullable=False)
+    #: "audited".
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    audited_at: OptionalTzDateTime = mapped_column(DateTime(timezone=True))
+    audited_by: OptionalStr = mapped_column(Text)
+    #: When the affected ``final_*`` rows were last reconciled.
+    reconciled_at: OptionalTzDateTime = mapped_column(DateTime(timezone=True))
 
 
 class DobConflictLog(Base):

@@ -514,7 +514,6 @@
       "CCAM (Calumet)"
     ]
   },
-  "acquire": {},
   "screening": {
     "sibling_dob_max_gap_days": 274
   },

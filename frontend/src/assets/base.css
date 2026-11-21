@@ -270,6 +270,12 @@ mark.diff-neutral {
   align-items: center;
 }
 
+.back-link {
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
 .dialog-backdrop {
   position: fixed;
   inset: 0;

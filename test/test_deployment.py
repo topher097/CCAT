@@ -98,8 +98,14 @@ def test_compose_db_upgrade_is_one_shot_and_shared_db_volume() -> None:
     assert '"ccat", "db-upgrade", "--config"' in db_upgrade
     assert 'restart: "no"' in db_upgrade
     assert "ccat-db:/data" in COMPOSE
+    # The live config is a writable volume file; the repo file is the seed.
+    assert "ccat-config:/app/config" in COMPOSE
     assert (
-        "./config/ccat_docker.json:/app/config/ccat_docker.json:ro" in COMPOSE
+        "./config/ccat_docker.json:/app/config-seed/ccat_docker.json:ro"
+        in COMPOSE
+    )
+    assert "./config/ccat_docker.json:/app/config/ccat_docker.json" not in (
+        COMPOSE
     )
     for name in ("api", "worker"):
         block = _service_block(name)
@@ -113,6 +119,7 @@ def test_compose_volumes_ports_and_logging() -> None:
         "ccat-db:",
         "ccat-artifacts:",
         "ccat-logs:",
+        "ccat-config:",
         "caddy-data:",
         "caddy-config:",
         "opencode-data:",
@@ -227,6 +234,13 @@ def test_entrypoint_waits_runs_optional_migration_and_execs() -> None:
     assert "ccat db-upgrade" in ENTRYPOINT
     assert 'exec "$@"' in ENTRYPOINT
     assert "sleep 1" in ENTRYPOINT
+
+
+def test_entrypoint_applies_the_newer_config_seed() -> None:
+    """The seed is applied when it is newer than the live config file."""
+    assert "CONFIG_SEED" in ENTRYPOINT
+    assert "-nt" in ENTRYPOINT
+    assert 'cp "$CONFIG_SEED" "$CONFIG"' in ENTRYPOINT
 
 
 def test_docker_config_is_db_mode_with_absolute_paths() -> None:

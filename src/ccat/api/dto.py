@@ -153,6 +153,18 @@ class EntityListPage(StrictModel):
     page_size: int
 
 
+class NeighbourView(StrictModel):
+    """One neighbouring entry in the audit list.
+
+    Attributes:
+        key: The entry's key.
+        label: A human label for the entry.
+    """
+
+    key: str
+    label: str = ""
+
+
 class EntityDetail(StrictModel):
     """One entity's full audit detail (§5.2).
 
@@ -167,6 +179,8 @@ class EntityDetail(StrictModel):
         last_updated_at: Latest edit timestamp (ISO).
         audited_at: The human-audit authority timestamp.
         diagnostics: Per-entity diagnostics (child: DOB conflicts).
+        previous: The entry before this one in the list's order.
+        next: The entry after this one in the list's order.
     """
 
     entity: str
@@ -180,6 +194,8 @@ class EntityDetail(StrictModel):
     last_updated_at: str | None = None
     audited_at: str | None = None
     diagnostics: dict[str, Any] = Field(default_factory=dict)
+    previous: NeighbourView | None = None
+    next: NeighbourView | None = None
 
 
 class IgnoreRequest(StrictModel):
@@ -189,6 +205,117 @@ class IgnoreRequest(StrictModel):
 
     confirm: bool
     expected_version: int
+
+
+class DuplicationListItem(StrictModel):
+    """One detected duplicate group in the Duplications list.
+
+    Attributes:
+        id: The group's stable, URL-safe id.
+        sheet: The duplicate-log sheet label.
+        entity: "child", "family", or "sponsor".
+        group_key: The duplicate group's key.
+        member_count: Submissions in the group.
+        decided_count: Members the audit already resolved.
+        status: "pending" or "resolved".
+        survivor_record_id: The group's surviving submission.
+        conflict_columns: Columns whose values differ across the group.
+        created: The group's earliest submission timestamp.
+    """
+
+    id: str
+    sheet: str
+    entity: str
+    group_key: str
+    member_count: int
+    decided_count: int
+    status: str
+    survivor_record_id: str = ""
+    conflict_columns: list[str] = Field(default_factory=list)
+    created: str | None = None
+
+
+class DuplicationListPage(StrictModel):
+    """One page of duplicate groups."""
+
+    items: list[DuplicationListItem] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 50
+
+
+class DuplicationMember(StrictModel):
+    """One member of a duplicate group.
+
+    Attributes:
+        zite_record_id: The raw submission.
+        created: The submission timestamp.
+        survivor: Whether the submission is the group's survivor.
+        conflict_columns: Columns whose values differ across the group.
+        conflict_details: The conflicting values.
+        raw: The raw submission record.
+        screened: The screened result (the final row), when it has one.
+        decision: "not_duplicate", "ignore", or None.
+        assigned_id: The unique id the decision assigned.
+        decided_by: The actor who decided.
+        decided_at: When the decision was recorded.
+        row_version: The screened row's optimistic-concurrency version.
+    """
+
+    zite_record_id: str
+    created: str | None = None
+    survivor: bool = False
+    conflict_columns: list[str] = Field(default_factory=list)
+    conflict_details: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+    screened: dict[str, Any] | None = None
+    decision: str | None = None
+    assigned_id: str | None = None
+    decided_by: str | None = None
+    decided_at: str | None = None
+    row_version: int | None = None
+
+
+class DuplicationDetail(StrictModel):
+    """One duplicate group's raw and screened results.
+
+    Attributes:
+        id: The group's stable, URL-safe id.
+        sheet: The duplicate-log sheet label.
+        entity: "child", "family", or "sponsor".
+        group_key: The duplicate group's key.
+        status: "pending", "resolved", or "audited".
+        audited_at: When the group was marked audited.
+        members: The group's submissions.
+        previous: The group before this one in the list's order.
+        next: The group after this one in the list's order.
+    """
+
+    id: str
+    sheet: str
+    entity: str
+    group_key: str
+    status: str
+    audited_at: str | None = None
+    members: list[DuplicationMember] = Field(default_factory=list)
+    previous: NeighbourView | None = None
+    next: NeighbourView | None = None
+
+
+class DuplicationDecisionRequest(StrictModel):
+    """One duplication-audit decision.
+
+    Attributes:
+        decision: "not_duplicate" or "ignore".
+        confirm: Must be True; anything else refuses the action.
+        expected_version: The caller's expected ``row_version``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["not_duplicate", "ignore"]
+    confirm: bool
+    expected_version: int | None = None
 
 
 class JobView(StrictModel):
@@ -374,6 +501,11 @@ __all__ = [
     "DbQueryResult",
     "DbTableView",
     "DraftPatch",
+    "DuplicationDecisionRequest",
+    "DuplicationDetail",
+    "DuplicationListItem",
+    "DuplicationListPage",
+    "DuplicationMember",
     "EntityDetail",
     "EntityListPage",
     "EntityPatch",
@@ -383,6 +515,7 @@ __all__ = [
     "JobEventView",
     "JobView",
     "MeView",
+    "NeighbourView",
     "Overview",
     "SeasonView",
     "UserCreate",

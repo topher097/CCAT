@@ -24,6 +24,7 @@ from ccat.api.dto import (
     EntityListPage,
     EntityPatch,
     IgnoreRequest,
+    NeighbourView,
     canonicalize,
     decanonicalize_patch,
 )
@@ -70,33 +71,6 @@ def _entity(segment: str) -> str:
         ) from None
 
 
-def _match(row: dict[str, Any], q: str) -> bool:
-    """Case-insensitive substring match on name/email/id (§5.2).
-
-    Args:
-        row: The final row.
-        q: The search query.
-
-    Returns:
-        True when any searchable field contains the query.
-    """
-    needle = q.strip().lower()
-    if not needle:
-        return True
-    haystack = [
-        row.get("first_name"),
-        row.get("last_name"),
-        row.get("primary_email"),
-        row.get("email"),
-        row.get("zite_record_id"),
-        row.get("family_id"),
-        row.get("sponsor_id"),
-    ]
-    return any(
-        value is not None and needle in str(value).lower() for value in haystack
-    )
-
-
 def _public_row(entity: str, row: dict[str, Any]) -> dict[str, Any]:
     """Render one final row for the wire (canonical names, no cache).
 
@@ -114,20 +88,29 @@ def _public_row(entity: str, row: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _detail_payload(
-    repo: SeasonStoreRepository, cfg: "Config", entity: str, key: str
+    repo: SeasonStoreRepository,
+    cfg: "Config",
+    entity: str,
+    key: str,
+    q: str = "",
+    status: str | None = None,
 ) -> EntityDetail:
     """Build one entity's full detail (§5.2).
 
     Runs the shared preparation for the baseline and duplicate
     submissions (the store's own semantics, plan §9.3) and merges the
     child's DOB-conflict note into ``diagnostics``; families and
-    sponsors carry their email/address validation status there.
+    sponsors carry their email/address validation status there.  The
+    list's filters decide the neighbouring entries, so "next" and
+    "previous" walk the table the user is looking at.
 
     Args:
         repo: The season-bound repository.
         cfg: Pipeline configuration.
         entity: The entity name.
         key: The entity key as text.
+        q: The list's search query.
+        status: The list's stored-status filter.
 
     Returns:
         The detail view.
@@ -172,6 +155,7 @@ async def _detail_payload(
             else (email,)
         )
         submissions = list(groups.get(group_key, []))
+    previous, next_row = db_audit.neighbours(entity, rows, key, q, status)
     return EntityDetail(
         entity=entity,
         key=str(existing.get(spec_key)),
@@ -184,6 +168,8 @@ async def _detail_payload(
         last_updated_at=existing.get("_last_updated_at"),
         audited_at=existing.get("audited_at"),
         diagnostics=diagnostics,
+        previous=NeighbourView(**previous) if previous else None,
+        next=NeighbourView(**next_row) if next_row else None,
     )
 
 
@@ -307,12 +293,8 @@ async def _list(
         The page DTO.
     """
     rows = await repo.final_rows(entity)
-    rows = sorted(rows, key=lambda row: db_audit.audit_sort_key(entity, row))
-    filtered = [
-        row
-        for row in rows
-        if (status is None or row.get("status") == status) and _match(row, q)
-    ]
+    rows = db_audit.ordered_rows(entity, rows, q, status)
+    filtered = rows
     start = (page - 1) * page_size
     items = [
         _public_row(entity, row) for row in filtered[start : start + page_size]
@@ -350,6 +332,8 @@ async def _entity_detail(
     key: str,
     request: Request,
     repo: SeasonStoreRepository,
+    q: str = "",
+    status: str | None = None,
 ) -> EntityDetail:
     """Shared detail implementation.
 
@@ -358,12 +342,14 @@ async def _entity_detail(
         key: The entity key as text.
         request: The current request.
         repo: The season-bound repository.
+        q: The list's search query (for the neighbours).
+        status: The list's stored-status filter (for the neighbours).
 
     Returns:
         The detail DTO.
     """
     cfg: Config = request.app.state.cfg
-    return await _detail_payload(repo, cfg, entity, key)
+    return await _detail_payload(repo, cfg, entity, key, q, status)
 
 
 def _detail_routes(segment: str, entity: str) -> None:
@@ -382,6 +368,8 @@ def _detail_routes(segment: str, entity: str) -> None:
         key: str,
         request: Request,
         repo: SeasonStoreRepository = Depends(season_repo),
+        q: str = "",
+        status: str | None = None,
     ) -> EntityDetail:
         """One entity's full detail (baseline + submissions + version).
 
@@ -389,11 +377,14 @@ def _detail_routes(segment: str, entity: str) -> None:
             key: The entity key.
             request: The current request.
             repo: The season-bound repository.
+            q: The list's search query (for the neighbours).
+            status: The list's stored-status filter (for the neighbours).
 
         Returns:
             The detail DTO.
         """
-        return await _entity_detail(entity, key, request, repo)
+        cfg: Config = request.app.state.cfg
+        return await _detail_payload(repo, cfg, entity, key, q, status)
 
     @router.patch(
         f"/{segment}/{{key}}",

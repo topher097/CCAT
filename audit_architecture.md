@@ -286,3 +286,117 @@ adjudication rules; this section describes how they are exposed.
 by SQLite), `test/test_services.py` the tri-state save service, and
 `test/test_api.py` the HTTP contract (role matrix, tri-state PATCH, the
 A/B stale-version scenario, ignore/unignore, IDOR and error mapping).
+
+### 10.5 The Duplications section
+
+The Audit tab's **Duplications** section adjudicates the duplicate groups
+the last screening run detected. It reads `duplicate_log` (one row per
+group member) and shows each group twice over: the raw submission
+(`duplicate_log.record`, plus the group's conflicting columns and values)
+beside the screened result (the `final_*` row the member landed in).
+
+`src/ccat/services/db_duplications.py` owns the section;
+`src/ccat/api/routes/duplications.py` exposes it.
+
+| Route | Purpose |
+|---|---|
+| `GET /seasons/{season}/duplications` | The group list (paginated, searchable, filterable by entity) |
+| `GET /seasons/{season}/duplications/{id}` | One group's raw and screened members |
+| `POST /seasons/{season}/duplications/{id}/members/{record_id}` | One confirmed decision |
+| `POST /seasons/{season}/duplications/{id}/audit` | Mark the resolved group audited |
+
+A group id is the SHA-256 of `(sheet, group_key)` truncated to 16 hex
+characters, so it survives a new screening run that redetects the group.
+
+The detail page is the child audit page turned sideways: rows are fields,
+columns are the raw submissions, and the last column is the group's
+current screened row, editable. Every raw column carries the group's two
+decisions in its header.
+
+| Column | Contents |
+|---|---|
+| Field | The field's label and its conflict marker |
+| Raw submission (one per member) | The member's verbatim submission value |
+| Current (editable) | The group's current screened value; editable, and saved through the ordinary audit PATCH |
+
+A field **conflicts** when the submissions disagree on it. Matching
+values do not conflict, and neither does a field one submission leaves
+blank while another fills in. Conflicting rows carry the `diff-changed`
+highlight, exactly like the child audit page marks a changed field.
+
+Two decisions are available per member:
+
+- `not_duplicate` — the member is a unique entity. It receives a unique
+  id of its own: a child gets the lowest free angel letter in its
+  family, a family submission becomes its own family row with a new
+  `family_id`, and a sponsor keeps the `sponsor_id` it already owns.
+  `potential_duplicate` is cleared.
+- `ignore` — the member is ignored, through the ordinary audit ignore
+  action (`services.db_audit.ignore_entity_db`), so the destructive
+  skeleton reset and the un-ignore reseed are unchanged.
+
+Every decision is appended to the `duplication_audit` table (season,
+sheet, group key, member, decision, assigned id, actor, timestamp). The
+trail is append-only: a re-decision adds a row. The current decision of
+a member is its newest trail row. The group's current row is the
+survivor's `final_*` row (the submission that owns the angel letter), so
+editing the current column edits that row through the ordinary audit
+PATCH.
+
+`final_child.angel_id` is not unique while a group is pending: every
+member of a pending child group carries the group's single letter, so the
+duplicate is one angel until the audit says otherwise. The family's angel
+count and assigned angel lists therefore count distinct letters, and
+info-sheet generation writes one sheet per angel. The screening run
+assigns the shared letter after its AI commits (`sync_pending_angel_letters`),
+because the AI commits carry the prepared (letterless) duplicate rows.
+
+A released family submission becomes a new family row with a new
+`family_id`; the group's children stay with the original family, because
+their email matches both registrations and no child can be attributed to
+the new one without a human decision.
+
+#### 10.5.1 The group's state
+
+A group is `pending` (a member is undecided), `resolved` (every member is
+decided) or `audited` (the auditor signed the group off). The first two
+are derived from the decision trail; `audited` is recorded in the
+`duplication_state` table (season, sheet, group key, status, audited at
+and by, reconciled at).
+
+**Mark audited** (`POST /duplications/{id}/audit`) refuses while a member
+is undecided, then:
+
+1. marks every non-ignored member's `final_*` row `audited` through the
+   ordinary audit save (`services.db_audit.save_entity_db`), so the
+   ownership matrix, the `audited_at` stamp and the status derivation
+   are unchanged;
+2. re-derives the affected family's and sponsor's angel columns
+   (`_refresh_angel_columns`), because the rollup counts only audited
+   children and the audit save never touches assignment columns;
+3. records the group's audited state — the flag that says the affected
+   `final_*` tables were reconciled with the adjudication.
+
+An ignored member stays ignored: the audit save forces the stored
+`ignore` flag back and would only reseed the row.
+
+#### 10.5.2 Navigation
+
+The audit lists keep their filters in the query string, so a detail
+link carries them and the back button restores the place in the table
+the user came from. The detail endpoints take the list's own filter
+parameters (`q`, `status` for the entity lists; `q`, `entity` for the
+duplications) and return the neighbouring entries, computed from the
+same ordering the list uses — so "next" and "previous" always mean the
+adjacent row of the table the user is looking at.
+
+### 10.6 Tests
+
+`test/test_duplications.py` characterizes the service (list, detail, the
+shared letter, the not-duplicate and ignore decisions, the audit trail,
+marking a group audited) and the screening integration;
+`test/test_api.py` adds the HTTP contract for the routes;
+`frontend/test/duplications.test.ts` covers the list, the decision
+table, the pending decisions and the ignore confirmation;
+`frontend/test/audit-nav.test.ts` covers the back button and the
+neighbour links.

@@ -25,13 +25,20 @@ x-app-env: &app-env
   OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-http://opencode:4097}
   OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-}
 
-# State lives on named volumes; config + templates are read-only bind mounts.
+# State lives on named volumes; the repo config file is a read-only seed
+# and the templates are read-only bind mounts.
 # The SQLite volume (ccat-db) must stay on local disk, never NFS.
 x-app-volumes: &app-volumes
   - ccat-db:/data
   - ccat-artifacts:/artifacts
   - ccat-logs:/logs
-  - ./config/ccat_docker.json:/app/config/ccat_docker.json:ro
+  # The live config is a regular file on a writable volume: the admin
+  # Settings tab rewrites it (a rename onto a bind mount fails with
+  # EBUSY), and api/worker/db-upgrade share the same file.
+  - ccat-config:/app/config
+  # The repo file is the seed; the entrypoint applies it when it is newer
+  # than the live copy.
+  - ./config/ccat_docker.json:/app/config-seed/ccat_docker.json:ro
   - ./data:/app/data:ro
 
 x-logging: &logging
@@ -212,9 +219,10 @@ services:
       - ccat-db:/data
       - ccat-artifacts:/artifacts
       - ccat-logs:/logs
-      # Writable so the admin Settings tab can save here; prod stays
-      # read-only (the operator edits the file and restarts).
-      - ./config/ccat_docker.json:/app/config/ccat_docker.json
+      # Same shape as prod: the live config is a writable volume file
+      # (the admin Settings tab saves here), seeded from the repo file.
+      - ccat-config:/app/config
+      - ./config/ccat_docker.json:/app/config-seed/ccat_docker.json:ro
       - ./data:/app/data:ro
       - ./src:/app/src:ro
     depends_on:
@@ -267,6 +275,7 @@ volumes:
   ccat-db:
   ccat-artifacts:
   ccat-logs:
+  ccat-config:
   caddy-data:
   caddy-config:
   opencode-data:

@@ -68,10 +68,6 @@ export const NODE_META: Record<string, NodeMeta> = {
     description: 'Pickup and drop-off locations grouped by area.',
     map: true,
   },
-  acquire: {
-    label: 'Acquire',
-    description: 'Settings for the acquisition stage.',
-  },
   screening: {
     label: 'Screening',
     description: 'Rules applied while screening registrations.',

@@ -15,6 +15,8 @@ import AuditListView from '../views/AuditListView.vue'
 import FamilyDetailView from '../views/FamilyDetailView.vue'
 import SponsorDetailView from '../views/SponsorDetailView.vue'
 import ChildDetailView from '../views/ChildDetailView.vue'
+import DuplicationListView from '../views/DuplicationListView.vue'
+import DuplicationDetailView from '../views/DuplicationDetailView.vue'
 
 import PipelineCommandView from '../views/PipelineCommandView.vue'
 import MatchView from '../views/MatchView.vue'
@@ -115,6 +117,18 @@ export const routes: RouteRecordRaw[] = [
     name: 'child',
     component: ChildDetailView,
     meta: { title: 'Child' },
+  },
+  {
+    path: '/audit/duplications',
+    name: 'duplications',
+    component: DuplicationListView,
+    meta: { title: 'Duplications' },
+  },
+  {
+    path: '/audit/duplications/:id',
+    name: 'duplication',
+    component: DuplicationDetailView,
+    meta: { title: 'Duplication' },
   },
   {
     path: '/match',

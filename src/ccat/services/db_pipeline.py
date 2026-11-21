@@ -75,6 +75,7 @@ from ccat.screening import (
     first_family_children,
 )
 from ccat.services.audit import entity_count_changes
+from ccat.services.db_duplications import sync_pending_angel_letters
 from ccat.services.results import (
     AcquireResult,
     MatchResult,
@@ -696,6 +697,11 @@ async def screen(
                 _screen_targets, targets, cfg, persist
             )
         progress("ai", completed=len(completed), total=len(targets))
+        # A pending duplicate group is one angel: every member shares the
+        # group's letter until the duplication audit resolves it.  This
+        # runs last, because the AI commits above carry the prepared
+        # (letterless) duplicate rows.
+        await sync_pending_angel_letters(repo, actor)
         after = {entity: await repo.final_rows(entity) for entity in _ENTITIES}
     after_children = {
         str(row.get("zite_record_id") or ""): row for row in after["child"]
@@ -995,7 +1001,11 @@ def _match_compute(
         assigned_angels = (
             ",".join(
                 sorted(
-                    (child["angel_id"] for child in family_children),
+                    {
+                        child["angel_id"]
+                        for child in family_children
+                        if child.get("angel_id")
+                    },
                     key=_angel_sort_key,
                 )
             )
@@ -1019,7 +1029,9 @@ def _match_compute(
     for row in sponsor_pool:
         plan = sponsor_plans.get(row["sponsor_id"])
         angel_ids = (
-            sorted(plan.assigned_angel_ids, key=_angel_sort_key) if plan else []
+            sorted(set(plan.assigned_angel_ids), key=_angel_sort_key)
+            if plan
+            else []
         )
         row["assigned_angel_ids"] = ",".join(angel_ids) if angel_ids else None
         row["num_angels_assigned"] = len(angel_ids)

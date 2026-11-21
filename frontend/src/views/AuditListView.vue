@@ -1,17 +1,21 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { listEntities, type Entity } from '../api/audit'
+import { useAuditNav } from '../composables/useAuditNav'
 import { useSessionStore } from '../stores/session'
 import { STATUSES, checkClass, checkLabel } from '../utils/status'
 import { formatTime } from '../utils/format'
+import AuditBackLink from '../components/AuditBackLink.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 
 const props = defineProps<{
   segment: 'sponsors' | 'families' | 'children'
 }>()
 
+const route = useRoute()
+const router = useRouter()
 const session = useSessionStore()
 
 /** URL segment -> API entity name. */
@@ -42,6 +46,8 @@ const totalPages = computed(() =>
   Math.max(1, Math.ceil(total.value / pageSize.value)),
 )
 const seasonName = computed(() => session.season?.name ?? '')
+/** The filters travel in the URL, so a detail link carries them. */
+const { query: carriedQuery } = useAuditNav(() => `/audit/${props.segment}`)
 
 function keyOf(row: Record<string, unknown>): string {
   return String(row[KEY_FIELD[entity.value]] ?? '')
@@ -61,13 +67,35 @@ function emailOf(row: Record<string, unknown>): string {
 }
 
 function detailTo(row: Record<string, unknown>): string {
-  if (entity.value === 'sponsor') return `/audit/sponsors/${keyOf(row)}`
-  if (entity.value === 'family') return `/audit/families/${keyOf(row)}`
-  return `/audit/children/${keyOf(row)}`
+  const path =
+    entity.value === 'sponsor'
+      ? `/audit/sponsors/${keyOf(row)}`
+      : entity.value === 'family'
+        ? `/audit/families/${keyOf(row)}`
+        : `/audit/children/${keyOf(row)}`
+  return carriedQuery.value ? `${path}?${carriedQuery.value}` : path
 }
 
 function isOrphan(row: Record<string, unknown>): boolean {
   return entity.value === 'child' && row.family_id === null
+}
+
+/** Read the list's filters and page back out of the URL. */
+function readUrl(): void {
+  query.value = String(route.query.q ?? '')
+  status.value = String(route.query.status ?? 'all')
+  page.value = Math.max(1, Number(route.query.page ?? 1) || 1)
+  pageSize.value = Math.max(1, Number(route.query.page_size ?? 50) || 50)
+}
+
+/** Write the list's filters and page into the URL. */
+function writeUrl(): void {
+  const next: Record<string, string> = {}
+  if (query.value) next.q = query.value
+  if (status.value !== 'all') next.status = status.value
+  if (page.value > 1) next.page = String(page.value)
+  if (pageSize.value !== 50) next.page_size = String(pageSize.value)
+  void router.replace({ path: route.path, query: next })
 }
 
 async function load(): Promise<void> {
@@ -96,31 +124,30 @@ async function load(): Promise<void> {
 
 function submitSearch(): void {
   page.value = 1
-  void load()
+  writeUrl()
 }
 
 function setStatus(next: string): void {
   status.value = next
   page.value = 1
-  void load()
+  writeUrl()
 }
 
 function go(next: number): void {
   page.value = Math.min(Math.max(1, next), totalPages.value)
-  void load()
+  writeUrl()
 }
 
 watch(
-  () => props.segment,
+  () => route.fullPath,
   () => {
-    page.value = 1
-    query.value = ''
-    status.value = 'all'
+    readUrl()
     void load()
   },
 )
 
 onMounted(() => {
+  readUrl()
   void load()
 })
 </script>
@@ -128,8 +155,10 @@ onMounted(() => {
 <template>
   <section>
     <div class="status-line" style="justify-content: space-between">
-      <h1 style="text-transform: capitalize">{{ props.segment }}</h1>
-      <RouterLink to="/audit">Audit landing</RouterLink>
+      <div class="status-line">
+        <AuditBackLink to="/audit" label="Audit" />
+        <h1 style="text-transform: capitalize">{{ props.segment }}</h1>
+      </div>
     </div>
 
     <form class="filters" @submit.prevent="submitSearch">

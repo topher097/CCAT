@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises } from '@vue/test-utils'
 
 import EntityEditor from '../src/components/EntityEditor.vue'
 import { useSessionStore } from '../src/stores/session'
-import { bodyOf, headersOf, jsonResponse, mockRoutes } from './helpers'
+import { bodyOf, headersOf, jsonResponse, mockRoutes, mountRouted } from './helpers'
 
 const CHILD_ROW = {
   zite_record_id: 'c1',
@@ -50,14 +50,19 @@ function childDetail(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function mountEditor(entity: 'child' | 'sponsor' | 'family', key = 'c1') {
-  const pinia = createPinia()
-  setActivePinia(pinia)
-  useSessionStore().season = { id: 1, name: '2026', xmas_date: '2026-12-25' }
-  return mount(EntityEditor, {
+async function mountEditor(entity: 'child' | 'sponsor' | 'family', key = 'c1') {
+  const { wrapper } = await mountRouted(EntityEditor, {
+    path: `/audit/${entity === 'child' ? 'children' : entity === 'family' ? 'families' : 'sponsors'}/${key}`,
     props: { entity, entityKey: key },
-    global: { plugins: [pinia] },
+    setup: () => {
+      useSessionStore().season = {
+        id: 1,
+        name: '2026',
+        xmas_date: '2026-12-25',
+      }
+    },
   })
+  return wrapper
 }
 
 function patchCall(fetchMock: ReturnType<typeof mockRoutes>) {
@@ -73,7 +78,7 @@ describe('entity editor', () => {
     mockRoutes([
       (url) => (url.includes('/children/c1') ? jsonResponse(200, childDetail()) : undefined),
     ])
-    const wrapper = mountEditor('child')
+    const wrapper = await mountEditor('child')
     await flushPromises()
 
     expect(wrapper.get('[data-field="first_name"]').text()).toContain('Ann')
@@ -101,7 +106,7 @@ describe('entity editor', () => {
         return jsonResponse(200, childDetail())
       },
     ])
-    const wrapper = mountEditor('child')
+    const wrapper = await mountEditor('child')
     await flushPromises()
 
     await wrapper.get('input[name="first_name"]').setValue('Anna')
@@ -138,7 +143,7 @@ describe('entity editor', () => {
         return jsonResponse(200, childDetail())
       },
     ])
-    const wrapper = mountEditor('child')
+    const wrapper = await mountEditor('child')
     await flushPromises()
 
     await wrapper.get('input[name="special-needs-Autism"]').setValue(true)
@@ -186,7 +191,7 @@ describe('entity editor', () => {
         return jsonResponse(200, childDetail())
       },
     ])
-    const wrapper = mountEditor('child')
+    const wrapper = await mountEditor('child')
     await flushPromises()
 
     await wrapper.get('input[name="first_name"]').setValue('Anna')
@@ -241,7 +246,7 @@ describe('entity editor', () => {
         )
       },
     ])
-    const wrapper = mountEditor('child')
+    const wrapper = await mountEditor('child')
     await flushPromises()
 
     await wrapper.get('input[name="first_name"]').setValue('Anna')
@@ -269,7 +274,7 @@ describe('entity editor', () => {
             )
           : undefined,
     ])
-    const wrapper = mountEditor('child')
+    const wrapper = await mountEditor('child')
     await flushPromises()
     expect(wrapper.get('[data-testid="orphan-warning"]').text()).toContain(
       'Audited status stays disabled',
@@ -297,7 +302,7 @@ describe('entity editor', () => {
         return jsonResponse(200, childDetail())
       },
     ])
-    const wrapper = mountEditor('child')
+    const wrapper = await mountEditor('child')
     await flushPromises()
 
     await wrapper.get('input[name="first_name"]').setValue('Anna')
@@ -338,7 +343,7 @@ describe('entity editor', () => {
         )
       },
     ])
-    const wrapper = mountEditor('child')
+    const wrapper = await mountEditor('child')
     await flushPromises()
 
     await wrapper.get('[data-testid="mark-audited"]').trigger('click')
@@ -375,7 +380,7 @@ describe('entity editor', () => {
             )
           : undefined,
     ])
-    const wrapper = mountEditor('child')
+    const wrapper = await mountEditor('child')
     await flushPromises()
     expect(wrapper.get('[data-testid="submissions"]').findAll('tbody tr')).toHaveLength(2)
   })
@@ -421,7 +426,7 @@ describe('ignore / unignore', () => {
             )
           : undefined,
     ])
-    const wrapper = mountEditor('sponsor', '10')
+    const wrapper = await mountEditor('sponsor', '10')
     await flushPromises()
 
     const panel = wrapper.get('[data-testid="validation-status"]')
@@ -451,7 +456,7 @@ describe('ignore / unignore', () => {
         return jsonResponse(200, sponsorDetail())
       },
     ])
-    const wrapper = mountEditor('sponsor', '10')
+    const wrapper = await mountEditor('sponsor', '10')
     await flushPromises()
 
     await wrapper.get('[data-testid="ignore-toggle"]').trigger('click')

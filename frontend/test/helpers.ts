@@ -86,6 +86,13 @@ export async function mountRouted(
       { path: '/stats', component: placeholder },
       { path: '/screen', component: placeholder },
       { path: '/acquire', component: placeholder },
+      { path: '/audit', component: placeholder },
+      { path: '/audit/duplications', component: placeholder },
+      { path: '/audit/duplications/:id', component: placeholder },
+      { path: '/audit/sponsors/:id', component: placeholder },
+      { path: '/audit/families/:id', component: placeholder },
+      { path: '/audit/children/:id', component: placeholder },
+      { path: '/audit/families/:familyId/children/:childId', component: placeholder },
       { path: '/audit/:rest(.*)*', component: placeholder },
       {
         path: '/settings',

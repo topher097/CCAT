@@ -249,7 +249,11 @@ def _enrich(
         .alias("sponsor_name")
     )
     family_size = (
-        enriched.group_by("family_id").len().rename({"len": "family_size"})
+        enriched.select(["family_id", "angel_id"])
+        .unique()
+        .group_by("family_id")
+        .len()
+        .rename({"len": "family_size"})
     )
     enriched = enriched.join(family_size, on="family_id", how="left")
     return enriched
@@ -789,6 +793,42 @@ def _build_packets(
     return files, skipped
 
 
+def _one_row_per_angel(frame: pl.DataFrame) -> pl.DataFrame:
+    """Keep one row per angel letter.
+
+    A child that is still a pending duplicate shares its group's angel
+    letter, so the family's angel gets one information sheet, not one
+    per submission.
+
+    Args:
+        frame: The pending rows.
+
+    Returns:
+        The pending rows with one row per angel letter.
+    """
+    if frame.is_empty():
+        return frame
+    seen: set[str] = set()
+    keep: list[bool] = []
+    dropped: list[str] = []
+    for angel_id in frame["angel_id"].to_list():
+        key = str(angel_id)
+        if key in seen:
+            keep.append(False)
+            dropped.append(key)
+            continue
+        seen.add(key)
+        keep.append(True)
+    if dropped:
+        logger.info(
+            "skipping %d duplicate submission(s) that share an angel"
+            " letter: %s",
+            len(dropped),
+            sorted(set(dropped)),
+        )
+    return frame.filter(pl.Series(keep))
+
+
 async def generate(
     cfg: "Config",
     actor: str,
@@ -864,6 +904,7 @@ async def generate(
         pending, _skipped_unsponsored = _pending_rows(
             enriched, overwrite=overwrite
         )
+        pending = _one_row_per_angel(pending)
         if sponsor is not None:
             pending = pending.filter(pl.col("assigned_sponsor_id") == sponsor)
             logger.info(

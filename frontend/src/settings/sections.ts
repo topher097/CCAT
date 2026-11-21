@@ -55,7 +55,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     slug: 'screening',
     title: 'Screening',
     summary: 'Screening rules and the external checks they run.',
-    keys: ['screening', 'acquire', 'email_check', 'address_check'],
+    keys: ['screening', 'email_check', 'address_check'],
   },
   {
     slug: 'ai',

@@ -1,16 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 
 import { ApiError } from '../api/client'
-import {
-  getEntity,
-  patchEntity,
-  setIgnored,
-  type Entity,
-  type EntityDetail,
-  type EntityPatch,
-} from '../api/audit'
+import { getEntity, patchEntity, setIgnored, SEGMENT, type Entity, type EntityDetail, type EntityPatch } from '../api/audit'
 import { useSessionStore } from '../stores/session'
+import { useAuditNav } from '../composables/useAuditNav'
 import { useDirtyGuard } from '../composables/useDirtyGuard'
 import { ENTITY_FIELDS, formatTime, type FieldSpec } from '../utils/format'
 import { checkClass, checkLabel } from '../utils/status'
@@ -44,6 +39,12 @@ const ENTITY_LABEL: Record<Entity, string> = {
 
 const seasonName = computed(() => session.season?.name ?? '')
 const fieldSpecs = computed<FieldSpec[]>(() => ENTITY_FIELDS[props.entity])
+/** The list's filters, carried in the URL, decide the neighbours. */
+const { query: carriedQuery } = useAuditNav('/audit')
+const listFilters = computed(() => {
+  const params = new URLSearchParams(carriedQuery.value)
+  return { q: params.get('q') ?? '', status: params.get('status') }
+})
 const labels = computed<Record<string, string>>(() =>
   Object.fromEntries(
     [...fieldSpecs.value, { field: 'clarification_notes', label: 'Clarification notes' }].map(
@@ -170,13 +171,24 @@ async function load(): Promise<void> {
   pendingStatus.value = null
   try {
     apply(
-      await getEntity(seasonName.value, props.entity, props.entityKey),
+      await getEntity(
+        seasonName.value,
+        props.entity,
+        props.entityKey,
+        listFilters.value,
+      ),
     )
   } catch (failure) {
     loadError.value = messageOf(failure)
   } finally {
     loading.value = false
   }
+}
+
+/** The URL of one neighbouring entry, keeping the list's filters. */
+function neighbourTo(key: string): string {
+  const path = `/audit/${SEGMENT[props.entity]}/${encodeURIComponent(key)}`
+  return carriedQuery.value ? `${path}?${carriedQuery.value}` : path
 }
 
 async function persist(version: number): Promise<void> {
@@ -306,6 +318,7 @@ onMounted(() => void load())
     <template v-else-if="detail">
       <div class="status-line" style="justify-content: space-between">
         <div class="status-line">
+          <slot name="back" />
           <h1 style="margin: 0">{{ title }}</h1>
           <StatusBadge :status="detail.status" />
           <span class="muted">row version {{ detail.row_version }}</span>
@@ -486,6 +499,30 @@ onMounted(() => void load())
         <span v-if="isDirty" class="muted">
           {{ touched.size }} field(s) changed but not saved
         </span>
+      </div>
+
+      <div class="status-line" style="margin-top: 0.75rem">
+        <RouterLink
+          v-if="detail.previous"
+          class="chip"
+          :to="neighbourTo(detail.previous.key)"
+          data-testid="previous-entry"
+        >
+          ← Previous
+          {{ detail.previous.label }}
+        </RouterLink>
+        <span v-else class="chip muted" data-testid="previous-entry">
+          ← Previous
+        </span>
+        <RouterLink
+          v-if="detail.next"
+          class="chip"
+          :to="neighbourTo(detail.next.key)"
+          data-testid="next-entry"
+        >
+          Next {{ detail.next.label }} →
+        </RouterLink>
+        <span v-else class="chip muted" data-testid="next-entry">Next →</span>
       </div>
 
       <section

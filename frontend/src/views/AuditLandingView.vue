@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 
 import { api } from '../api/client'
 import { useSessionStore } from '../stores/session'
+import AuditBackLink from '../components/AuditBackLink.vue'
 
 const session = useSessionStore()
 const tab = ref<'duplicates' | 'dob'>('duplicates')
@@ -50,11 +51,15 @@ const columns = computed(() => {
 
 <template>
   <section>
-    <h1>Audit</h1>
+    <div class="status-line">
+      <AuditBackLink to="/" label="Overview" />
+      <h1>Audit</h1>
+    </div>
     <p>
       <router-link to="/audit/sponsors">Sponsors</router-link> ·
       <router-link to="/audit/families">Families</router-link> ·
       <router-link to="/audit/children">Children</router-link> ·
+      <router-link to="/audit/duplications">Duplications</router-link> ·
       <a :href="matchReportUrl" target="_blank" rel="noopener">
         Match report (JSON)
       </a>

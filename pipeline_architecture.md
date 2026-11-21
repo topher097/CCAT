@@ -272,9 +272,6 @@ Structure:
     "timeout": 30.0
   },
 
-  // Deprecated (module 1 only fetches now); kept so old configs load.
-  "acquire": {},
-
   // Matchmaking (module 4). Weights are lexicographic tiers, not additive.
   "matchmaking": {
     "location_weight": 1000,
@@ -380,6 +377,8 @@ pipeline's owner of each sheet.
 | `final_family` | Complete persistent family store, one row per stable family identity | screen seeds; audit saves; match patches assignments |
 | `final_child` | Complete persistent child-submission store keyed by `zite_record_id`; duplicates, ignored rows, orphans, and raw-missing rows remain | screen appends/AI patches; audit saves; generate patches generation marker |
 | `duplicate_log` | One row per flagged duplicate submission; nothing merges | screen |
+| `duplication_audit` | Append-only trail of the human duplication decisions (`not_duplicate` / `ignore`) | duplication audit |
+| `duplication_state` | One duplicate group's own state (`audited`); the flag that its affected `final_*` rows were reconciled | duplication audit |
 | `dob_conflict_log` | One row per same-family DOB pair within the configured gap | screen |
 | `email_validation_log` | One row per checked (record, field), with the entire verbatim ZeroBounce response | screen |
 | `address_validation_log` | One row per checked address, with the entire verbatim Nominatim response | screen |
@@ -505,7 +504,10 @@ resolution path; match reports unresolved email-sharing pool members.
 - `angel_id` is `<family_id><letter>`. Current duplicate survivor rules
   determine eligibility, but existing angels never transfer. New eligible
   members get the lowest unused letter in age-descending order, tie-break
-  created then DOB.
+  created then DOB. A member of a duplicate group that is still pending in
+  the audit tool carries the group's single letter, so the duplicate counts
+  as one angel; the duplication audit gives it a letter of its own once the
+  member is confirmed to be a unique entry.
 - Orphans retain null family/angel and remain stored for correction.
 
 ### 6.6 Sibling DOB diagnostics

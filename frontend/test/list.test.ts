@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { flushPromises, mount, RouterLinkStub } from '@vue/test-utils'
+import { flushPromises } from '@vue/test-utils'
 
 import AuditListView from '../src/views/AuditListView.vue'
 import { useSessionStore } from '../src/stores/session'
-import { jsonResponse, mockRoutes } from './helpers'
+import { jsonResponse, mockRoutes, mountRouted } from './helpers'
 
 const SPONSOR_ROWS = [
   {
@@ -27,17 +27,19 @@ const SPONSOR_ROWS = [
   },
 ]
 
-function mountList(segment: 'sponsors' | 'families' | 'children') {
-  const pinia = createPinia()
-  setActivePinia(pinia)
-  useSessionStore().season = { id: 1, name: '2026', xmas_date: '2026-12-25' }
-  return mount(AuditListView, {
+async function mountList(segment: 'sponsors' | 'families' | 'children') {
+  const { wrapper } = await mountRouted(AuditListView, {
+    path: `/audit/${segment}`,
     props: { segment },
-    global: {
-      plugins: [pinia],
-      stubs: { RouterLink: RouterLinkStub },
+    setup: () => {
+      useSessionStore().season = {
+        id: 1,
+        name: '2026',
+        xmas_date: '2026-12-25',
+      }
     },
   })
+  return wrapper
 }
 
 function pageOf(items: unknown[], total = items.length, page = 1) {
@@ -57,7 +59,7 @@ describe('audit list', () => {
       (url) =>
         url.includes('/sponsors?') ? pageOf(SPONSOR_ROWS, 2) : undefined,
     ])
-    const wrapper = mountList('sponsors')
+    const wrapper = await mountList('sponsors')
     await flushPromises()
 
     expect(wrapper.get('[data-testid="list-total"]').text()).toBe('2 rows')
@@ -80,7 +82,7 @@ describe('audit list', () => {
         return pageOf(audited ? [SPONSOR_ROWS[0]] : SPONSOR_ROWS, 2)
       },
     ])
-    const wrapper = mountList('sponsors')
+    const wrapper = await mountList('sponsors')
     await flushPromises()
 
     const chip = wrapper
@@ -96,6 +98,35 @@ describe('audit list', () => {
     expect(chip!.attributes('aria-pressed')).toBe('true')
   })
 
+  it('keeps the filters in the URL and carries them into the detail link', async () => {
+    const fetchMock = mockRoutes([
+      (url) =>
+        url.includes('/sponsors?') ? pageOf(SPONSOR_ROWS, 2) : undefined,
+    ])
+    const { wrapper, router } = await mountRouted(AuditListView, {
+      path: '/audit/sponsors?status=audited&q=ada',
+      props: { segment: 'sponsors' },
+      setup: () => {
+        useSessionStore().season = {
+          id: 1,
+          name: '2026',
+          xmas_date: '2026-12-25',
+        }
+      },
+    })
+    await flushPromises()
+
+    const requested = String(fetchMock.mock.calls.at(-1)?.[0])
+    expect(requested).toContain('status=audited')
+    expect(requested).toContain('q=ada')
+    expect(router.currentRoute.value.query.status).toBe('audited')
+
+    const link = wrapper
+      .findAllComponents({ name: 'RouterLinkStub' })
+      .find((candidate) => candidate.text() === '10')
+    expect(link!.props('to')).toBe('/audit/sponsors/10?status=audited&q=ada')
+  })
+
   it('advances and disables pagination at the boundaries', async () => {
     const fetchMock = mockRoutes([
       (url) => {
@@ -104,7 +135,7 @@ describe('audit list', () => {
         return pageOf(SPONSOR_ROWS, 120, page)
       },
     ])
-    const wrapper = mountList('sponsors')
+    const wrapper = await mountList('sponsors')
     await flushPromises()
 
     const next = wrapper
@@ -135,7 +166,7 @@ describe('audit list', () => {
             ])
           : undefined,
     ])
-    const wrapper = mountList('children')
+    const wrapper = await mountList('children')
     await flushPromises()
     const row = wrapper.findAll('tbody tr')[0]!
     expect(row.text()).toContain('orphan')
@@ -157,7 +188,7 @@ describe('audit list', () => {
             ])
           : undefined,
     ])
-    const wrapper = mountList('families')
+    const wrapper = await mountList('families')
     await flushPromises()
 
     const cell = wrapper.get('[data-testid="validation"]')
@@ -182,7 +213,7 @@ describe('audit list', () => {
             ])
           : undefined,
     ])
-    const wrapper = mountList('sponsors')
+    const wrapper = await mountList('sponsors')
     await flushPromises()
 
     const cell = wrapper.get('[data-testid="validation"]')
@@ -201,7 +232,7 @@ describe('audit list', () => {
             ])
           : undefined,
     ])
-    const wrapper = mountList('families')
+    const wrapper = await mountList('families')
     await flushPromises()
 
     const rows = wrapper.findAll('tbody tr')

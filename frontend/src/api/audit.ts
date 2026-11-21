@@ -53,9 +53,15 @@ export function getEntity(
   season: string,
   entity: Entity,
   key: string,
+  filters: { q?: string; status?: string | null } = {},
 ): Promise<EntityDetail> {
+  const query = new URLSearchParams()
+  if (filters.q) query.set('q', filters.q)
+  if (filters.status && filters.status !== 'all')
+    query.set('status', filters.status)
+  const suffix = query.size ? `?${query.toString()}` : ''
   return api.get(
-    `/api/v1/seasons/${seasonPath(season)}/${SEGMENT[entity]}/${encodeURIComponent(key)}`,
+    `/api/v1/seasons/${seasonPath(season)}/${SEGMENT[entity]}/${encodeURIComponent(key)}${suffix}`,
   )
 }
 

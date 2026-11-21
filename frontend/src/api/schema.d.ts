@@ -547,6 +547,8 @@ export interface paths {
          *         key: The entity key.
          *         request: The current request.
          *         repo: The season-bound repository.
+         *         q: The list's search query (for the neighbours).
+         *         status: The list's stored-status filter (for the neighbours).
          *
          *     Returns:
          *         The detail DTO.
@@ -967,6 +969,150 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/seasons/{season}/duplications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Duplications
+         * @description List the detected duplicate groups.
+         *
+         *     Args:
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         page: 1-based page number.
+         *         page_size: Page size (max 200).
+         *         q: Search on the group key.
+         *         entity: Restrict to "child", "family", or "sponsor".
+         *         _user: Authenticated identity.
+         *
+         *     Returns:
+         *         One page of duplicate groups.
+         */
+        get: operations["list_duplications_api_v1_seasons__season__duplications_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/duplications/{group_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Duplication
+         * @description Read one duplicate group's raw and screened results.
+         *
+         *     Args:
+         *         group_id: The group's id.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         q: The list's search query (for the neighbours).
+         *         entity: Restrict to "child", "family", or "sponsor" (for the
+         *             neighbours).
+         *         _user: Authenticated identity.
+         *
+         *     Returns:
+         *         The group detail.
+         *
+         *     Raises:
+         *         ApiError: 404 when no group carries that id.
+         */
+        get: operations["get_duplication_api_v1_seasons__season__duplications__group_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/duplications/{group_id}/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Audit Duplication
+         * @description Mark a resolved duplication audited (auditor).
+         *
+         *     The group's members become audited and the affected ``final_*``
+         *     tables are reconciled with the adjudication.
+         *
+         *     Args:
+         *         group_id: The group's id.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         q: The list's search query (for the neighbours).
+         *         entity: Restrict to "child", "family", or "sponsor" (for the
+         *             neighbours).
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The updated group detail.
+         *
+         *     Raises:
+         *         ApiError: 404 for an unknown group; 409 while a member is
+         *             undecided; 412 when a stored row changed since the read.
+         */
+        post: operations["audit_duplication_api_v1_seasons__season__duplications__group_id__audit_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/duplications/{group_id}/members/{record_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Decide Duplication
+         * @description Resolve one duplicate group member (auditor; confirmed).
+         *
+         *     Args:
+         *         group_id: The group's id.
+         *         record_id: The audited group member.
+         *         body: The decision.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         q: The list's search query (for the neighbours).
+         *         entity: Restrict to "child", "family", or "sponsor" (for the
+         *             neighbours).
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The updated group detail.
+         *
+         *     Raises:
+         *         ApiError: 422 without confirmation; 404 for an unknown group or
+         *             member; 412 when the stored row changed since the read.
+         */
+        post: operations["decide_duplication_api_v1_seasons__season__duplications__group_id__members__record_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/seasons/{season}/families": {
         parameters: {
             query?: never;
@@ -1013,6 +1159,8 @@ export interface paths {
          *         key: The entity key.
          *         request: The current request.
          *         repo: The season-bound repository.
+         *         q: The list's search query (for the neighbours).
+         *         status: The list's stored-status filter (for the neighbours).
          *
          *     Returns:
          *         The detail DTO.
@@ -1233,6 +1381,8 @@ export interface paths {
          *         key: The entity key.
          *         request: The current request.
          *         repo: The season-bound repository.
+         *         q: The list's search query (for the neighbours).
+         *         status: The list's stored-status filter (for the neighbours).
          *
          *     Returns:
          *         The detail DTO.
@@ -1606,6 +1756,182 @@ export interface components {
             subject?: string | null;
         };
         /**
+         * DuplicationDecisionRequest
+         * @description One duplication-audit decision.
+         *
+         *     Attributes:
+         *         decision: "not_duplicate" or "ignore".
+         *         confirm: Must be True; anything else refuses the action.
+         *         expected_version: The caller's expected ``row_version``.
+         */
+        DuplicationDecisionRequest: {
+            /** Confirm */
+            confirm: boolean;
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "not_duplicate" | "ignore";
+            /** Expected Version */
+            expected_version?: number | null;
+        };
+        /**
+         * DuplicationDetail
+         * @description One duplicate group's raw and screened results.
+         *
+         *     Attributes:
+         *         id: The group's stable, URL-safe id.
+         *         sheet: The duplicate-log sheet label.
+         *         entity: "child", "family", or "sponsor".
+         *         group_key: The duplicate group's key.
+         *         status: "pending", "resolved", or "audited".
+         *         audited_at: When the group was marked audited.
+         *         members: The group's submissions.
+         *         previous: The group before this one in the list's order.
+         *         next: The group after this one in the list's order.
+         */
+        DuplicationDetail: {
+            /** Audited At */
+            audited_at?: string | null;
+            /** Entity */
+            entity: string;
+            /** Group Key */
+            group_key: string;
+            /** Id */
+            id: string;
+            /** Members */
+            members?: components["schemas"]["DuplicationMember"][];
+            next?: components["schemas"]["NeighbourView"] | null;
+            previous?: components["schemas"]["NeighbourView"] | null;
+            /** Sheet */
+            sheet: string;
+            /** Status */
+            status: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DuplicationListItem
+         * @description One detected duplicate group in the Duplications list.
+         *
+         *     Attributes:
+         *         id: The group's stable, URL-safe id.
+         *         sheet: The duplicate-log sheet label.
+         *         entity: "child", "family", or "sponsor".
+         *         group_key: The duplicate group's key.
+         *         member_count: Submissions in the group.
+         *         decided_count: Members the audit already resolved.
+         *         status: "pending" or "resolved".
+         *         survivor_record_id: The group's surviving submission.
+         *         conflict_columns: Columns whose values differ across the group.
+         *         created: The group's earliest submission timestamp.
+         */
+        DuplicationListItem: {
+            /** Conflict Columns */
+            conflict_columns?: string[];
+            /** Created */
+            created?: string | null;
+            /** Decided Count */
+            decided_count: number;
+            /** Entity */
+            entity: string;
+            /** Group Key */
+            group_key: string;
+            /** Id */
+            id: string;
+            /** Member Count */
+            member_count: number;
+            /** Sheet */
+            sheet: string;
+            /** Status */
+            status: string;
+            /**
+             * Survivor Record Id
+             * @default
+             */
+            survivor_record_id: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DuplicationListPage
+         * @description One page of duplicate groups.
+         */
+        DuplicationListPage: {
+            /** Items */
+            items?: components["schemas"]["DuplicationListItem"][];
+            /**
+             * Page
+             * @default 1
+             */
+            page: number;
+            /**
+             * Page Size
+             * @default 50
+             */
+            page_size: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DuplicationMember
+         * @description One member of a duplicate group.
+         *
+         *     Attributes:
+         *         zite_record_id: The raw submission.
+         *         created: The submission timestamp.
+         *         survivor: Whether the submission is the group's survivor.
+         *         conflict_columns: Columns whose values differ across the group.
+         *         conflict_details: The conflicting values.
+         *         raw: The raw submission record.
+         *         screened: The screened result (the final row), when it has one.
+         *         decision: "not_duplicate", "ignore", or None.
+         *         assigned_id: The unique id the decision assigned.
+         *         decided_by: The actor who decided.
+         *         decided_at: When the decision was recorded.
+         *         row_version: The screened row's optimistic-concurrency version.
+         */
+        DuplicationMember: {
+            /** Assigned Id */
+            assigned_id?: string | null;
+            /** Conflict Columns */
+            conflict_columns?: string[];
+            /** Conflict Details */
+            conflict_details?: string | null;
+            /** Created */
+            created?: string | null;
+            /** Decided At */
+            decided_at?: string | null;
+            /** Decided By */
+            decided_by?: string | null;
+            /** Decision */
+            decision?: string | null;
+            /** Raw */
+            raw?: {
+                [key: string]: unknown;
+            };
+            /** Row Version */
+            row_version?: number | null;
+            /** Screened */
+            screened?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Survivor
+             * @default false
+             */
+            survivor: boolean;
+            /** Zite Record Id */
+            zite_record_id: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
          * EntityDetail
          * @description One entity's full audit detail (§5.2).
          *
@@ -1620,6 +1946,8 @@ export interface components {
          *         last_updated_at: Latest edit timestamp (ISO).
          *         audited_at: The human-audit authority timestamp.
          *         diagnostics: Per-entity diagnostics (child: DOB conflicts).
+         *         previous: The entry before this one in the list's order.
+         *         next: The entry after this one in the list's order.
          */
         EntityDetail: {
             /** Audited At */
@@ -1640,6 +1968,8 @@ export interface components {
             last_updated_at?: string | null;
             /** Last Updated By */
             last_updated_by?: string | null;
+            next?: components["schemas"]["NeighbourView"] | null;
+            previous?: components["schemas"]["NeighbourView"] | null;
             /** Row */
             row: {
                 [key: string]: unknown;
@@ -1883,6 +2213,25 @@ export interface components {
             roles?: string[];
             /** Username */
             username: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * NeighbourView
+         * @description One neighbouring entry in the audit list.
+         *
+         *     Attributes:
+         *         key: The entry's key.
+         *         label: A human label for the entry.
+         */
+        NeighbourView: {
+            /** Key */
+            key: string;
+            /**
+             * Label
+             * @default
+             */
+            label: string;
         } & {
             [key: string]: unknown;
         };
@@ -2499,7 +2848,10 @@ export interface operations {
     };
     get_entity_api_v1_seasons__season__children__key__get: {
         parameters: {
-            query?: never;
+            query?: {
+                q?: string;
+                status?: string | null;
+            };
             header?: never;
             path: {
                 key: string;
@@ -3001,6 +3353,152 @@ export interface operations {
             };
         };
     };
+    list_duplications_api_v1_seasons__season__duplications_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                q?: string;
+                entity?: string | null;
+            };
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DuplicationListPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_duplication_api_v1_seasons__season__duplications__group_id__get: {
+        parameters: {
+            query?: {
+                q?: string;
+                entity?: string | null;
+            };
+            header?: never;
+            path: {
+                group_id: string;
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DuplicationDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    audit_duplication_api_v1_seasons__season__duplications__group_id__audit_post: {
+        parameters: {
+            query?: {
+                q?: string;
+                entity?: string | null;
+            };
+            header?: never;
+            path: {
+                group_id: string;
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DuplicationDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    decide_duplication_api_v1_seasons__season__duplications__group_id__members__record_id__post: {
+        parameters: {
+            query?: {
+                q?: string;
+                entity?: string | null;
+            };
+            header?: never;
+            path: {
+                group_id: string;
+                record_id: string;
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DuplicationDecisionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DuplicationDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_families_api_v1_seasons__season__families_get: {
         parameters: {
             query?: {
@@ -3039,7 +3537,10 @@ export interface operations {
     };
     get_entity_api_v1_seasons__season__families__key__get: {
         parameters: {
-            query?: never;
+            query?: {
+                q?: string;
+                status?: string | null;
+            };
             header?: never;
             path: {
                 key: string;
@@ -3314,7 +3815,10 @@ export interface operations {
     };
     get_entity_api_v1_seasons__season__sponsors__key__get: {
         parameters: {
-            query?: never;
+            query?: {
+                q?: string;
+                status?: string | null;
+            };
             header?: never;
             path: {
                 key: string;

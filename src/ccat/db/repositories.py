@@ -83,6 +83,8 @@ from ccat.db.models import (
     ClarificationFamily,
     DobConflictLog,
     DuplicateLog,
+    DuplicationAudit,
+    DuplicationState,
     EmailCheck,
     EmailCheckTarget,
     FinalChild,
@@ -133,6 +135,7 @@ WRITABLE_ENTITIES: dict[str, frozenset[str]] = {
     "match": frozenset({"family", "sponsor"}),
     "generate": frozenset({"child"}),
     "migrate": frozenset({"child", "family", "sponsor"}),
+    "duplication": frozenset({"child", "family", "sponsor"}),
 }
 
 #: Allowed-change columns per module/entity, in legacy names.
@@ -159,11 +162,34 @@ ALLOWED_CHANGES: dict[str, dict[str, frozenset[str] | None]] = {
     },
     "generate": {"child": frozenset(CHILD_MODULE_COLUMNS)},
     "acquire": {},
+    # The duplication audit resolves a detected duplicate group: it
+    # gives a pending duplicate child its own angel letter (or keeps
+    # the shared one), clears the duplicate flag, and re-derives the
+    # angel columns the decision changed.
+    "duplication": {
+        "child": frozenset(
+            ("angel_id", "potential_duplicate", *CHILD_COMPUTED_COLUMNS)
+        ),
+        "family": frozenset(
+            ("potential_duplicate", *FAMILY_ASSIGNMENT_COLUMNS)
+        ),
+        "sponsor": frozenset(
+            (
+                "potential_duplicate",
+                *SPONSOR_ASSIGNMENT_COLUMNS,
+                *SPONSOR_COMPUTED_COLUMNS,
+            )
+        ),
+    },
 }
 
 #: Modules allowed to append NEW final rows.  Screening seeds missing
 #: entities and audit backfills; match/generate only patch stored rows.
-MAY_CREATE_ROWS: frozenset[str] = frozenset({"screen", "audit", "migrate"})
+#: The duplication audit appends a family row when a duplicate family
+#: submission is confirmed to be its own family.
+MAY_CREATE_ROWS: frozenset[str] = frozenset(
+    {"screen", "audit", "migrate", "duplication"}
+)
 
 #: Modules allowed to replace the active raw snapshot.  ``acquire`` is
 #: the ordinary path; ``migrate`` imports a verbatim workbook snapshot
@@ -1100,6 +1126,137 @@ class SeasonStoreRepository:
             .order_by(spec.model.id)
         )
         return [self._row_dict(spec, obj) for obj in result]
+
+    async def duplication_audit_rows(self) -> list[dict[str, Any]]:
+        """Read the season's duplication-audit trail, oldest first.
+
+        Returns:
+            Every recorded decision, with the newest row per group
+            member carrying that member's current decision.
+        """
+        result = await self._session.scalars(
+            select(DuplicationAudit)
+            .where(DuplicationAudit.season_id == self._season_id)
+            .order_by(DuplicationAudit.id)
+        )
+        return [
+            {
+                "id": obj.id,
+                "sheet": obj.sheet,
+                "group_key": obj.group_key,
+                "zite_record_id": obj.zite_record_id,
+                "decision": obj.decision,
+                "assigned_id": obj.assigned_id,
+                "actor": obj.actor,
+                "created_at": _iso(obj.created_at),
+            }
+            for obj in result
+        ]
+
+    async def record_duplication_audit(
+        self,
+        sheet: str,
+        group_key: str,
+        zite_record_id: str,
+        decision: str,
+        actor: str,
+        assigned_id: str | None = None,
+    ) -> int:
+        """Append one duplication-audit decision to the trail.
+
+        The trail is append-only: a re-decision adds a row instead of
+        overwriting the earlier one.
+
+        Args:
+            sheet: The duplicate group's sheet label.
+            group_key: The duplicate group's key.
+            zite_record_id: The audited group member.
+            decision: "not_duplicate" or "ignore".
+            actor: Requesting user identity.
+            assigned_id: The unique id the decision assigned, if any.
+
+        Returns:
+            The new trail row's id.
+        """
+        async with self._transaction():
+            row = DuplicationAudit(
+                season_id=self._season_id,
+                sheet=sheet,
+                group_key=group_key,
+                zite_record_id=zite_record_id,
+                decision=decision,
+                assigned_id=assigned_id,
+                actor=actor,
+                created_at=datetime.now(UTC),
+            )
+            self._session.add(row)
+            await self._session.flush()
+        return row.id
+
+    async def duplication_state_rows(self) -> list[dict[str, Any]]:
+        """Read the season's duplicate-group states.
+
+        Returns:
+            One row per group, under plain dict names.
+        """
+        result = await self._session.scalars(
+            select(DuplicationState).where(
+                DuplicationState.season_id == self._season_id
+            )
+        )
+        return [
+            {
+                "sheet": obj.sheet,
+                "group_key": obj.group_key,
+                "status": obj.status,
+                "audited_at": _iso(obj.audited_at),
+                "audited_by": obj.audited_by,
+                "reconciled_at": _iso(obj.reconciled_at),
+            }
+            for obj in result
+        ]
+
+    async def record_duplication_state(
+        self, sheet: str, group_key: str, actor: str
+    ) -> None:
+        """Record a duplicate group's audited state.
+
+        The state is the flag that the affected ``final_*`` tables were
+        reconciled with the group's adjudication.  Recording it again
+        refreshes the timestamps instead of adding a second row.
+
+        Args:
+            sheet: The duplicate group's sheet label.
+            group_key: The duplicate group's key.
+            actor: Requesting user identity.
+        """
+        now = datetime.now(UTC)
+        async with self._transaction():
+            row = await self._session.scalar(
+                select(DuplicationState).where(
+                    DuplicationState.season_id == self._season_id,
+                    DuplicationState.sheet == sheet,
+                    DuplicationState.group_key == group_key,
+                )
+            )
+            if row is None:
+                self._session.add(
+                    DuplicationState(
+                        season_id=self._season_id,
+                        sheet=sheet,
+                        group_key=group_key,
+                        status="audited",
+                        audited_at=now,
+                        audited_by=actor,
+                        reconciled_at=now,
+                    )
+                )
+            else:
+                row.status = "audited"
+                row.audited_at = now
+                row.audited_by = actor
+                row.reconciled_at = now
+            await self._session.flush()
 
     def _run_row_objects(
         self, spec: _RowSpec, rows: list[dict[str, Any]], run_id: int

@@ -107,7 +107,9 @@ async def test_get_returns_effective_tree_and_path(setup: Setup) -> None:
     assert tree["worker"]["max_attempts"] == 3
     assert tree["report"]["timezone"] == "local"
     assert tree["email_check"]["workers"] == 4
-    assert tree["acquire"]["sibling_dob_max_gap_days"] == 274
+    assert tree["screening"]["sibling_dob_max_gap_days"] == 274
+    # the acquire-stage DOB check is gone; screening owns it
+    assert "acquire" not in tree
 
 
 async def test_get_drops_unknown_file_keys(setup: Setup) -> None:

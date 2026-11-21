@@ -37,15 +37,29 @@ Runtime paths (all config paths are absolute — no CWD dependence):
 | `/data` | volume `ccat-db` (`ccat.sqlite3`, WAL files) | yes |
 | `/artifacts` | volume `ccat-artifacts` (PDFs, packets, reports, exports) | yes |
 | `/logs` | volume `ccat-logs` (`ccat.log`) | yes |
-| `/app/config/ccat_docker.json` | bind mount, read-only (dev: writable) | prod: no |
+| `/app/config/ccat_docker.json` | volume `ccat-config` (live config) | yes |
+| `/app/config-seed/ccat_docker.json` | bind mount of the repo file, read-only | no |
 | `/app/data` | bind mount, read-only | no |
 
-> **Settings tab:** the admin Settings tab rewrites the configuration file
-> in place. The **dev** profile mounts that file writable, so a save works
-> there (the container writes it as uid `10001` — `chown` it back on the
-> host afterwards). In the **prod** profile the mount is read-only, so a
-> save is rejected (`500 config_write_failed`); edit the file on the host
-> and restart instead.
+> **Settings tab:** the admin Settings tab rewrites the live configuration
+> file (`/app/config/ccat_docker.json`). That file is a regular file on the
+> `ccat-config` volume, so the atomic write (temp file + rename) succeeds
+> and every service — api, worker, db-upgrade — reads the same file. It
+> used to be a bind mount of the repo file: a rename onto a bind-mounted
+> file fails with `EBUSY` ("Device or resource busy"), and the read-only
+> prod mount rejected the write outright, so every save failed with
+> `500 config_write_failed`.
+>
+> The repo file (`config/ccat_docker.json`) is mounted read-only as the
+> *seed*. At container start the entrypoint applies it when it is newer
+> than the live copy, so an operator edit wins after a restart and a
+> Settings-tab save survives one — the most recent write wins. Copy the
+> repo file into a running container to deploy it without a restart:
+>
+> ```sh
+> docker compose --profile prod cp ./config/ccat_docker.json \
+>   api:/app/config/ccat_docker.json
+> ```
 
 > **Frontend stage:** when `frontend/package.json` is absent the stage logs
 > `frontend/package.json absent` and produces an empty dist; the image and API
@@ -212,6 +226,11 @@ dst=sqlite3.connect('/tmp/backup.sqlite3'); src.backup(dst); dst.close()" \
 # artifacts (PDFs, packets, reports) and logs
 docker compose --profile prod cp worker:/artifacts ./backups/artifacts-$(date +%Y%m%d-%H%M)
 docker compose --profile prod cp worker:/logs      ./backups/logs-$(date +%Y%m%d-%H%M)
+
+# live configuration (the Settings tab writes it; the repo file is only
+# the seed)
+docker compose --profile prod cp worker:/app/config/ccat_docker.json \
+  ./backups/config-$(date +%Y%m%d-%H%M).json
 ```
 
 A database dump alone is insufficient: packets/PDFs are not in SQLite.
@@ -225,6 +244,7 @@ docker compose --profile prod run --rm --entrypoint sh db-upgrade -c \
   "rm -f /data/ccat.sqlite3 /data/ccat.sqlite3-wal /data/ccat.sqlite3-shm"
 docker compose --profile prod cp ./backups/ccat-YYYYmmdd-HHMM.sqlite3 db-upgrade:/data/ccat.sqlite3
 docker compose --profile prod cp ./backups/artifacts-YYYYmmdd-HHMM/. db-upgrade:/artifacts
+docker compose --profile prod cp ./backups/config-YYYYmmdd-HHMM.json worker:/app/config/ccat_docker.json
 docker compose --profile prod run --rm db-upgrade       # schema at head
 docker compose --profile prod up -d api worker
 curl -fsS https://$CCAT_DOMAIN/api/v1/readyz

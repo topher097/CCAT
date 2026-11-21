@@ -41,6 +41,8 @@ EXPECTED_TABLES = frozenset(
         "raw_child",
         "screening_runs",
         "duplicate_log",
+        "duplication_audit",
+        "duplication_state",
         "dob_conflict_log",
         "email_checks",
         "email_check_targets",

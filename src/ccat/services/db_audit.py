@@ -189,6 +189,142 @@ def audit_sort_key(entity: str, row: dict[str, Any]) -> tuple[Any, ...]:
     return (_as_int(row.get(ENTITY_SPECS[entity]["key"])) or 0,)
 
 
+def matches_query(row: dict[str, Any], q: str) -> bool:
+    """Case-insensitive substring match on name/email/id (§5.2).
+
+    Args:
+        row: The final row.
+        q: The search query.
+
+    Returns:
+        True when any searchable field contains the query.
+    """
+    needle = q.strip().lower()
+    if not needle:
+        return True
+    haystack = [
+        row.get("first_name"),
+        row.get("last_name"),
+        row.get("primary_email"),
+        row.get("email"),
+        row.get("zite_record_id"),
+        row.get("family_id"),
+        row.get("sponsor_id"),
+    ]
+    return any(
+        value is not None and needle in str(value).lower() for value in haystack
+    )
+
+
+def ordered_rows(
+    entity: str,
+    rows: list[dict[str, Any]],
+    q: str = "",
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return the rows in the audit list's filter and sort order.
+
+    The list and the neighbour lookup share this order, so "next" and
+    "previous" always mean the adjacent row of the table the user is
+    looking at.
+
+    Args:
+        entity: "child", "family", or "sponsor".
+        rows: Every final row.
+        q: The list's search query.
+        status: The list's stored-status filter.
+
+    Returns:
+        The filtered rows in the list's order.
+    """
+    ordered = sorted(rows, key=lambda row: audit_sort_key(entity, row))
+    return [
+        row
+        for row in ordered
+        if (status is None or row.get("status") == status)
+        and matches_query(row, q)
+    ]
+
+
+def row_label(entity: str, row: dict[str, Any]) -> str:
+    """Return a human label for one audit row.
+
+    Args:
+        entity: "child", "family", or "sponsor".
+        row: One final row.
+
+    Returns:
+        The row's name, else its email, else its key.
+    """
+    name = " ".join(
+        str(part)
+        for part in (row.get("first_name"), row.get("last_name"))
+        if part
+    )
+    if name:
+        return name
+    email = row.get("primary_email") or row.get("email")
+    if email:
+        return str(email)
+    return str(row.get(ENTITY_SPECS[entity]["key"]) or "")
+
+
+def neighbours(
+    entity: str,
+    rows: list[dict[str, Any]],
+    key: str,
+    q: str = "",
+    status: str | None = None,
+) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+    """Return the entries before and after one key in the list's order.
+
+    Args:
+        entity: "child", "family", or "sponsor".
+        rows: Every final row.
+        key: The entity key the neighbours are taken around.
+        q: The list's search query.
+        status: The list's stored-status filter.
+
+    Returns:
+        A (previous, next) pair of ``{"key": ..., "label": ...}`` dicts;
+        each side is None when the key sits at the list's edge.
+    """
+    key_column = ENTITY_SPECS[entity]["key"]
+    ordered = ordered_rows(entity, rows, q, status)
+    index = next(
+        (
+            position
+            for position, row in enumerate(ordered)
+            if str(row.get(key_column)) == str(key)
+        ),
+        None,
+    )
+    if index is None:
+        return None, None
+    return (
+        _neighbour(entity, ordered[index - 1]) if index > 0 else None,
+        _neighbour(entity, ordered[index + 1])
+        if index + 1 < len(ordered)
+        else None,
+    )
+
+
+def _neighbour(entity: str, row: dict[str, Any]) -> dict[str, str]:
+    """Render one neighbouring row for the wire.
+
+    Args:
+        entity: "child", "family", or "sponsor".
+        row: The neighbouring final row.
+
+    Returns:
+        The neighbour's key and label.
+    """
+    return {
+        "key": str(row.get(ENTITY_SPECS[entity]["key"]) or ""),
+        "label": row_label(entity, row),
+    }
+
+
 async def validation_statuses(
     repo: "SeasonStoreRepository",
     entity: str,
@@ -575,6 +711,10 @@ async def _control_save(
 __all__ = [
     "audit_sort_key",
     "ignore_entity_db",
+    "matches_query",
+    "neighbours",
+    "ordered_rows",
+    "row_label",
     "save_entity_db",
     "unignore_entity_db",
     "validation_statuses",

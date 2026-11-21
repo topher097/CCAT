@@ -58,14 +58,27 @@ class PoolFamily:
 
     @property
     def child_count(self) -> int:
-        """Number of children in the family."""
-        return len(self.children)
+        """Number of angels in the family.
+
+        A pending duplicate shares its group's letter, so the family
+        counts one angel, not one per submission.
+        """
+        return len(self.angel_ids)
 
     @property
     def angel_ids(self) -> list[str]:
-        """Sorted angel ids of the family's children."""
+        """Sorted, distinct angel ids of the family's children.
+
+        A pending duplicate shares its group's letter, so the family's
+        angels are the distinct letters.
+        """
         return sorted(
-            (child["angel_id"] for child in self.children), key=_angel_sort_key
+            {
+                child["angel_id"]
+                for child in self.children
+                if child.get("angel_id")
+            },
+            key=_angel_sort_key,
         )
 
 
@@ -353,23 +366,30 @@ def _participating_children(
 def _children_per_family(
     final_child: list[dict[str, Any]],
 ) -> dict[Any, int]:
-    """Count non-ignored ``final_child`` rows per ``family_id`` (§7.5).
+    """Count the angels per ``family_id`` (§7.5).
+
+    A child that is still a pending duplicate shares its group's angel
+    letter, so a family's angel count is the number of distinct
+    letters; a child without a letter counts as one angel of its own.
 
     Args:
         final_child: All final_child rows.
 
     Returns:
-        Mapping of ``family_id`` to the number of non-ignored child
-        rows sharing it.
+        Mapping of ``family_id`` to the number of angels sharing it.
     """
-    counts: dict[Any, int] = {}
+    letters: dict[Any, set[str]] = {}
     for row in final_child:
         if as_bool(row.get("ignore")):
             continue
         family_id = row.get("family_id")
         if family_id is not None:
-            counts[family_id] = counts.get(family_id, 0) + 1
-    return counts
+            letters.setdefault(family_id, set()).add(
+                str(row.get("angel_id"))
+                if row.get("angel_id")
+                else f"row:{row.get('zite_record_id')}"
+            )
+    return {family_id: len(values) for family_id, values in letters.items()}
 
 
 def reconcile_pre_assignments(
@@ -1085,7 +1105,11 @@ def run(
         assigned_angels = (
             ",".join(
                 sorted(
-                    (child["angel_id"] for child in family_children),
+                    {
+                        child["angel_id"]
+                        for child in family_children
+                        if child.get("angel_id")
+                    },
                     key=_angel_sort_key,
                 )
             )
@@ -1111,7 +1135,9 @@ def run(
     for row in sponsor_pool:
         plan = sponsor_plans.get(row["sponsor_id"])
         angel_ids = (
-            sorted(plan.assigned_angel_ids, key=_angel_sort_key) if plan else []
+            sorted(set(plan.assigned_angel_ids), key=_angel_sort_key)
+            if plan
+            else []
         )
         row["assigned_angel_ids"] = ",".join(angel_ids) if angel_ids else None
         row["num_angels_assigned"] = len(angel_ids)

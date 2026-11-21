@@ -11,7 +11,9 @@
 # templates, CWD-relative paths or a missing soffice fail in the image, not
 # in production.  Configuration, templates and assets live under /app:
 #
-#   /app/config/ccat_docker.json   read-only season config (DB mode)
+#   /app/config/ccat_docker.json   season config (DB mode); on the writable
+#                                  ccat-config volume at run time, seeded
+#                                  from the repo file mounted read-only
 #   /app/data/                     document/email templates (read-only)
 #   /app/alembic/                  migrations (ccat db-upgrade)
 #   /app/frontend/dist/            compiled SPA (served by Caddy)
