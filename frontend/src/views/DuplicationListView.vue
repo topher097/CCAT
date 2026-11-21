@@ -38,6 +38,19 @@ function conflicts(row: DuplicationListItem): string {
   return columns.length ? columns.join(', ') : '—'
 }
 
+function survivorText(row: DuplicationListItem): string {
+  const count = row.survivor_count ?? 0
+  if (count === 0) return 'no survivor'
+  if (count === 1) return '1 survivor'
+  return `${count} survivors`
+}
+
+function releasedText(row: DuplicationListItem): string {
+  const count = row.released_count ?? 0
+  if (count === 1) return '1 released member still needs its own audit'
+  return `${count} released members still need their own audit`
+}
+
 function detailTo(row: DuplicationListItem): string {
   const path = `/audit/duplications/${row.id}`
   return carriedQuery.value ? `${path}?${carriedQuery.value}` : path
@@ -75,7 +88,7 @@ async function load(): Promise<void> {
       q: query.value,
       entity: entity.value,
     })
-    rows.value = result.items ?? []
+    rows.value = (result.items ?? []) as DuplicationListItem[]
     total.value = result.total
   } catch (failure) {
     error.value =
@@ -164,6 +177,7 @@ onMounted(() => {
           <th>Entity</th>
           <th>Members</th>
           <th>Decided</th>
+          <th>Survivors</th>
           <th>Conflicts</th>
           <th>Status</th>
           <th>Created</th>
@@ -179,8 +193,18 @@ onMounted(() => {
           <td>{{ row.entity }}</td>
           <td>{{ row.member_count }}</td>
           <td>{{ row.decided_count }}</td>
+          <td data-testid="survivor-count">{{ survivorText(row) }}</td>
           <td>{{ conflicts(row) }}</td>
-          <td><StatusBadge :status="row.status" /></td>
+          <td>
+            <StatusBadge :status="row.status" />
+            <span
+              v-if="row.released_count > 0"
+              class="muted"
+              data-testid="released-marker"
+            >
+              {{ releasedText(row) }}
+            </span>
+          </td>
           <td class="muted">{{ formatTime(row.created) }}</td>
         </tr>
       </tbody>

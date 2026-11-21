@@ -15,6 +15,8 @@ const GROUPS = [
     group_key: 'key-1',
     member_count: 2,
     decided_count: 0,
+    survivor_count: 2,
+    released_count: 0,
     status: 'pending',
     survivor_record_id: 'r1',
     conflict_columns: ['first_name'],
@@ -27,6 +29,8 @@ const GROUPS = [
     group_key: 'key-2',
     member_count: 3,
     decided_count: 3,
+    survivor_count: 1,
+    released_count: 1,
     status: 'resolved',
     survivor_record_id: 'r9',
     conflict_columns: [],
@@ -35,7 +39,7 @@ const GROUPS = [
 ]
 
 function member(overrides: Record<string, unknown> = {}) {
-  return {
+  const base = {
     zite_record_id: 'r1',
     created: '2026-11-18T10:00:00Z',
     survivor: true,
@@ -53,11 +57,29 @@ function member(overrides: Record<string, unknown> = {}) {
     decided_by: null,
     decided_at: null,
     row_version: 3,
-    ...overrides,
+    state: 'surviving',
+    row_key: 'r1',
+    row_status: 'new',
   }
+  const merged = { ...base, ...overrides }
+  if (!('state' in overrides)) {
+    if (merged.decision === 'ignore') merged.state = 'discarded'
+    else if (merged.decision === 'not_duplicate') merged.state = 'released'
+    else merged.state = 'surviving'
+  }
+  if (!('row_key' in overrides)) {
+    merged.row_key = String(merged.zite_record_id)
+  }
+  return merged
 }
 
-function detail(members: unknown[] = [member()]) {
+function detail(
+  members: unknown[] = [member()],
+  overrides: Record<string, unknown> = {},
+) {
+  const survivorCount = (members as { decision: string | null }[]).filter(
+    (m) => m.decision === null,
+  ).length
   return {
     id: 'g1',
     sheet: 'duplicates',
@@ -65,6 +87,9 @@ function detail(members: unknown[] = [member()]) {
     group_key: 'key-1',
     status: 'pending',
     members,
+    survivor_count: survivorCount,
+    children: [],
+    ...overrides,
   }
 }
 
@@ -98,7 +123,10 @@ describe('duplication list', () => {
     expect(rows[0]!.text()).toContain('key-1')
     expect(rows[0]!.text()).toContain('pending')
     expect(rows[0]!.text()).toContain('first_name')
+    expect(rows[0]!.text()).toContain('2 survivors')
     expect(rows[1]!.text()).toContain('resolved')
+    expect(rows[1]!.text()).toContain('1 survivor')
+    expect(rows[1]!.text()).toContain('1 released member still needs its own audit')
     const groupLink = wrapper
       .findAllComponents({ name: 'RouterLinkStub' })
       .find((link) => link.text() === 'key-1')
@@ -305,17 +333,44 @@ describe('duplication detail', () => {
     ).toBe(true)
   })
 
-  it('marks the group audited once every member is resolved', async () => {
+  it('marks the group audited when exactly one member is undecided', async () => {
     const fetchMock = mockRoutes([
       (url, init) => {
         if (init.method === 'POST' && url.endsWith('/audit'))
           return jsonResponse(
             200,
-            { ...detail(), status: 'audited', audited_at: '2026-11-20T10:00:00Z' },
+            detail(
+              [
+                member({ zite_record_id: 'r1', survivor: true }),
+                member({
+                  zite_record_id: 'r2',
+                  survivor: false,
+                  decision: 'ignore',
+                  state: 'discarded',
+                  row_key: 'r2',
+                  raw: { first_name: 'Anne' },
+                  screened: null,
+                }),
+              ],
+              { status: 'audited', audited_at: '2026-11-20T10:00:00Z' },
+            ),
           )
-        if (init.method === 'POST' && url.endsWith('/members/r1'))
-          return jsonResponse(200, detail([member({ decision: 'not_duplicate' })]))
-        if (url.includes('/duplications/g1')) return jsonResponse(200, detail())
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(
+            200,
+            detail([
+              member({ zite_record_id: 'r1', survivor: true }),
+              member({
+                zite_record_id: 'r2',
+                survivor: false,
+                decision: 'ignore',
+                state: 'discarded',
+                row_key: 'r2',
+                raw: { first_name: 'Anne' },
+                screened: null,
+              }),
+            ]),
+          )
         return undefined
       },
     ])
@@ -325,21 +380,7 @@ describe('duplication detail', () => {
     })
     await flushPromises()
 
-    // Unresolved members keep the button disabled.
-    expect(
-      wrapper.get('[data-testid="mark-audited"]').attributes('disabled'),
-    ).toBeDefined()
-
-    await wrapper.get('[data-testid="not-duplicate"]').trigger('click')
-    await flushPromises()
-    // Unsaved decisions no longer block the button; a click asks what to do.
-    expect(
-      wrapper.get('[data-testid="mark-audited"]').attributes('disabled'),
-    ).toBeUndefined()
-
-    await wrapper.get('[data-testid="save"]').trigger('click')
-    await flushPromises()
-    // The member is resolved now, so the group can be audited.
+    // Exactly one undecided member keeps the button enabled.
     expect(
       wrapper.get('[data-testid="mark-audited"]').attributes('disabled'),
     ).toBeUndefined()
@@ -353,22 +394,206 @@ describe('duplication detail', () => {
         String(call[0]).endsWith('/audit'),
     )
     expect(String(post![0])).toBe('/api/v1/seasons/2026/duplications/g1/audit')
+    expect(bodyOf(post as unknown[])).toEqual({ expected_version: 3 })
     expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
       'marked audited',
     )
   })
 
-  it('asks what to do with unsaved changes before auditing the group', async () => {
+  it('opens a blocker dialog and posts nothing when two members are undecided', async () => {
+    const fetchMock = mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail([
+                member({ zite_record_id: 'r1', survivor: true }),
+                member({
+                  zite_record_id: 'r2',
+                  survivor: false,
+                  raw: { first_name: 'Anne' },
+                  screened: null,
+                }),
+              ]),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    expect(
+      wrapper.get('[data-testid="mark-audited"]').attributes('disabled'),
+    ).toBeUndefined()
+
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.text()).toContain('This group cannot be audited yet')
+    expect(dialog.text()).toContain(
+      '2 submissions are still undecided — this group has more than one surviving entry',
+    )
+    expect(
+      fetchMock.mock.calls.some(
+        (call) => (call[1] as RequestInit).method === 'POST',
+      ),
+    ).toBe(false)
+
+    await wrapper.get('[data-testid="confirm"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  })
+
+  it('labels each member state and marks the flagged one as suggested survivor', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail([
+                member({ zite_record_id: 'r1', survivor: true }),
+                member({
+                  zite_record_id: 'r2',
+                  survivor: false,
+                  decision: 'not_duplicate',
+                  assigned_id: '1B',
+                  state: 'released',
+                  row_key: 'r2',
+                  raw: { first_name: 'Anne' },
+                  screened: { zite_record_id: 'r2', first_name: 'Anne', status: 'new' },
+                }),
+                member({
+                  zite_record_id: 'r3',
+                  survivor: false,
+                  decision: 'ignore',
+                  state: 'discarded',
+                  row_key: 'r3',
+                  raw: { first_name: 'Anna' },
+                  screened: null,
+                }),
+              ]),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const states = wrapper.findAll('[data-testid="member-state"]')
+    expect(states.map((el) => el.text())).toEqual([
+      'surviving entry',
+      'released — its own entry now',
+      'discarded',
+    ])
+
+    const suggested = wrapper.findAll('[data-testid="suggested-survivor"]')
+    expect(suggested).toHaveLength(1)
+    expect(suggested[0]!.text()).toBe('suggested survivor')
+    expect(suggested[0]!.attributes('data-member')).toBe('r1')
+  })
+
+  it('keeps both decisions on the flagged member, including ignore', async () => {
+    const fetchMock = mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail([
+                member({ zite_record_id: 'r1', survivor: true }),
+                member({
+                  zite_record_id: 'r2',
+                  survivor: false,
+                  decision: 'ignore',
+                  state: 'discarded',
+                  row_key: 'r2',
+                }),
+              ]),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const r1Header = wrapper.find('th[data-member="r1"]')
+    expect(r1Header!.find('[data-testid="not-duplicate"]').exists()).toBe(true)
+    expect(r1Header!.find('[data-testid="ignore"]').exists()).toBe(true)
+
+    await r1Header!.find('[data-testid="ignore"]').trigger('click')
+    await wrapper.get('[data-testid="confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(
+      (r1Header!.find('[data-testid="ignore"]').element as HTMLInputElement)
+        .checked,
+    ).toBe(true)
+    expect(r1Header!.find('[data-testid="pending-decision"]').exists()).toBe(
+      true,
+    )
+    expect(
+      fetchMock.mock.calls.some(
+        (call) => (call[1] as RequestInit).method === 'POST',
+      ),
+    ).toBe(false)
+  })
+
+  it('Save and mark audited sends current column values with the audit request', async () => {
     const fetchMock = mockRoutes([
       (url, init) => {
         if (init.method === 'POST' && url.endsWith('/audit'))
           return jsonResponse(
             200,
-            { ...detail(), status: 'audited', audited_at: '2026-11-20T10:00:00Z' },
+            detail(
+              [
+                member({ zite_record_id: 'r1', survivor: true }),
+                member({
+                  zite_record_id: 'r2',
+                  survivor: false,
+                  decision: 'not_duplicate',
+                  assigned_id: '1B',
+                  state: 'released',
+                  row_key: 'r2',
+                }),
+              ],
+              { status: 'audited', audited_at: '2026-11-20T10:00:00Z' },
+            ),
           )
-        if (init.method === 'POST' && url.endsWith('/members/r1'))
-          return jsonResponse(200, detail([member({ decision: 'not_duplicate' })]))
-        if (url.includes('/duplications/g1')) return jsonResponse(200, detail())
+        if (init.method === 'POST' && url.endsWith('/members/r2'))
+          return jsonResponse(
+            200,
+            detail([
+              member({ zite_record_id: 'r1', survivor: true }),
+              member({
+                zite_record_id: 'r2',
+                survivor: false,
+                decision: 'not_duplicate',
+                assigned_id: '1B',
+                state: 'released',
+                row_key: 'r2',
+              }),
+            ]),
+          )
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(
+            200,
+            detail([
+              member({ zite_record_id: 'r1', survivor: true }),
+              member({
+                zite_record_id: 'r2',
+                survivor: false,
+                decision: 'ignore',
+                state: 'discarded',
+                row_key: 'r2',
+              }),
+            ]),
+          )
         return undefined
       },
     ])
@@ -378,7 +603,219 @@ describe('duplication detail', () => {
     })
     await flushPromises()
 
-    await wrapper.get('[data-testid="not-duplicate"]').trigger('click')
+    // r2 starts discarded; toggle it to released so there is still one survivor.
+    const r2Header = wrapper.find('th[data-member="r2"]')
+    await r2Header!.find('[data-testid="not-duplicate"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('input[name="first_name"]').setValue('Annie')
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').text()).toContain('Unsaved changes')
+    expect(wrapper.find('[role="dialog"]').text()).toContain(
+      "The member decisions are saved either way; the current column's edits are kept only by 'Save and mark audited'",
+    )
+
+    await wrapper.get('[data-testid="confirm"]').trigger('click')
+    await flushPromises()
+
+    const posts = fetchMock.mock.calls.filter(
+      (call) => (call[1] as RequestInit).method === 'POST',
+    )
+    expect(posts.map((call) => String(call[0]))).toEqual([
+      '/api/v1/seasons/2026/duplications/g1/members/r2',
+      '/api/v1/seasons/2026/duplications/g1/audit',
+    ])
+    expect(bodyOf(posts[0] as unknown[])).toEqual({
+      decision: 'not_duplicate',
+      confirm: true,
+      expected_version: 3,
+    })
+    expect(bodyOf(posts[1] as unknown[])).toEqual({
+      values: { first_name: 'Annie' },
+      expected_version: 3,
+    })
+  })
+
+  it('Mark audited without saving sends the audit request with no values', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (init.method === 'POST' && url.endsWith('/audit'))
+          return jsonResponse(
+            200,
+            detail(
+              [
+                member({ zite_record_id: 'r1', survivor: true }),
+                member({
+                  zite_record_id: 'r2',
+                  survivor: false,
+                  decision: 'not_duplicate',
+                  assigned_id: '1B',
+                  state: 'released',
+                  row_key: 'r2',
+                }),
+              ],
+              { status: 'audited', audited_at: '2026-11-20T10:00:00Z' },
+            ),
+          )
+        if (init.method === 'POST' && url.endsWith('/members/r2'))
+          return jsonResponse(
+            200,
+            detail([
+              member({ zite_record_id: 'r1', survivor: true }),
+              member({
+                zite_record_id: 'r2',
+                survivor: false,
+                decision: 'not_duplicate',
+                assigned_id: '1B',
+                state: 'released',
+                row_key: 'r2',
+              }),
+            ]),
+          )
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(
+            200,
+            detail([
+              member({ zite_record_id: 'r1', survivor: true }),
+              member({
+                zite_record_id: 'r2',
+                survivor: false,
+                decision: 'ignore',
+                state: 'discarded',
+                row_key: 'r2',
+              }),
+            ]),
+          )
+        return undefined
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const r2Header = wrapper.find('th[data-member="r2"]')
+    await r2Header!.find('[data-testid="not-duplicate"]').trigger('click')
+    await wrapper.get('input[name="first_name"]').setValue('Annie')
+
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="alternate"]').trigger('click')
+    await flushPromises()
+
+    const posts = fetchMock.mock.calls.filter(
+      (call) => (call[1] as RequestInit).method === 'POST',
+    )
+    expect(posts.map((call) => String(call[0]))).toEqual([
+      '/api/v1/seasons/2026/duplications/g1/members/r2',
+      '/api/v1/seasons/2026/duplications/g1/audit',
+    ])
+    const auditBody = bodyOf(posts[1] as unknown[])
+    expect(auditBody).not.toHaveProperty('values')
+    expect(auditBody).toEqual({ expected_version: 3 })
+  })
+
+  it('shows a released member label and a link to its own row', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail([
+                member({ zite_record_id: 'r1', survivor: true }),
+                member({
+                  zite_record_id: 'r2',
+                  survivor: false,
+                  decision: 'not_duplicate',
+                  assigned_id: '1B',
+                  state: 'released',
+                  row_key: 'r2',
+                  row_status: 'new',
+                  raw: { first_name: 'Anne' },
+                  screened: { zite_record_id: 'r2', first_name: 'Anne', status: 'new' },
+                }),
+              ]),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const r2Header = wrapper.find('th[data-member="r2"]')
+    expect(r2Header!.text()).toContain('released — its own entry now')
+    const link = r2Header!.findComponent({ name: 'RouterLinkStub' })
+    expect(link.text()).toBe('Open its own row — still needs its own audit')
+    expect(link.props('to')).toBe('/audit/children/r2')
+  })
+
+  it('asks what to do with unsaved changes before auditing the group', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (init.method === 'POST' && url.endsWith('/audit'))
+          return jsonResponse(
+            200,
+            detail(
+              [
+                member({ zite_record_id: 'r1', survivor: true }),
+                member({
+                  zite_record_id: 'r2',
+                  survivor: false,
+                  decision: 'not_duplicate',
+                  assigned_id: '1B',
+                  state: 'released',
+                  row_key: 'r2',
+                }),
+              ],
+              { status: 'audited', audited_at: '2026-11-20T10:00:00Z' },
+            ),
+          )
+        if (init.method === 'POST' && url.endsWith('/members/r2'))
+          return jsonResponse(
+            200,
+            detail([
+              member({ zite_record_id: 'r1', survivor: true }),
+              member({
+                zite_record_id: 'r2',
+                survivor: false,
+                decision: 'not_duplicate',
+                assigned_id: '1B',
+                state: 'released',
+                row_key: 'r2',
+              }),
+            ]),
+          )
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(
+            200,
+            detail([
+              member({ zite_record_id: 'r1', survivor: true }),
+              member({
+                zite_record_id: 'r2',
+                survivor: false,
+                decision: 'ignore',
+                state: 'discarded',
+                row_key: 'r2',
+              }),
+            ]),
+          )
+        return undefined
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const r2Header = wrapper.find('th[data-member="r2"]')
+    await r2Header!.find('[data-testid="not-duplicate"]').trigger('click')
     expect(
       wrapper.get('[data-testid="mark-audited"]').attributes('disabled'),
     ).toBeUndefined()
@@ -406,7 +843,7 @@ describe('duplication detail', () => {
       (call) => (call[1] as RequestInit).method === 'POST',
     )
     expect(posts.map((call) => String(call[0]))).toEqual([
-      '/api/v1/seasons/2026/duplications/g1/members/r1',
+      '/api/v1/seasons/2026/duplications/g1/members/r2',
       '/api/v1/seasons/2026/duplications/g1/audit',
     ])
     expect(bodyOf(posts[0] as unknown[])).toEqual({
@@ -414,6 +851,7 @@ describe('duplication detail', () => {
       confirm: true,
       expected_version: 3,
     })
+    expect(bodyOf(posts[1] as unknown[])).toEqual({ expected_version: 3 })
     expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
       'marked audited',
     )
@@ -498,6 +936,206 @@ describe('duplication detail', () => {
     expect(headers['If-Match']).toBe('3')
     expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
       'Saved',
+    )
+  })
+
+  it('shows the current binding line and makes the column read-only on an audited row', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail([
+                member({
+                  zite_record_id: 'r1',
+                  survivor: true,
+                  row_status: 'audited',
+                  screened: {
+                    zite_record_id: 'r1',
+                    first_name: 'Ann',
+                    status: 'audited',
+                    row_version: 3,
+                  },
+                }),
+              ]),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="current-binding"]').text()).toBe(
+      'Current column: the surviving entry, r1.',
+    )
+    expect(wrapper.get('[data-testid="current-readonly"]').text()).toBe(
+      'This row is audited — its values are final.',
+    )
+    expect(
+      (wrapper.get('input[name="first_name"]').element as HTMLInputElement)
+        .readOnly,
+    ).toBe(true)
+  })
+
+  it('keeps the Re-audit button enabled for an audited group', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (init.method === 'POST' && url.endsWith('/audit'))
+          return jsonResponse(
+            200,
+            detail(
+              [member({ zite_record_id: 'r1', survivor: true })],
+              {
+                status: 'audited',
+                audited_at: '2026-11-20T10:00:00Z',
+              },
+            ),
+          )
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(
+            200,
+            detail([member({ zite_record_id: 'r1', survivor: true })], {
+              status: 'audited',
+              audited_at: '2026-11-20T10:00:00Z',
+            }),
+          )
+        return undefined
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const button = wrapper.get('[data-testid="mark-audited"]')
+    expect(button.text()).toBe('Re-audit')
+    expect(button.attributes('disabled')).toBeUndefined()
+
+    await button.trigger('click')
+    await flushPromises()
+
+    const post = fetchMock.mock.calls.find(
+      (call) =>
+        (call[1] as RequestInit).method === 'POST' &&
+        String(call[0]).endsWith('/audit'),
+    )
+    expect(post).toBeDefined()
+    expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
+      'marked audited',
+    )
+  })
+
+  it('lists children for a family group and saves family assignments', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (init.method === 'POST' && url.endsWith('/children'))
+          return jsonResponse(
+            200,
+            detail(
+              [
+                member({
+                  zite_record_id: 'f1',
+                  survivor: true,
+                  row_key: '10',
+                }),
+                member({
+                  zite_record_id: 'f2',
+                  survivor: false,
+                  decision: 'not_duplicate',
+                  assigned_id: '20',
+                  state: 'released',
+                  row_key: '20',
+                }),
+              ],
+              {
+                entity: 'family',
+                status: 'resolved',
+                children: [
+                  {
+                    zite_record_id: 'c1',
+                    first_name: 'Ann',
+                    dob: '2018-01-01',
+                    family_id: 20,
+                    angel_id: '20A',
+                  },
+                ],
+              },
+            ),
+          )
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(
+            200,
+            detail(
+              [
+                member({
+                  zite_record_id: 'f1',
+                  survivor: true,
+                  row_key: '10',
+                }),
+                member({
+                  zite_record_id: 'f2',
+                  survivor: false,
+                  decision: 'not_duplicate',
+                  assigned_id: '20',
+                  state: 'released',
+                  row_key: '20',
+                }),
+              ],
+              {
+                entity: 'family',
+                status: 'resolved',
+                children: [
+                  {
+                    zite_record_id: 'c1',
+                    first_name: 'Ann',
+                    dob: '2018-01-01',
+                    family_id: 10,
+                    angel_id: '10A',
+                  },
+                ],
+              },
+            ),
+          )
+        return undefined
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const childrenSection = wrapper.get('[data-testid="group-children"]')
+    expect(childrenSection.text()).toContain('Ann')
+    expect(childrenSection.text()).toContain('2018-01-01')
+    expect(childrenSection.text()).toContain('10')
+
+    const select = wrapper.get('[data-testid="child-family-select"]')
+    expect((select.element as HTMLSelectElement).value).toBe('10')
+
+    await select.setValue('20')
+    await flushPromises()
+
+    const saveButton = wrapper.get('[data-testid="save-children"]')
+    expect(saveButton.attributes('disabled')).toBeUndefined()
+    await saveButton.trigger('click')
+    await flushPromises()
+
+    const post = fetchMock.mock.calls.find(
+      (call) =>
+        (call[1] as RequestInit).method === 'POST' &&
+        String(call[0]).endsWith('/children'),
+    )
+    expect(post).toBeDefined()
+    expect(String(post![0])).toBe(
+      '/api/v1/seasons/2026/duplications/g1/children',
+    )
+    expect(bodyOf(post as unknown[])).toEqual({ assignments: { c1: 20 } })
+    expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
+      'Family assignments saved',
     )
   })
 })
