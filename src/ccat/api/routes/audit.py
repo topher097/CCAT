@@ -449,7 +449,9 @@ def _detail_routes(segment: str, entity: str) -> None:
 
         Raises:
             ApiError: 412 missing/stale If-Match (stale carries the
-                fresh row + current version); 409 domain refusals.
+                fresh row + current version); 409 domain refusals,
+                including an audited row whose values are final; 403
+                when a non-admin undoes an audit.
         """
         cfg: Config = request.app.state.cfg
         if not if_match:
@@ -480,6 +482,23 @@ def _detail_routes(segment: str, entity: str) -> None:
                     " awaiting adjudication",
                     group_id=entry["id"],
                     group_key=entry["group_key"],
+                )
+        stored = await _stored_status(repo, entity, key)
+        fields = {name for name in provided if name != "status"}
+        if stored == "audited":
+            if fields and body.status != "new":
+                raise ApiError(
+                    409,
+                    "row_audited",
+                    "this row is audited; its values are final",
+                    entity=entity,
+                    key=str(key),
+                )
+            if body.status == "new" and "admin" not in user.roles:
+                raise ApiError(
+                    403,
+                    "admin_required",
+                    "only an admin may undo an audit",
                 )
         try:
             await db_audit.save_entity_db(
@@ -552,6 +571,29 @@ for _segment, _entity_name in _SEGMENTS.items():
     _detail_routes(_segment, _entity_name)
 
 
+async def _stored_status(
+    repo: SeasonStoreRepository, entity: str, key: str
+) -> str | None:
+    """Read one row's currently stored status.
+
+    Args:
+        repo: The season-bound repository.
+        entity: The entity name.
+        key: The entity key as text.
+
+    Returns:
+        The stored status, or None when no row matches the key.
+    """
+    spec_key = _KEY_COLUMN[entity]
+    rows = await repo.final_rows(entity)
+    existing = next(
+        (row for row in rows if str(row.get(spec_key)) == str(key)), None
+    )
+    if existing is None:
+        return None
+    return str(existing.get("status") or "new")
+
+
 async def _control(
     entity: str,
     key: str,
@@ -576,7 +618,8 @@ async def _control(
         The updated detail.
 
     Raises:
-        ApiError: 422 without confirmation; 412 stale version.
+        ApiError: 422 without confirmation; 412 stale version; 409 when
+            the row is audited (undo the audit first).
     """
     cfg: Config = request.app.state.cfg
     if not body.confirm:
@@ -584,6 +627,14 @@ async def _control(
             422,
             "invalid_input",
             f"ignoring {entity} {key!r} requires confirm=True",
+        )
+    if await _stored_status(repo, entity, key) == "audited":
+        raise ApiError(
+            409,
+            "row_audited",
+            "this row is audited; undo the audit before ignoring it",
+            entity=entity,
+            key=str(key),
         )
     kwargs = {
         "confirm": body.confirm,

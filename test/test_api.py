@@ -1066,15 +1066,194 @@ async def test_patch_marks_row_audited(app: Any) -> None:
     assert response.json()["audited_at"]
     detail = await client.client.get("/api/v1/seasons/2026/children/c1")
     assert detail.json()["status"] == "audited"
-    # Un-auditing drops back to the derived status.
+    # Un-auditing is admin-only: the auditor is refused.
     version = detail.json()["row_version"]
     response = await client.client.patch(
         "/api/v1/seasons/2026/children/c1",
         json={"status": "new"},
         headers=client.headers() | {"If-Match": str(version)},
     )
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "admin_required"
+    # An admin undoes the audit, dropping back to the derived status.
+    admin_client = await _logged_in(app, "cmendres")
+    response = await admin_client.client.patch(
+        "/api/v1/seasons/2026/children/c1",
+        json={"status": "new"},
+        headers=admin_client.headers() | {"If-Match": str(version)},
+    )
     assert response.status_code == 200
     assert response.json()["status"] != "audited"
+    await admin_client.close()
+
+
+async def _child_detail(client: Client, key: str = "c1") -> dict[str, Any]:
+    """Read one child's detail through the API.
+
+    Args:
+        client: The logged-in client.
+        key: The child's zite_record_id.
+
+    Returns:
+        The detail payload.
+    """
+    response = await client.client.get(f"/api/v1/seasons/2026/children/{key}")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def _audit_child(client: Client, key: str = "c1") -> int:
+    """Mark one child audited and return the resulting row version.
+
+    Args:
+        client: The logged-in client.
+        key: The child's zite_record_id.
+
+    Returns:
+        The row version after the audit.
+    """
+    detail = await _child_detail(client, key)
+    response = await client.client.patch(
+        f"/api/v1/seasons/2026/children/{key}",
+        json={"status": "audited"},
+        headers=client.headers() | {"If-Match": str(detail["row_version"])},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "audited"
+    return int(response.json()["row_version"])
+
+
+async def _patch_child(
+    client: Client, key: str, body: dict[str, Any], version: int
+) -> Any:
+    """Send one PATCH for a child at the given row version.
+
+    Args:
+        client: The logged-in client.
+        key: The child's zite_record_id.
+        body: The JSON patch body.
+        version: The If-Match row version.
+
+    Returns:
+        The HTTP response.
+    """
+    return await client.client.patch(
+        f"/api/v1/seasons/2026/children/{key}",
+        json=body,
+        headers=client.headers() | {"If-Match": str(version)},
+    )
+
+
+async def test_audited_row_values_are_final_409(
+    app: Any, auditor: Client
+) -> None:
+    """A non-admin field edit on an audited row is 409 row_audited."""
+    await _seed_default(app)
+    version = await _audit_child(auditor)
+    response = await _patch_child(
+        auditor, "c1", {"first_name": "Changed"}, version
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "row_audited"
+    assert detail["message"] == "this row is audited; its values are final"
+    current = await _child_detail(auditor)
+    assert current["row"]["first_name"] == "Kiddo"
+    assert current["status"] == "audited"
+
+
+async def test_audited_row_undo_needs_admin_403(
+    app: Any, auditor: Client
+) -> None:
+    """A non-admin may not undo an audit (403 admin_required)."""
+    await _seed_default(app)
+    version = await _audit_child(auditor)
+    response = await _patch_child(auditor, "c1", {"status": "new"}, version)
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "admin_required"
+    assert detail["message"] == "only an admin may undo an audit"
+    assert (await _child_detail(auditor))["status"] == "audited"
+
+
+async def test_admin_undo_edit_reaudit_flow(app: Any, admin: Client) -> None:
+    """An admin undoes the audit, edits, then re-audits the row."""
+    await _seed_default(app)
+    version = await _audit_child(admin)
+    response = await _patch_child(admin, "c1", {"status": "new"}, version)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] != "audited"
+    response = await _patch_child(
+        admin, "c1", {"first_name": "Changed"}, response.json()["row_version"]
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["row"]["first_name"] == "Changed"
+    response = await _patch_child(
+        admin, "c1", {"status": "audited"}, response.json()["row_version"]
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "audited"
+    assert response.json()["row"]["first_name"] == "Changed"
+
+
+async def test_audit_lock_spares_non_audited_rows(
+    app: Any, auditor: Client
+) -> None:
+    """The lock does not leak: a non-audited row still edits."""
+    await _seed_default(app)
+    version = int((await _child_detail(auditor))["row_version"])
+    response = await _patch_child(
+        auditor, "c1", {"first_name": "Changed"}, version
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["row"]["first_name"] == "Changed"
+
+
+async def test_ignore_refused_on_audited_row_409(
+    app: Any, auditor: Client
+) -> None:
+    """Ignore on an audited row is 409 row_audited; the row is intact."""
+    await _seed_default(app)
+    await _audit_child(auditor)
+    detail = await _child_detail(auditor)
+    response = await auditor.client.post(
+        "/api/v1/seasons/2026/children/c1/ignore",
+        json={"confirm": True, "expected_version": detail["row_version"]},
+        headers=auditor.headers(),
+    )
+    assert response.status_code == 409, response.text
+    body = response.json()["detail"]
+    assert body["code"] == "row_audited"
+    assert body["message"] == (
+        "this row is audited; undo the audit before ignoring it"
+    )
+    current = await _child_detail(auditor)
+    assert current["status"] == "audited"
+    assert not current["row"]["ignore"]
+
+
+async def test_duplication_audit_twice_still_ok(
+    app: Any, auditor: Client
+) -> None:
+    """A second duplication audit of already-audited members returns 200."""
+    await _seed_duplicates(app)
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    for record_id in ("c1", "c1b"):
+        decided = await auditor.client.post(
+            f"/api/v1/seasons/2026/duplications/{group['id']}/members/"
+            f"{record_id}",
+            json={"decision": "not_duplicate", "confirm": True},
+            headers=auditor.headers(),
+        )
+        assert decided.status_code == 200, decided.text
+    for _ in range(2):
+        audited = await auditor.client.post(
+            f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+            headers=auditor.headers(),
+        )
+        assert audited.status_code == 200, audited.text
+        assert audited.json()["status"] == "audited"
 
 
 async def test_orphan_cannot_become_audited_409(app: Any) -> None:
