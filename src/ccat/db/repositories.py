@@ -165,10 +165,17 @@ ALLOWED_CHANGES: dict[str, dict[str, frozenset[str] | None]] = {
     # The duplication audit resolves a detected duplicate group: it
     # gives a pending duplicate child its own angel letter (or keeps
     # the shared one), clears the duplicate flag, and re-derives the
-    # angel columns the decision changed.
+    # angel columns the decision changed.  It is also the only writer
+    # of a child's family_id outside preparation, when a split family's
+    # children are assigned to the family the auditor chose.
     "duplication": {
         "child": frozenset(
-            ("angel_id", "potential_duplicate", *CHILD_COMPUTED_COLUMNS)
+            (
+                "angel_id",
+                "family_id",
+                "potential_duplicate",
+                *CHILD_COMPUTED_COLUMNS,
+            )
         ),
         "family": frozenset(
             ("potential_duplicate", *FAMILY_ASSIGNMENT_COLUMNS)

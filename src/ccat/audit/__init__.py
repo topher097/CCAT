@@ -14,3 +14,7 @@ rules they read and write.
 
 class AuditError(Exception):
     """Raised when the audit tool cannot complete a request."""
+
+
+class RowAuditedError(AuditError):
+    """Raised when an audit would change the values of an audited row."""
