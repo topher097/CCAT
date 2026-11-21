@@ -507,6 +507,111 @@
         "title": "DraftPatch",
         "type": "object"
       },
+      "DuplicationAuditRequest": {
+        "additionalProperties": false,
+        "description": "The reviewed values carried by a group's audit.\n\nAttributes:\n    values: The ``Current (editable)`` values under canonical names.\n    expected_version: The surviving entry's expected ``row_version``.",
+        "properties": {
+          "expected_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          },
+          "values": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Values"
+          }
+        },
+        "title": "DuplicationAuditRequest",
+        "type": "object"
+      },
+      "DuplicationChild": {
+        "additionalProperties": true,
+        "description": "One child attributed to a duplicate family group.\n\nAttributes:\n    zite_record_id: The child's raw submission.\n    first_name: The child's first name.\n    dob: The child's date of birth.\n    family_id: The family the child currently belongs to.\n    angel_id: The child's current angel letter.",
+        "properties": {
+          "angel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Angel Id"
+          },
+          "dob": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dob"
+          },
+          "family_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family Id"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "zite_record_id": {
+            "title": "Zite Record Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "zite_record_id"
+        ],
+        "title": "DuplicationChild",
+        "type": "object"
+      },
+      "DuplicationChildrenRequest": {
+        "additionalProperties": false,
+        "description": "A split family's child assignments.\n\nAttributes:\n    assignments: Child record id -> target family id.",
+        "properties": {
+          "assignments": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Assignments",
+            "type": "object"
+          }
+        },
+        "title": "DuplicationChildrenRequest",
+        "type": "object"
+      },
       "DuplicationDecisionRequest": {
         "additionalProperties": false,
         "description": "One duplication-audit decision.\n\nAttributes:\n    decision: \"not_duplicate\" or \"ignore\".\n    confirm: Must be True; anything else refuses the action.\n    expected_version: The caller's expected ``row_version``.",
@@ -544,7 +649,7 @@
       },
       "DuplicationDetail": {
         "additionalProperties": true,
-        "description": "One duplicate group's raw and screened results.\n\nAttributes:\n    id: The group's stable, URL-safe id.\n    sheet: The duplicate-log sheet label.\n    entity: \"child\", \"family\", or \"sponsor\".\n    group_key: The duplicate group's key.\n    status: \"pending\", \"resolved\", or \"audited\".\n    audited_at: When the group was marked audited.\n    members: The group's submissions.\n    previous: The group before this one in the list's order.\n    next: The group after this one in the list's order.",
+        "description": "One duplicate group's raw and screened results.\n\nAttributes:\n    id: The group's stable, URL-safe id.\n    sheet: The duplicate-log sheet label.\n    entity: \"child\", \"family\", or \"sponsor\".\n    group_key: The duplicate group's key.\n    status: \"pending\", \"resolved\", or \"audited\".\n    audited_at: When the group was marked audited.\n    members: The group's submissions.\n    survivor_count: Members left undecided (candidates to survive).\n    children: The group's children (family groups).\n    previous: The group before this one in the list's order.\n    next: The group after this one in the list's order.",
         "properties": {
           "audited_at": {
             "anyOf": [
@@ -556,6 +661,13 @@
               }
             ],
             "title": "Audited At"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/DuplicationChild"
+            },
+            "title": "Children",
+            "type": "array"
           },
           "entity": {
             "title": "Entity",
@@ -603,6 +715,11 @@
           "status": {
             "title": "Status",
             "type": "string"
+          },
+          "survivor_count": {
+            "default": 0,
+            "title": "Survivor Count",
+            "type": "integer"
           }
         },
         "required": [
@@ -617,7 +734,7 @@
       },
       "DuplicationListItem": {
         "additionalProperties": true,
-        "description": "One detected duplicate group in the Duplications list.\n\nAttributes:\n    id: The group's stable, URL-safe id.\n    sheet: The duplicate-log sheet label.\n    entity: \"child\", \"family\", or \"sponsor\".\n    group_key: The duplicate group's key.\n    member_count: Submissions in the group.\n    decided_count: Members the audit already resolved.\n    status: \"pending\" or \"resolved\".\n    survivor_record_id: The group's surviving submission.\n    conflict_columns: Columns whose values differ across the group.\n    created: The group's earliest submission timestamp.",
+        "description": "One detected duplicate group in the Duplications list.\n\nAttributes:\n    id: The group's stable, URL-safe id.\n    sheet: The duplicate-log sheet label.\n    entity: \"child\", \"family\", or \"sponsor\".\n    group_key: The duplicate group's key.\n    member_count: Submissions in the group.\n    decided_count: Members the audit already resolved.\n    survivor_count: Members left undecided (candidates to survive).\n    released_count: Members released with ``not_duplicate``.\n    status: \"pending\" or \"resolved\".\n    survivor_record_id: The group's surviving submission.\n    conflict_columns: Columns whose values differ across the group.\n    created: The group's earliest submission timestamp.",
         "properties": {
           "conflict_columns": {
             "items": {
@@ -657,6 +774,11 @@
             "title": "Member Count",
             "type": "integer"
           },
+          "released_count": {
+            "default": 0,
+            "title": "Released Count",
+            "type": "integer"
+          },
           "sheet": {
             "title": "Sheet",
             "type": "string"
@@ -664,6 +786,11 @@
           "status": {
             "title": "Status",
             "type": "string"
+          },
+          "survivor_count": {
+            "default": 0,
+            "title": "Survivor Count",
+            "type": "integer"
           },
           "survivor_record_id": {
             "default": "",
@@ -715,7 +842,7 @@
       },
       "DuplicationMember": {
         "additionalProperties": true,
-        "description": "One member of a duplicate group.\n\nAttributes:\n    zite_record_id: The raw submission.\n    created: The submission timestamp.\n    survivor: Whether the submission is the group's survivor.\n    conflict_columns: Columns whose values differ across the group.\n    conflict_details: The conflicting values.\n    raw: The raw submission record.\n    screened: The screened result (the final row), when it has one.\n    decision: \"not_duplicate\", \"ignore\", or None.\n    assigned_id: The unique id the decision assigned.\n    decided_by: The actor who decided.\n    decided_at: When the decision was recorded.\n    row_version: The screened row's optimistic-concurrency version.",
+        "description": "One member of a duplicate group.\n\nAttributes:\n    zite_record_id: The raw submission.\n    created: The submission timestamp.\n    survivor: Whether the submission is the group's survivor.\n    conflict_columns: Columns whose values differ across the group.\n    conflict_details: The conflicting values.\n    raw: The raw submission record.\n    screened: The screened result (the final row), when it has one.\n    decision: \"not_duplicate\", \"ignore\", or None.\n    assigned_id: The unique id the decision assigned.\n    decided_by: The actor who decided.\n    decided_at: When the decision was recorded.\n    row_version: The screened row's optimistic-concurrency version.\n    state: \"surviving\", \"released\", or \"discarded\".\n    row_key: The key of the final row representing the member.\n    row_status: That row's stored status.",
         "properties": {
           "assigned_id": {
             "anyOf": [
@@ -795,6 +922,22 @@
             "title": "Raw",
             "type": "object"
           },
+          "row_key": {
+            "default": "",
+            "title": "Row Key",
+            "type": "string"
+          },
+          "row_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Status"
+          },
           "row_version": {
             "anyOf": [
               {
@@ -817,6 +960,11 @@
               }
             ],
             "title": "Screened"
+          },
+          "state": {
+            "default": "surviving",
+            "title": "State",
+            "type": "string"
           },
           "survivor": {
             "default": false,
@@ -2834,7 +2982,7 @@
         ]
       },
       "patch": {
-        "description": "Apply one tri-state save (auditor; If-Match required).\n\nArgs:\n    key: The entity key.\n    body: The patch (omitted = unchanged, null = clear).\n    request: The current request.\n    if_match: The required row version.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The updated detail.\n\nRaises:\n    ApiError: 412 missing/stale If-Match (stale carries the\n        fresh row + current version); 409 domain refusals.",
+        "description": "Apply one tri-state save (auditor; If-Match required).\n\nArgs:\n    key: The entity key.\n    body: The patch (omitted = unchanged, null = clear).\n    request: The current request.\n    if_match: The required row version.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The updated detail.\n\nRaises:\n    ApiError: 412 missing/stale If-Match (stale carries the\n        fresh row + current version); 409 domain refusals,\n        including an audited row whose values are final; 403\n        when a non-admin undoes an audit.",
         "operationId": "patch_entity_api_v1_seasons__season__children__key__patch",
         "parameters": [
           {
@@ -3789,7 +3937,7 @@
     },
     "/api/v1/seasons/{season}/duplications/{group_id}/audit": {
       "post": {
-        "description": "Mark a resolved duplication audited (auditor).\n\nThe group's members become audited and the affected ``final_*``\ntables are reconciled with the adjudication.\n\nArgs:\n    group_id: The group's id.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    user: The authenticated identity.\n\nReturns:\n    The updated group detail.\n\nRaises:\n    ApiError: 404 for an unknown group; 409 while a member is\n        undecided; 412 when a stored row changed since the read.",
+        "description": "Mark a resolved duplication audited (auditor).\n\nThe group's surviving entry (its single undecided submission) is\naudited with the carried ``Current (editable)`` values, and every\nmember's row status is overridden by the group's adjudication.  The\nbody is optional: without it the surviving entry's stored row is\nfinalized as it stands.\n\nArgs:\n    group_id: The group's id.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    user: The authenticated identity.\n    body: The reviewed values under canonical DTO names, and the\n        surviving entry's expected ``row_version``.\n\nReturns:\n    The updated group detail.\n\nRaises:\n    ApiError: 404 for an unknown group; 409 when the group has zero\n        or more than one surviving entry; 409 when the surviving\n        entry is already audited and values were carried; 412 when a\n        stored row changed since the read.",
         "operationId": "audit_duplication_api_v1_seasons__season__duplications__group_id__audit_post",
         "parameters": [
           {
@@ -3837,6 +3985,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/DuplicationAuditRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -3860,6 +4025,94 @@
           }
         },
         "summary": "Audit Duplication",
+        "tags": [
+          "duplications"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/duplications/{group_id}/children": {
+      "post": {
+        "description": "Assign a split family's children to their families (auditor).\n\nArgs:\n    group_id: The group's id.\n    body: Child record id -> target family id.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    user: The authenticated identity.\n\nReturns:\n    The updated group detail.\n\nRaises:\n    ApiError: 404 for an unknown group or child; 412 when a stored\n        row changed since the read.",
+        "operationId": "assign_duplication_children_api_v1_seasons__season__duplications__group_id__children_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "title": "Group Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "entity",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Entity"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicationChildrenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DuplicationDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Assign Duplication Children",
         "tags": [
           "duplications"
         ]
@@ -4132,7 +4385,7 @@
         ]
       },
       "patch": {
-        "description": "Apply one tri-state save (auditor; If-Match required).\n\nArgs:\n    key: The entity key.\n    body: The patch (omitted = unchanged, null = clear).\n    request: The current request.\n    if_match: The required row version.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The updated detail.\n\nRaises:\n    ApiError: 412 missing/stale If-Match (stale carries the\n        fresh row + current version); 409 domain refusals.",
+        "description": "Apply one tri-state save (auditor; If-Match required).\n\nArgs:\n    key: The entity key.\n    body: The patch (omitted = unchanged, null = clear).\n    request: The current request.\n    if_match: The required row version.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The updated detail.\n\nRaises:\n    ApiError: 412 missing/stale If-Match (stale carries the\n        fresh row + current version); 409 domain refusals,\n        including an audited row whose values are final; 403\n        when a non-admin undoes an audit.",
         "operationId": "patch_entity_api_v1_seasons__season__families__key__patch",
         "parameters": [
           {
@@ -4643,7 +4896,7 @@
         ]
       },
       "patch": {
-        "description": "Apply one tri-state save (auditor; If-Match required).\n\nArgs:\n    key: The entity key.\n    body: The patch (omitted = unchanged, null = clear).\n    request: The current request.\n    if_match: The required row version.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The updated detail.\n\nRaises:\n    ApiError: 412 missing/stale If-Match (stale carries the\n        fresh row + current version); 409 domain refusals.",
+        "description": "Apply one tri-state save (auditor; If-Match required).\n\nArgs:\n    key: The entity key.\n    body: The patch (omitted = unchanged, null = clear).\n    request: The current request.\n    if_match: The required row version.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The updated detail.\n\nRaises:\n    ApiError: 412 missing/stale If-Match (stale carries the\n        fresh row + current version); 409 domain refusals,\n        including an audited row whose values are final; 403\n        when a non-admin undoes an audit.",
         "operationId": "patch_entity_api_v1_seasons__season__sponsors__key__patch",
         "parameters": [
           {
