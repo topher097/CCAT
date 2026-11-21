@@ -222,6 +222,56 @@ describe('audit list', () => {
     expect(cell.get('.badge').classes()).toContain('check-bad')
   })
 
+  it('shows the angel id and the family child count on child rows', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/children?')
+          ? pageOf([
+              {
+                zite_record_id: 'child-1',
+                first_name: 'Kid',
+                family_id: 7,
+                angel_id: '1A',
+                family_child_count: 3,
+                status: 'new',
+              },
+            ])
+          : undefined,
+    ])
+    const wrapper = await mountList('children')
+    await flushPromises()
+
+    const headers = wrapper.findAll('thead th').map((th) => th.text())
+    expect(headers).toContain('Angel ID')
+    expect(headers).toContain('Children in family')
+    const cells = wrapper.findAll('tbody tr td').map((td) => td.text())
+    expect(cells).toContain('1A')
+    expect(cells).toContain('3')
+  })
+
+  it('flags rows whose duplicate group still awaits audit', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/children?')
+          ? pageOf([
+              {
+                zite_record_id: 'child-1',
+                first_name: 'Kid',
+                family_id: 7,
+                status: 'new',
+                duplicate_pending: true,
+              },
+            ])
+          : undefined,
+    ])
+    const wrapper = await mountList('children')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="duplicate-pending"]').text()).toBe(
+      'duplicate pending audit',
+    )
+  })
+
   it('renders server-computed per-family child counts', async () => {
     const fetchMock = mockRoutes([
       (url) =>

@@ -285,6 +285,98 @@ describe('entity editor', () => {
     ).toBe(true)
   })
 
+  it('shows the angel id, the family child count and the family link', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/children/c1')
+          ? jsonResponse(
+              200,
+              childDetail({
+                row: {
+                  ...CHILD_ROW,
+                  angel_id: '1A',
+                  family_child_count: 2,
+                },
+              }),
+            )
+          : undefined,
+    ])
+    const wrapper = await mountEditor('child')
+    await flushPromises()
+
+    const block = wrapper.get('[data-testid="child-identity"]')
+    expect(block.text()).toContain('Angel ID:')
+    expect(block.text()).toContain('1A')
+    expect(block.text()).toContain('Children in family: 2')
+    const link = wrapper
+      .findAllComponents({ name: 'RouterLinkStub' })
+      .find((candidate) => String(candidate.props('to')).startsWith('/audit/families/'))
+    expect(link!.props('to')).toBe('/audit/families/1')
+  })
+
+  it('blocks auditing a row whose duplicate group still awaits audit', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/children/c1')
+          ? jsonResponse(
+              200,
+              childDetail({
+                row: {
+                  ...CHILD_ROW,
+                  duplicate_pending: true,
+                  duplicate_group_id: 'g7',
+                },
+              }),
+            )
+          : undefined,
+    ])
+    const wrapper = await mountEditor('child')
+    await flushPromises()
+
+    expect(
+      wrapper.get('[data-testid="duplicate-pending-warning"]').text(),
+    ).toContain('has not been audited')
+    const link = wrapper
+      .findAllComponents({ name: 'RouterLinkStub' })
+      .find((candidate) => String(candidate.props('to')).startsWith('/audit/duplications/'))
+    expect(link!.props('to')).toBe('/audit/duplications/g7')
+    expect(
+      (wrapper.get('[data-testid="mark-audited"]').element as HTMLButtonElement)
+        .disabled,
+    ).toBe(true)
+  })
+
+  it('names the duplicate group when the server refuses to audit', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (!url.includes('/children/c1')) return undefined
+        if (init.method === 'PATCH') {
+          return jsonResponse(409, {
+            detail: {
+              code: 'duplicate_pending',
+              message: 'duplicate group not audited',
+            },
+          })
+        }
+        return jsonResponse(
+          200,
+          childDetail({ row: { ...CHILD_ROW, duplicate_group_id: 'g7' } }),
+        )
+      },
+    ])
+    const wrapper = await mountEditor('child')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+
+    expect(patchCall(fetchMock)).toBeDefined()
+    expect(wrapper.get('[data-testid="save-error"]').text()).toContain(
+      'duplicate group g7',
+    )
+    expect(wrapper.find('[data-testid="conflict-panel"]').exists()).toBe(false)
+  })
+
   it('marks the row audited together with the pending edits', async () => {
     const fetchMock = mockRoutes([
       (url, init) => {

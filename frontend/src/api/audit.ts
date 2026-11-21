@@ -27,6 +27,8 @@ export type ListParams = {
   page_size?: number
   q?: string
   status?: string | null
+  /** Exact family filter; the search query only matches a substring. */
+  family_id?: number | null
 }
 
 /** GET one server-paginated entity list page. */
@@ -42,6 +44,8 @@ export function listEntities(
   if (params.q) query.set('q', params.q)
   if (params.status && params.status !== 'all')
     query.set('status', params.status)
+  if (params.family_id !== undefined && params.family_id !== null)
+    query.set('family_id', String(params.family_id))
   const suffix = query.size ? `?${query.toString()}` : ''
   return api.get(
     `/api/v1/seasons/${seasonPath(season)}/${SEGMENT[entity]}${suffix}`,

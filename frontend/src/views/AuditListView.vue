@@ -210,6 +210,8 @@ onMounted(() => {
           <th>Name</th>
           <th>Email</th>
           <th v-if="entity === 'child'">Family</th>
+          <th v-if="entity === 'child'">Angel ID</th>
+          <th v-if="entity === 'child'">Children in family</th>
           <th v-if="entity === 'family'">Children</th>
           <th v-if="entity !== 'child'">Validation</th>
           <th>Indicators</th>
@@ -232,6 +234,10 @@ onMounted(() => {
               {{ row.family_id }}
             </RouterLink>
             <span v-else class="badge">orphan</span>
+          </td>
+          <td v-if="entity === 'child'">{{ row.angel_id || '—' }}</td>
+          <td v-if="entity === 'child'">
+            {{ Number(row.family_child_count ?? 0) }}
           </td>
           <td v-if="entity === 'family'">
             {{ Number(row.child_count ?? 0) }}
@@ -256,6 +262,13 @@ onMounted(() => {
             </span>
             <span v-if="row.raw_missing === true" class="badge">
               raw missing
+            </span>
+            <span
+              v-if="row.duplicate_pending === true"
+              class="badge"
+              data-testid="duplicate-pending"
+            >
+              duplicate pending audit
             </span>
           </td>
           <td class="muted">

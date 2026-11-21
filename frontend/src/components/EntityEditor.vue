@@ -74,7 +74,36 @@ const isOrphan = computed(
     detail.value.row.family_id === null,
 )
 
+const duplicatePending = computed(
+  () => detail.value?.row.duplicate_pending === true,
+)
+
+const duplicateGroupId = computed(() => {
+  const id = detail.value?.row.duplicate_group_id
+  return id === null || id === undefined || id === '' ? '' : String(id)
+})
+
+const childFamilyId = computed(() => {
+  const id = detail.value?.row.family_id
+  return id === null || id === undefined || id === '' ? '' : String(id)
+})
+
+const familyChildCount = computed(() =>
+  Number(detail.value?.row.family_child_count ?? 0),
+)
+
+/** Message for a row the server refuses to audit until its group is resolved. */
+function duplicatePendingMessage(): string {
+  const group = duplicateGroupId.value
+  return group
+    ? `This row belongs to duplicate group ${group}, which still awaits audit. Resolve it in Duplications before marking this row audited.`
+    : 'This row belongs to a duplicate group that still awaits audit. Resolve it in Duplications before marking this row audited.'
+}
+
 const auditHint = computed(() => {
+  if (duplicatePending.value) {
+    return 'This row is part of a duplicate group that still awaits audit; resolve the group in Duplications first.'
+  }
   if (isOrphan.value) {
     return 'An orphaned child cannot be marked audited until a matching family registration exists.'
   }
@@ -219,6 +248,8 @@ async function persist(version: number): Promise<void> {
         ? conflictFromError(failure, 'edit')
         : null
     if (next) conflict.value = next
+    else if (failure instanceof ApiError && failure.code === 'duplicate_pending')
+      submitError.value = duplicatePendingMessage()
     else submitError.value = messageOf(failure)
   } finally {
     saving.value = false
@@ -330,7 +361,7 @@ onMounted(() => void load())
           <button
             type="button"
             :class="isAudited ? '' : 'primary'"
-            :disabled="saving || isIgnored || isOrphan"
+            :disabled="saving || isIgnored || isOrphan || duplicatePending"
             :title="auditHint"
             data-testid="mark-audited"
             @click="toggleAudited"
@@ -351,6 +382,31 @@ onMounted(() => void load())
         <strong>Orphaned child:</strong> no matching family registration.
         Audited status stays disabled (legacy behavior); fix the family link
         before auditing.
+      </p>
+      <p
+        v-if="duplicatePending"
+        class="card"
+        data-testid="duplicate-pending-warning"
+      >
+        <strong>Duplicate pending audit:</strong> this row belongs to a
+        duplicate group that has not been audited yet, so it cannot be marked
+        audited.
+        <RouterLink
+          v-if="duplicateGroupId"
+          :to="`/audit/duplications/${duplicateGroupId}`"
+        >
+          Resolve it in Duplications
+        </RouterLink>
+      </p>
+      <p v-if="entity === 'child'" class="card" data-testid="child-identity">
+        <strong>Angel ID:</strong> {{ show(detail.row.angel_id) }} ·
+        <strong>Children in family:</strong> {{ familyChildCount }}
+        <template v-if="childFamilyId">
+          ·
+          <RouterLink :to="`/audit/families/${childFamilyId}`">
+            Family {{ childFamilyId }}
+          </RouterLink>
+        </template>
       </p>
       <p v-if="ageMismatch" class="card diff-changed" data-testid="age-warning">
         <strong>Age mismatch:</strong> {{ ageMismatch }}

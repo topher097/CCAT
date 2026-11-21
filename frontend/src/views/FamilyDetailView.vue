@@ -22,13 +22,12 @@ async function loadChildren(): Promise<void> {
   if (!season) return
   childrenError.value = null
   try {
+    const familyId = Number(key.value)
     const page = await listEntities(season, 'child', {
-      q: key.value,
+      family_id: Number.isFinite(familyId) ? familyId : undefined,
       page_size: 200,
     })
-    children.value = (page.items as Record<string, unknown>[]).filter(
-      (row) => String(row.family_id) === key.value,
-    )
+    children.value = page.items as Record<string, unknown>[]
   } catch (failure) {
     childrenError.value =
       failure instanceof Error ? failure.message : 'children request failed'
@@ -60,6 +59,8 @@ onMounted(() => void loadChildren())
           <tr>
             <th>Status</th>
             <th>Record id</th>
+            <th>Angel ID</th>
+            <th>Children in family</th>
             <th>Name</th>
             <th>DOB</th>
           </tr>
@@ -74,6 +75,8 @@ onMounted(() => void loadChildren())
                 {{ child.zite_record_id }}
               </RouterLink>
             </td>
+            <td>{{ child.angel_id || '—' }}</td>
+            <td>{{ Number(child.family_child_count ?? 0) }}</td>
             <td>{{ child.first_name ?? '—' }}</td>
             <td>{{ child.dob ?? '—' }}</td>
           </tr>
