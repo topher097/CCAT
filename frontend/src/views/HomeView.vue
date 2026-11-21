@@ -21,10 +21,34 @@ type EntityCounts = {
   assigned?: number
 }
 
+/** The duplicate group's own status vocabulary. */
+const DUPLICATION_STATUSES = ['pending', 'resolved', 'audited']
+
 const ENTITY_CARDS = [
-  { entity: 'child', label: 'Children', to: '/audit/children' },
-  { entity: 'family', label: 'Families', to: '/audit/families' },
-  { entity: 'sponsor', label: 'Sponsors', to: '/audit/sponsors' },
+  {
+    entity: 'child',
+    label: 'Children',
+    to: '/audit/children',
+    statuses: STATUSES,
+  },
+  {
+    entity: 'family',
+    label: 'Families',
+    to: '/audit/families',
+    statuses: STATUSES,
+  },
+  {
+    entity: 'sponsor',
+    label: 'Sponsors',
+    to: '/audit/sponsors',
+    statuses: STATUSES,
+  },
+  {
+    entity: 'duplication',
+    label: 'Duplications',
+    to: '/audit/duplications',
+    statuses: DUPLICATION_STATUSES,
+  },
 ] as const
 
 const counts = computed(
@@ -124,7 +148,7 @@ onUnmounted(() => overview.stopPolling())
           </p>
           <ul style="list-style: none; padding: 0; margin: 0.5rem 0 0">
             <li
-              v-for="status in STATUSES"
+              v-for="status in card.statuses"
               :key="status"
               style="display: flex; justify-content: space-between"
             >
@@ -135,15 +159,22 @@ onUnmounted(() => overview.stopPolling())
             </li>
           </ul>
           <p class="muted" style="margin: 0.5rem 0 0">
-            ignored {{ counts[card.entity]?.ignored ?? 0 }} ·
-            orphans {{ counts[card.entity]?.orphans ?? 0 }} ·
-            raw missing {{ counts[card.entity]?.raw_missing ?? 0 }}
-            <template v-if="card.entity === 'child'">
-              · pending AI {{ counts[card.entity]?.pending_ai ?? 0 }} · sheets
-              generated {{ counts[card.entity]?.generated ?? 0 }}
+            <template v-if="card.entity === 'duplication'">
+              pending {{ counts.duplication?.by_status?.pending ?? 0 }} ·
+              resolved {{ counts.duplication?.by_status?.resolved ?? 0 }} ·
+              audited {{ counts.duplication?.by_status?.audited ?? 0 }}
             </template>
             <template v-else>
-              · assigned {{ counts[card.entity]?.assigned ?? 0 }}
+              ignored {{ counts[card.entity]?.ignored ?? 0 }} ·
+              orphans {{ counts[card.entity]?.orphans ?? 0 }} ·
+              raw missing {{ counts[card.entity]?.raw_missing ?? 0 }}
+              <template v-if="card.entity === 'child'">
+                · pending AI {{ counts[card.entity]?.pending_ai ?? 0 }} · sheets
+                generated {{ counts[card.entity]?.generated ?? 0 }}
+              </template>
+              <template v-else>
+                · assigned {{ counts[card.entity]?.assigned ?? 0 }}
+              </template>
             </template>
           </p>
         </RouterLink>

@@ -46,6 +46,10 @@ const OVERVIEW = {
       generated: 0,
       assigned: 2,
     },
+    duplication: {
+      total: 4,
+      by_status: { pending: 2, resolved: 1, audited: 1 },
+    },
   },
   diagnostics: {
     duplicate_groups: 3,
@@ -106,11 +110,22 @@ describe('home overview', () => {
     expect(cards.text()).toContain('Children')
     expect(cards.text()).toContain('pending AI 4')
     expect(cards.text()).toContain('raw missing 1')
+    expect(cards.text()).toContain('Duplications')
+    expect(cards.text()).toContain('pending 2')
+    expect(cards.text()).toContain('resolved 1')
     expect(wrapper.text()).toContain('duplicate groups:')
     expect(wrapper.text()).toContain('packet:')
     expect(wrapper.text()).toContain('generate')
     expect(wrapper.get('[data-testid="overview-jobs"]').text()).toContain(
       'succeeded',
+    )
+
+    // The duplications card sits right after the sponsors card.
+    const links = wrapper
+      .findAllComponents({ name: 'RouterLinkStub' })
+      .map((link) => link.props('to'))
+    expect(links.indexOf('/audit/duplications')).toBe(
+      links.indexOf('/audit/sponsors') + 1,
     )
   })
 

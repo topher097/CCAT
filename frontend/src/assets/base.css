@@ -327,3 +327,98 @@ mark.diff-neutral {
   padding: 0.35rem 0.5rem;
   min-width: 16rem;
 }
+
+/* Audit navigation cards. */
+.audit-nav-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  text-decoration: none;
+  color: inherit;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.audit-nav-card:hover,
+.audit-nav-card:focus-visible {
+  border-color: #0b5cad;
+  box-shadow: 0 4px 12px rgba(18, 50, 79, 0.12);
+}
+
+.audit-nav-card:focus-visible {
+  outline: 2px solid #0b5cad;
+  outline-offset: 2px;
+}
+
+.audit-nav-card.router-link-active {
+  border-color: #0b5cad;
+  background: #f5f7fa;
+}
+
+.audit-nav-card-label {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #12324f;
+}
+
+.audit-nav-card-total {
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: 1;
+  color: #0b5cad;
+}
+
+.audit-nav-card-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.audit-nav-card-progress-track {
+  height: 0.5rem;
+  background: #eef2f6;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.audit-nav-card-progress-fill {
+  display: block;
+  height: 100%;
+  background: #0b5cad;
+  border-radius: 999px;
+  min-width: 2px;
+}
+
+.audit-nav-card-progress-text {
+  font-size: 0.9rem;
+}
+
+.audit-nav-card-breakdown {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.audit-nav-card-breakdown-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.audit-nav-card-breakdown-label {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.audit-nav-card-breakdown-count {
+  flex-shrink: 0;
+}
+
+.audit-nav-card-note {
+  font-size: 0.85rem;
+  color: #5c6b7a;
+}
