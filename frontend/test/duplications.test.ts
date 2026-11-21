@@ -326,6 +326,38 @@ describe('duplication detail', () => {
     )
   })
 
+  it('reloads the group when the route parameter changes', async () => {
+    const fetchMock = mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(200, { ...detail(), group_key: 'key-1' })
+          : url.includes('/duplications/g2')
+            ? jsonResponse(200, {
+                ...detail(),
+                id: 'g2',
+                group_key: 'key-2',
+                entity: 'family',
+              })
+            : undefined,
+    ])
+    const { wrapper, router } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+    expect(wrapper.get('h1').text()).toContain('key-1')
+
+    await router.push('/audit/duplications/g2')
+    await flushPromises()
+
+    expect(
+      fetchMock.mock.calls.some((call) =>
+        String(call[0]).includes('/duplications/g2'),
+      ),
+    ).toBe(true)
+    expect(wrapper.get('h1').text()).toContain('key-2')
+  })
+
   it('saves the edited current values onto the screened row', async () => {
     const fetchMock = mockRoutes([
       (url, init) => {
