@@ -107,6 +107,38 @@ describe('duplication list', () => {
       'Page 1 of 1',
     )
   })
+
+  it('pages through the groups with the previous/next buttons', async () => {
+    const fetchMock = mockRoutes([
+      (url) => {
+        if (!url.includes('/duplications?')) return undefined
+        const page = Number(new URL(url, 'http://x').searchParams.get('page'))
+        return jsonResponse(200, {
+          items: GROUPS,
+          total: 120,
+          page,
+          page_size: 50,
+        })
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationListView, {
+      path: '/audit/duplications',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const next = wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Next')
+    expect(next!.attributes('disabled')).toBeUndefined()
+    await next!.trigger('click')
+    await flushPromises()
+
+    expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain('page=2')
+    expect(wrapper.get('[data-testid="list-page"]').text()).toContain(
+      'Page 2 of 3',
+    )
+  })
 })
 
 describe('duplication detail', () => {

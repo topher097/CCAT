@@ -1849,6 +1849,37 @@ async def _seed_children(app: Any, children: list[dict[str, Any]]) -> None:
         await engine.dispose()
 
 
+async def _seed_many_duplicate_groups(app: Any, count: int) -> None:
+    """Seed the given number of single-member duplicate groups.
+
+    Args:
+        app: The app owning the database.
+        count: How many groups to seed.
+    """
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(repo, raw=_DEFAULT_RAW)
+            await repo.replace_screen_diagnostics(
+                [
+                    _duplicate_log_row(
+                        "child_submissions",
+                        f"fam{index}@example.com|Kiddo",
+                        f"c{index}",
+                        "2026-02-01T09:00:00+00:00",
+                        False,
+                        raw_child(f"c{index}"),
+                    )
+                    for index in range(count)
+                ],
+                [],
+                "screen",
+            )
+    finally:
+        await engine.dispose()
+
+
 async def test_duplications_list_and_detail(app: Any, auditor: Client) -> None:
     """The Duplications list and detail expose the raw and screened rows."""
     await _seed_duplicates(app)
@@ -2027,6 +2058,26 @@ async def test_duplication_mark_audited(app: Any, auditor: Client) -> None:
     rows = {row["zite_record_id"]: row for row in children.json()["items"]}
     assert rows["c1"]["status"] == "audited"
     assert rows["c1"]["audited_at"]
+
+
+async def test_duplications_list_paginates(app: Any, auditor: Client) -> None:
+    """The list serves one page of groups at a time."""
+    await _seed_many_duplicate_groups(app, 120)
+    first = await auditor.client.get(
+        "/api/v1/seasons/2026/duplications?page=1&page_size=50"
+    )
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["total"] == 120
+    assert len(body["items"]) == 50
+    second = await auditor.client.get(
+        "/api/v1/seasons/2026/duplications?page=2&page_size=50"
+    )
+    other = second.json()
+    assert len(other["items"]) == 50
+    assert other["total"] == 120
+    first_ids = {group["id"] for group in body["items"]}
+    assert first_ids.isdisjoint({group["id"] for group in other["items"]})
 
 
 async def test_children_list_reports_family_child_count(
