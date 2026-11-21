@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -49,14 +49,13 @@ const KEY_FIELD: Record<string, string> = {
 
 const groupId = computed(() => String(route.params.id ?? ''))
 const seasonName = computed(() => session.season?.name ?? '')
+/** The back button returns to the duplications list this group came from. */
+const { listUrl, query: carriedQuery } = useAuditNav('/audit/duplications')
 /** The list's filters, carried in the URL, decide the neighbours. */
 const filters = computed(() => {
   const params = new URLSearchParams(carriedQuery.value)
   return { q: params.get('q') ?? '', entity: params.get('entity') }
 })
-
-/** The back button returns to the duplications list this group came from. */
-const { listUrl, query: carriedQuery } = useAuditNav('/audit/duplications')
 const members = computed<DuplicationMember[]>(() => detail.value?.members ?? [])
 const entity = computed<Entity>(() =>
   detail.value?.entity === 'family' || detail.value?.entity === 'sponsor'
@@ -212,6 +211,7 @@ async function load(): Promise<void> {
   submitError.value = null
   stale.value = false
   notice.value = null
+  pending.value = new Map()
   try {
     detail.value = await getDuplication(
       seasonName.value,
@@ -345,6 +345,7 @@ async function save(): Promise<void> {
   }
 }
 
+watch(groupId, () => void load())
 onMounted(() => {
   void load()
 })
