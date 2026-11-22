@@ -60,6 +60,7 @@ function member(overrides: Record<string, unknown> = {}) {
     state: 'surviving',
     row_key: 'r1',
     row_status: 'new',
+    children: [],
   }
   const merged = { ...base, ...overrides }
   if (!('state' in overrides)) {
@@ -1137,5 +1138,162 @@ describe('duplication detail', () => {
     expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
       'Family assignments saved',
     )
+  })
+
+  it('lists the children attributed to each family entry in the member column', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail(
+                [
+                  member({
+                    zite_record_id: 'f1',
+                    survivor: true,
+                    row_key: '10',
+                    children: [
+                      {
+                        zite_record_id: 'c1',
+                        first_name: 'Ann',
+                        dob: '2018-01-01',
+                        family_id: 10,
+                        angel_id: '10A',
+                      },
+                    ],
+                  }),
+                  member({
+                    zite_record_id: 'f2',
+                    survivor: false,
+                    decision: 'not_duplicate',
+                    assigned_id: '20',
+                    state: 'released',
+                    row_key: '20',
+                    children: [
+                      {
+                        zite_record_id: 'c2',
+                        first_name: 'Anne',
+                        dob: '2019-02-02',
+                        family_id: 20,
+                        angel_id: '20A',
+                      },
+                    ],
+                  }),
+                ],
+                { entity: 'family', status: 'resolved' },
+              ),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const f1Children = wrapper.get('th[data-member="f1"] [data-testid="member-children"]')
+    expect(f1Children.text()).toContain('Children submitted with this entry')
+    expect(f1Children.text()).toContain('Ann')
+    expect(f1Children.text()).toContain('2018-01-01')
+
+    const f2Children = wrapper.get('th[data-member="f2"] [data-testid="member-children"]')
+    expect(f2Children.text()).toContain('Anne')
+    expect(f2Children.text()).toContain('2019-02-02')
+  })
+
+  it('shows no per-member children block for a child group', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail([
+                member(),
+                member({ zite_record_id: 'r2', survivor: false }),
+              ]),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="member-children"]').exists()).toBe(false)
+  })
+
+  it('names the entry each child was submitted with in the assignment table', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail(
+                [
+                  member({
+                    zite_record_id: 'f1',
+                    survivor: true,
+                    row_key: '10',
+                    children: [
+                      {
+                        zite_record_id: 'c1',
+                        first_name: 'Ann',
+                        dob: '2018-01-01',
+                        family_id: 10,
+                        angel_id: '10A',
+                      },
+                    ],
+                  }),
+                  member({
+                    zite_record_id: 'f2',
+                    survivor: false,
+                    decision: 'not_duplicate',
+                    assigned_id: '20',
+                    state: 'released',
+                    row_key: '20',
+                    children: [
+                      {
+                        zite_record_id: 'c2',
+                        first_name: 'Anne',
+                        dob: '2019-02-02',
+                        family_id: 20,
+                        angel_id: '20A',
+                      },
+                    ],
+                  }),
+                ],
+                {
+                  entity: 'family',
+                  status: 'resolved',
+                  children: [
+                    {
+                      zite_record_id: 'c1',
+                      first_name: 'Ann',
+                      dob: '2018-01-01',
+                      family_id: 10,
+                      angel_id: '10A',
+                    },
+                    {
+                      zite_record_id: 'c2',
+                      first_name: 'Anne',
+                      dob: '2019-02-02',
+                      family_id: 20,
+                      angel_id: '20A',
+                    },
+                  ],
+                },
+              ),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    expect(wrapper.get('tr[data-child="c1"]').text()).toContain('f1')
+    expect(wrapper.get('tr[data-child="c2"]').text()).toContain('f2')
   })
 })

@@ -13,17 +13,20 @@ export type DuplicationDetail = Schemas['DuplicationDetail'] & {
   survivor_count: number
   children: DuplicationChild[]
 }
-export type DuplicationMember = Schemas['DuplicationMember'] & {
-  state: 'surviving' | 'released' | 'discarded'
-  row_key: string
-  row_status: string | null
-}
 export type DuplicationChild = {
   zite_record_id: string
   first_name: string | null
   dob: string | null
   family_id: number | null
   angel_id: string | null
+}
+// The schema already has an index signature, so this intersection narrows the
+// children field now and remains compatible once the generated type carries it.
+export type DuplicationMember = Schemas['DuplicationMember'] & {
+  state: 'surviving' | 'released' | 'discarded'
+  row_key: string
+  row_status: string | null
+  children: DuplicationChild[]
 }
 
 export type DuplicationListPage = Schemas['DuplicationListPage']
