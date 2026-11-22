@@ -22,7 +22,8 @@ from ccat.config import Config, StorageSpec
 from ccat.db.engine import create_async_engine, run_migrations
 from ccat.db.errors import StaleRowVersionError
 from ccat.db.uow import UnitOfWork
-from ccat.services import db_duplications, db_pipeline
+from ccat.services import db_audit, db_duplications, db_pipeline
+from ccat.services.audit import SavePatch
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers.
@@ -1345,6 +1346,267 @@ def test_list_groups_reports_survivor_and_released_counts(
             assert child_group["decided_count"] == 1
             assert family_group["survivor_count"] == 2
             assert family_group["released_count"] == 0
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_discarding_a_family_member_keeps_the_shared_row(
+    tmp_path: Path,
+) -> None:
+    """A discarded registration never destroys the shared family row."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                group = await _group(repo, "family")
+                detail = await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "rec_f2",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                families = await _rows(repo, "family")
+            assert families[1]["first_name"] == "Jane"
+            assert families[1]["last_name"] == "Doe"
+            assert families[1]["city"] == "Hancock"
+            assert families[1]["primary_email"] == "fam1@example.com"
+            assert families[1]["status"] == "new"
+            assert families[1]["ignore"] is False
+            assert {
+                member["zite_record_id"]: member["state"]
+                for member in detail["members"]
+            } == {"rec_f1": "surviving", "rec_f2": "discarded"}
+            assert detail["status"] == "resolved"
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_family_current_values_still_save_after_a_discard(
+    tmp_path: Path,
+) -> None:
+    """The surviving family row stays editable after a registration is lost."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                group = await _group(repo, "family")
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "rec_f2",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                families = await _rows(repo, "family")
+                await db_audit.save_entity_db(
+                    repo,
+                    cfg,
+                    "family",
+                    1,
+                    SavePatch(city="Springfield"),
+                    "auditor",
+                    expected_version=families[1]["_row_version"],
+                )
+                families = await _rows(repo, "family")
+            assert families[1]["city"] == "Springfield"
+            assert families[1]["ignore"] is False
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_discarding_a_child_leaves_the_other_member_untouched(
+    tmp_path: Path,
+) -> None:
+    """A child group's members own their rows; a discard touches only one."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                group = await _group(repo, "child")
+                before = (await _rows(repo, "child"))["c1b"]
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "c1",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                children = await _rows(repo, "child")
+            assert children["c1"]["ignore"] is True
+            assert children["c1b"] == before
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_discarding_a_sponsor_leaves_the_other_member_untouched(
+    tmp_path: Path,
+) -> None:
+    """A sponsor group's members own their rows; a discard touches only one."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                await repo.commit_finals(
+                    "migrate",
+                    "sponsor",
+                    [
+                        sponsor_row(1, pref_age_min=0, pref_age_max=18),
+                        sponsor_row(2, pref_age_min=0, pref_age_max=18),
+                    ],
+                    "migration",
+                )
+                await repo.replace_screen_diagnostics(
+                    [
+                        _log_row(
+                            "sponsor_submissions",
+                            "sponsor1@example.com",
+                            "rec_s1",
+                            "2026-01-01T10:00:00Z",
+                            True,
+                            _raw_sponsor("rec_s1"),
+                        ),
+                        _log_row(
+                            "sponsor_submissions",
+                            "sponsor1@example.com",
+                            "rec_s2",
+                            "2026-01-02T10:00:00Z",
+                            False,
+                            _raw_sponsor("rec_s2"),
+                        ),
+                    ],
+                    [],
+                    "screen",
+                )
+                group = await _group(repo, "sponsor")
+                before = (await _rows(repo, "sponsor"))[2]
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "rec_s1",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                sponsors = await _rows(repo, "sponsor")
+            assert sponsors[1]["ignore"] is True
+            assert sponsors[2] == before
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_family_children_are_attributed_by_submission_time(
+    tmp_path: Path,
+) -> None:
+    """A child belongs to the entry in force when it was submitted."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                children = await repo.final_rows("child")
+                children.extend(
+                    [
+                        child_row(
+                            "c_between",
+                            created="2026-01-05T12:00:00+00:00",
+                        ),
+                        child_row("c_after", created="2026-01-07T09:00:00Z"),
+                        child_row("c_before", created="2026-01-04T09:00:00Z"),
+                    ]
+                )
+                await repo.commit_finals(
+                    "migrate", "child", children, "migration"
+                )
+                group = await _group(repo, "family")
+                detail = await db_duplications.group_detail(repo, group["id"])
+            assert detail is not None
+            by_entry = {
+                member["zite_record_id"]: [
+                    child["zite_record_id"] for child in member["children"]
+                ]
+                for member in detail["members"]
+            }
+            assert "c_between" in by_entry["rec_f1"]
+            assert "c_before" in by_entry["rec_f1"]
+            assert "c_after" in by_entry["rec_f2"]
+            assert len(detail["children"]) == 5
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_family_audit_after_a_discard_carries_the_values(
+    tmp_path: Path,
+) -> None:
+    """The surviving entry still audits with its reviewed values."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                group = await _group(repo, "family")
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "rec_f2",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                detail = await db_duplications.mark_audited(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "auditor",
+                    values={"first_name": "Marcus", "city": "Springfield"},
+                )
+                families = await _rows(repo, "family")
+            assert detail["status"] == "audited"
+            assert families[1]["first_name"] == "Marcus"
+            assert families[1]["city"] == "Springfield"
+            assert families[1]["status"] == "audited"
         finally:
             await uow.engine.dispose()
 
