@@ -2025,10 +2025,13 @@ export interface components {
          *         state: "surviving", "released", or "discarded".
          *         row_key: The key of the final row representing the member.
          *         row_status: That row's stored status.
+         *         children: The children attributed to this family entry.
          */
         DuplicationMember: {
             /** Assigned Id */
             assigned_id?: string | null;
+            /** Children */
+            children?: components["schemas"]["DuplicationChild"][];
             /** Conflict Columns */
             conflict_columns?: string[];
             /** Conflict Details */
