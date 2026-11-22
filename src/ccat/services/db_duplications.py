@@ -27,6 +27,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ccat.audit import AuditError, RowAuditedError
@@ -307,6 +308,7 @@ async def group_detail(
     }
     key_column = ENTITY_SPECS[group.entity]["key"]
     family_row = _group_family_row(group, finals["family"], decisions)
+    children_by_entry = _family_children_by_entry(group, decisions, finals)
     members: list[dict[str, Any]] = []
     for member in group.members:
         record_id = str(member.get("zite_record_id") or "")
@@ -339,6 +341,7 @@ async def group_detail(
                 "row_version": (
                     screened.get("_row_version") if screened else None
                 ),
+                "children": children_by_entry.get(record_id, []),
             }
         )
     states = await _states(repo)
@@ -718,6 +721,10 @@ async def _ignore_member(
             f"no stored row to ignore for {member.get('zite_record_id')!r}"
         )
     key = ENTITY_SPECS[group.entity]["key"]
+    if _is_group_shared_row(group.entity, key, row, family_row):
+        # The shared family row belongs to the surviving entry; a discarded
+        # registration only records its decision.
+        return
     await db_audit.ignore_entity_db(
         repo,
         cfg,
@@ -727,6 +734,29 @@ async def _ignore_member(
         confirm=True,
         expected_version=expected_version,
     )
+
+
+def _is_group_shared_row(
+    entity: str,
+    key_column: str,
+    row: dict[str, Any],
+    shared_row: dict[str, Any] | None,
+) -> bool:
+    """Whether a member's row is the row the whole group shares.
+
+    Args:
+        entity: The group's entity name.
+        key_column: The entity's key column.
+        row: The member's resolved final row.
+        shared_row: The group's shared family row, when the group is a
+            family.
+
+    Returns:
+        True for the family group's shared row; False otherwise.
+    """
+    if entity != "family" or shared_row is None:
+        return False
+    return str(row.get(key_column)) == str(shared_row.get(key_column))
 
 
 async def _release_member(
@@ -1325,6 +1355,86 @@ def _family_ids(
         if assigned is not None and assigned not in family_ids:
             family_ids.append(assigned)
     return family_ids
+
+
+def _timestamp(value: Any) -> datetime | None:
+    """Parse one stored timestamp to an aware UTC datetime.
+
+    The stores mix ``...Z`` and ``...+00:00`` forms, so the strings are
+    parsed rather than compared.
+
+    Args:
+        value: The stored timestamp text.
+
+    Returns:
+        The aware UTC datetime, or None when the value is absent or
+        unparseable.
+    """
+    text = _as_text(value)
+    if text is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+
+
+def _family_children_by_entry(
+    group: _Group,
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
+    finals: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Attribute a family group's children to the entries they arrived with.
+
+    A child belongs to the latest member whose submission time is at or
+    before the child's own time; a child that predates every member, or
+    has no usable timestamp, belongs to the first member.
+
+    Args:
+        group: The duplicate group.
+        decisions: The member decisions.
+        finals: Every final store.
+
+    Returns:
+        ``{member record id: [child entries]}``; empty for a child or
+        sponsor group.
+    """
+    by_entry: dict[str, list[dict[str, Any]]] = {
+        str(member.get("zite_record_id") or ""): [] for member in group.members
+    }
+    if group.entity != "family" or not group.members:
+        return by_entry
+    entries = [
+        (
+            str(member.get("zite_record_id") or ""),
+            _timestamp(member.get("created")),
+        )
+        for member in group.members
+    ]
+    first = entries[0][0]
+    family_ids = _family_ids(group, decisions, finals["family"])
+    for row in finals["child"]:
+        if _as_int(row.get("family_id")) not in family_ids:
+            continue
+        stamp = _timestamp(row.get("created")) or _timestamp(
+            row.get("zite_created_at")
+        )
+        entry = first
+        if stamp is not None:
+            for record_id, member_time in entries:
+                if member_time is not None and member_time <= stamp:
+                    entry = record_id
+        by_entry[entry].append(
+            {
+                "zite_record_id": str(row.get("zite_record_id") or ""),
+                "first_name": row.get("first_name"),
+                "dob": row.get("dob"),
+                "family_id": _as_int(row.get("family_id")),
+                "angel_id": row.get("angel_id"),
+            }
+        )
+    return by_entry
 
 
 def _group_children(

@@ -82,6 +82,9 @@ def _member_dto(entity: str, member: dict[str, Any]) -> DuplicationMember:
         state=str(member.get("state") or "surviving"),
         row_key=str(member.get("row_key") or ""),
         row_status=member.get("row_status"),
+        children=[
+            DuplicationChild(**child) for child in member.get("children") or []
+        ],
     )
 
 

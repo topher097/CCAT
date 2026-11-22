@@ -2134,6 +2134,30 @@ async def test_duplications_list_and_detail(app: Any, auditor: Client) -> None:
     assert body["members"][1]["screened"]["angel_id"] == "1A"
 
 
+async def test_duplication_detail_attributes_children_to_entries(
+    app: Any, auditor: Client
+) -> None:
+    """Each family entry exposes the children submitted with it."""
+    await _seed_family_duplicates(app)
+    await _seed_children(
+        app,
+        [child_row("c1", angel_id="1A", created="2026-02-01T12:00:00Z")],
+    )
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    detail = await auditor.client.get(
+        f"/api/v1/seasons/2026/duplications/{group['id']}"
+    )
+    assert detail.status_code == 200, detail.text
+    members = {
+        member["zite_record_id"]: member for member in detail.json()["members"]
+    }
+    assert [child["zite_record_id"] for child in members["f1"]["children"]] == [
+        "c1"
+    ]
+    assert members["f2"]["children"] == []
+
+
 async def test_duplications_unknown_group_is_404(
     app: Any, auditor: Client
 ) -> None:
