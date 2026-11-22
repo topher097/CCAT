@@ -205,6 +205,21 @@ const childrenChanged = computed(() => {
   })
 })
 
+/** Map each child's zite record id to the member record id it was submitted with. */
+const childSource = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = {}
+  for (const member of members.value) {
+    for (const child of member.children) {
+      map[child.zite_record_id] = member.zite_record_id
+    }
+  }
+  return map
+})
+
+function submittedWith(childId: string): string {
+  return childSource.value[childId] ?? '—'
+}
+
 /**
  * Whether the group's submissions conflict on one field.
  *
@@ -704,6 +719,20 @@ onMounted(() => {
                     {{ rowLinkText(member) }}
                   </RouterLink>
                 </div>
+                <div
+                  v-if="member.children.length > 0"
+                  data-testid="member-children"
+                >
+                  <div class="muted">Children submitted with this entry</div>
+                  <ul>
+                    <li
+                      v-for="child in member.children"
+                      :key="child.zite_record_id"
+                    >
+                      {{ child.first_name ?? '—' }} · {{ child.dob ?? '—' }}
+                    </li>
+                  </ul>
+                </div>
               </th>
               <th>
                 <div>Current (editable)</div>
@@ -783,12 +812,17 @@ onMounted(() => {
         data-testid="group-children"
       >
         <h3 style="margin-top: 0">Children in this group</h3>
+        <p class="muted">
+          These children are matched to each entry by submission time as a hint,
+          not a decision — the auditor still assigns them below.
+        </p>
         <p class="muted">Children left alone stay with the surviving family.</p>
         <table class="data">
           <thead>
             <tr>
               <th>Name</th>
               <th>Date of birth</th>
+              <th>Submitted with</th>
               <th>Current family</th>
               <th>Assign to</th>
             </tr>
@@ -801,6 +835,7 @@ onMounted(() => {
             >
               <td>{{ child.first_name ?? '—' }}</td>
               <td>{{ child.dob ?? '—' }}</td>
+              <td>{{ submittedWith(child.zite_record_id) }}</td>
               <td>{{ child.family_id ?? '—' }}</td>
               <td>
                 <select
