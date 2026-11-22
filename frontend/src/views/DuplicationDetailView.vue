@@ -175,7 +175,7 @@ const entityHint = computed(() => {
   if (entity.value === 'sponsor') {
     return 'Not duplicate only clears the duplicate flag; this submission already owns its own sponsor id. Ignore destroys this row.'
   }
-  return "This group's submissions share one family row. Ignore discards the whole family; not duplicate creates a new family, and the group's children need a decision about which family they belong to."
+  return "This group's submissions share one family row. Ignore drops this registration and keeps the family — destroy the family from the family's own row. Not duplicate creates a new family, and the group's children need a decision about which family they belong to."
 })
 
 /** Family choices for each child of a split family group. */
