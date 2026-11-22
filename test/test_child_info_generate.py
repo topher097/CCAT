@@ -474,20 +474,22 @@ class TestLoadEnriched:
     def test_unmatched_family_id(
         self, gen_cfg: Config, two_children: list[dict[str, Any]]
     ) -> None:
-        """A family_id with no final_family row raises a typed error."""
+        """An ignored/missing family no longer blocks generation.
+
+        Manual matching keeps ignored families out of the eligible
+        family set; their children enrich with a blank drop-off and
+        still flow through, while a matched family joins normally.
+        """
         _seed(
             gen_cfg,
-            two_children,
-            [
-                {
-                    "family_id": 2,
-                    "gift_pickup_location": "Calumet",
-                    "assigned_sponsor_id": 9,
-                }
-            ],
+            [two_children[0], child_row("c2", "2A", 2)],
+            _family(),  # family 1 only; family 2 has no final_family row
         )
-        with pytest.raises(InfoSheetError, match="no row for family_id"):
-            gen._load_enriched_rows(gen_cfg)
+        _frame, enriched = gen._load_enriched_rows(gen_cfg)
+        assert enriched["gift_pickup_location"].to_list() == [
+            "Hancock",
+            None,
+        ]
 
     def test_duplicate_family_id(
         self,

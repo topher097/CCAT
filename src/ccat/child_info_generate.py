@@ -191,7 +191,9 @@ def _load_enriched_rows(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame]:
         InfoSheetError: If ``final_child`` is missing or has no eligible
             rows, if ``final_family``/``final_sponsor`` is missing or
             lacks the join columns, or if ``family_id``/``sponsor_id`` is
-            duplicated or missing on the family/sponsor side.
+            duplicated or missing on the family/sponsor side.  Unmatched
+            family ids (ignored families under manual matching) warn and
+            keep a blank drop-off instead of failing.
     """
     frame = read_eligible_final_frame(cfg, "child")
     if frame.is_empty():
@@ -243,13 +245,19 @@ def _load_enriched_rows(cfg: Config) -> tuple[pl.DataFrame, pl.DataFrame]:
             "final_family family_id is not unique:"
             f" {duplicated['family_id'].to_list()}"
         )
+    # Manual matching keeps ignored families out of the eligible family
+    # set; their children stay in final_child and must still flow
+    # through, rendering a blank drop-off location (see
+    # sponsor_packets).  A genuinely missing family row degrades the
+    # same way, so warn instead of failing (§13b divergence note).
     unmatched = sorted(
         set(frame["family_id"]) - set(family_frame["family_id"].drop_nulls())
     )
     if unmatched:
-        raise InfoSheetError(
-            f"final_family has no row for family_id(s): {unmatched};"
-            " run `ccat match` first"
+        logger.warning(
+            "final_family has no eligible row for family_id(s): %s;"
+            " their children keep a blank drop-off location",
+            unmatched,
         )
     enriched = frame.join(
         family_frame.select(FAMILY_JOIN_COLUMNS),

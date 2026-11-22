@@ -115,8 +115,10 @@ def _enrich(
 
     Port of the legacy ``_load_enriched_rows`` over repository rows:
     identical validations (missing/empty stores, non-unique family or
-    sponsor ids, unmatched family ids), identical orphan handling, and
-    ``family_size`` computed over this enriched eligible population.
+    sponsor ids), identical orphan handling, and ``family_size``
+    computed over this enriched eligible population.  Unmatched family
+    ids (ignored families under manual matching) warn and keep a blank
+    drop-off instead of failing.
 
     Args:
         child_rows: Complete final-child rows.
@@ -179,13 +181,19 @@ def _enrich(
             "final_family family_id is not unique:"
             f" {duplicated['family_id'].to_list()}"
         )
+    # Manual matching keeps ignored families out of the eligible family
+    # set; their children stay in final_child and must still flow
+    # through, rendering a blank drop-off location (see
+    # _sponsors_with_angels).  A genuinely missing family row degrades
+    # the same way, so warn instead of failing (§13b divergence note).
     unmatched = sorted(
         set(frame["family_id"]) - set(family_frame["family_id"].drop_nulls())
     )
     if unmatched:
-        raise InfoSheetError(
-            f"final_family has no row for family_id(s): {unmatched};"
-            " run `ccat match` first"
+        logger.warning(
+            "final_family has no eligible row for family_id(s): %s;"
+            " their children keep a blank drop-off location",
+            unmatched,
         )
     enriched = frame.join(
         family_frame.select(FAMILY_JOIN_COLUMNS),
