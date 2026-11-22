@@ -842,7 +842,7 @@
       },
       "DuplicationMember": {
         "additionalProperties": true,
-        "description": "One member of a duplicate group.\n\nAttributes:\n    zite_record_id: The raw submission.\n    created: The submission timestamp.\n    survivor: Whether the submission is the group's survivor.\n    conflict_columns: Columns whose values differ across the group.\n    conflict_details: The conflicting values.\n    raw: The raw submission record.\n    screened: The screened result (the final row), when it has one.\n    decision: \"not_duplicate\", \"ignore\", or None.\n    assigned_id: The unique id the decision assigned.\n    decided_by: The actor who decided.\n    decided_at: When the decision was recorded.\n    row_version: The screened row's optimistic-concurrency version.\n    state: \"surviving\", \"released\", or \"discarded\".\n    row_key: The key of the final row representing the member.\n    row_status: That row's stored status.",
+        "description": "One member of a duplicate group.\n\nAttributes:\n    zite_record_id: The raw submission.\n    created: The submission timestamp.\n    survivor: Whether the submission is the group's survivor.\n    conflict_columns: Columns whose values differ across the group.\n    conflict_details: The conflicting values.\n    raw: The raw submission record.\n    screened: The screened result (the final row), when it has one.\n    decision: \"not_duplicate\", \"ignore\", or None.\n    assigned_id: The unique id the decision assigned.\n    decided_by: The actor who decided.\n    decided_at: When the decision was recorded.\n    row_version: The screened row's optimistic-concurrency version.\n    state: \"surviving\", \"released\", or \"discarded\".\n    row_key: The key of the final row representing the member.\n    row_status: That row's stored status.\n    children: The children attributed to this family entry.",
         "properties": {
           "assigned_id": {
             "anyOf": [
@@ -854,6 +854,13 @@
               }
             ],
             "title": "Assigned Id"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/DuplicationChild"
+            },
+            "title": "Children",
+            "type": "array"
           },
           "conflict_columns": {
             "items": {
