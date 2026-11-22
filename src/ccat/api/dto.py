@@ -248,6 +248,24 @@ class DuplicationListPage(StrictModel):
     page_size: int = 50
 
 
+class DuplicationChild(StrictModel):
+    """One child attributed to a duplicate family group.
+
+    Attributes:
+        zite_record_id: The child's raw submission.
+        first_name: The child's first name.
+        dob: The child's date of birth.
+        family_id: The family the child currently belongs to.
+        angel_id: The child's current angel letter.
+    """
+
+    zite_record_id: str
+    first_name: str | None = None
+    dob: str | None = None
+    family_id: int | None = None
+    angel_id: str | None = None
+
+
 class DuplicationMember(StrictModel):
     """One member of a duplicate group.
 
@@ -267,6 +285,7 @@ class DuplicationMember(StrictModel):
         state: "surviving", "released", or "discarded".
         row_key: The key of the final row representing the member.
         row_status: That row's stored status.
+        children: The children attributed to this family entry.
     """
 
     zite_record_id: str
@@ -284,24 +303,7 @@ class DuplicationMember(StrictModel):
     state: str = "surviving"
     row_key: str = ""
     row_status: str | None = None
-
-
-class DuplicationChild(StrictModel):
-    """One child attributed to a duplicate family group.
-
-    Attributes:
-        zite_record_id: The child's raw submission.
-        first_name: The child's first name.
-        dob: The child's date of birth.
-        family_id: The family the child currently belongs to.
-        angel_id: The child's current angel letter.
-    """
-
-    zite_record_id: str
-    first_name: str | None = None
-    dob: str | None = None
-    family_id: int | None = None
-    angel_id: str | None = None
+    children: list[DuplicationChild] = Field(default_factory=list)
 
 
 class DuplicationDetail(StrictModel):
