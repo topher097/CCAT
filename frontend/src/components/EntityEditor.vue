@@ -38,7 +38,9 @@ const ENTITY_LABEL: Record<Entity, string> = {
 }
 
 const seasonName = computed(() => session.season?.name ?? '')
-const fieldSpecs = computed<FieldSpec[]>(() => ENTITY_FIELDS[props.entity])
+const fieldSpecs = computed<FieldSpec[]>(() =>
+  ENTITY_FIELDS[props.entity].filter((spec) => !spec.hidden),
+)
 /** The list's filters, carried in the URL, decide the neighbours. */
 const { query: carriedQuery } = useAuditNav('/audit')
 const listFilters = computed(() => {
@@ -499,6 +501,15 @@ onMounted(() => void load())
         {{ submitError }}
       </p>
       <p v-if="notice" class="notice" data-testid="save-notice">{{ notice }}</p>
+
+      <p
+        v-if="entity === 'sponsor'"
+        class="muted"
+        data-testid="manual-matching-pointer"
+      >
+        Place families by hand in
+        <RouterLink to="/match/manual">Manual matching</RouterLink>.
+      </p>
 
       <h2>Baseline vs current</h2>
       <p class="muted">

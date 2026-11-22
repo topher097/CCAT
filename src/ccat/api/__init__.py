@@ -54,6 +54,12 @@ from ccat.api.routes import (
     jobs as jobs_routes,
 )
 from ccat.api.routes import (
+    manual_match as manual_match_routes,
+)
+from ccat.api.routes import (
+    runs as runs_routes,
+)
+from ccat.api.routes import (
     seasons as seasons_routes,
 )
 from ccat.api.routes import (
@@ -142,6 +148,8 @@ def create_app(cfg: "Config", config_path: str | Path | None = None) -> FastAPI:
         (diagnostics_routes.router, current_user),
         (duplications_routes.router, current_user),
         (jobs_routes.router, current_user),
+        (runs_routes.router, current_user),
+        (manual_match_routes.router, current_user),
         (artifacts_routes.router, current_user),
         (clarify_routes.router, current_user),
         (audit_routes.router, current_user),

@@ -982,7 +982,7 @@ def test_mark_audited_carries_the_reviewed_values(tmp_path: Path) -> None:
 def test_audited_surviving_entry_reaches_the_family_rollup(
     tmp_path: Path,
 ) -> None:
-    """The surviving entry's letter appears in the family's angel list."""
+    """The surviving entry's letter reaches the family's angel count."""
     cfg = _cfg(tmp_path)
     run_migrations(cfg.storage.database_url)
 
@@ -1007,7 +1007,11 @@ def test_audited_surviving_entry_reaches_the_family_rollup(
                 children = await _rows(repo, "child")
                 families = await _rows(repo, "family")
             assert children["c1b"]["angel_id"] == "1A"
-            assert families[1]["assigned_angel_ids"] == "1A"
+            # The family's angel list names its PLACED children (D2).  No
+            # child here carries a sponsor, so the list is empty and the
+            # family's angel count carries its size.
+            assert families[1]["assigned_angel_ids"] is None
+            assert families[1]["num_angels_in_family"] == 1
         finally:
             await uow.engine.dispose()
 
@@ -1301,16 +1305,61 @@ def test_split_family_children_move_to_the_chosen_family(
             assert children["c1"]["angel_id"].startswith("2")
             assert children["c1b"]["family_id"] == 1
             assert children["c1b"]["angel_id"] == "1A"
-            assert families[1]["assigned_angel_ids"] == "1A"
-            assert (
-                families[2]["assigned_angel_ids"] == children["c1"]["angel_id"]
-            )
+            # Neither family has a placed child, so neither lists angels.
+            assert families[1]["assigned_angel_ids"] is None
+            assert families[2]["assigned_angel_ids"] is None
             assert families[1]["num_angels_in_family"] == 1
             assert families[2]["num_angels_in_family"] == 1
             assert {child["family_id"] for child in detail["children"]} == {
                 1,
                 2,
             }
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_placed_family_lists_its_placed_children_after_a_decision(
+    tmp_path: Path,
+) -> None:
+    """A family's angel list follows the children that carry a sponsor."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                children = await repo.final_rows("child")
+                for row in children:
+                    if row["zite_record_id"] == "c1b":
+                        row["assigned_sponsor_id"] = 1
+                        row["assignment_source"] = "manual"
+                await repo.commit_finals(
+                    "manual_match", "child", children, "coordinator"
+                )
+                group = await _group(repo, "child")
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "c1",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                await db_duplications.mark_audited(
+                    repo, cfg, group["id"], "auditor"
+                )
+                families = await _rows(repo, "family")
+                sponsors = await _rows(repo, "sponsor")
+            # The placed child still names the family and the sponsor.
+            assert families[1]["assigned_sponsor_id"] == 1
+            assert families[1]["assigned_angel_ids"] == "1A"
+            assert sponsors[1]["assigned_angel_ids"] == "1A"
+            assert sponsors[1]["num_angels_assigned"] == 1
         finally:
             await uow.engine.dispose()
 

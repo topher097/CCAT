@@ -133,6 +133,12 @@ class FinalChild(RowVersionMixin, Base):
         Index("ix_final_child_season_family", "season_id", "family_id"),
         Index("ix_final_child_season_status", "season_id", "status"),
         Index("ix_final_child_season_ignore", "season_id", "ignore"),
+        # The child's own sponsor — the canonical assignment grain.  The
+        # mirror of ``ix_final_family_season_sponsor``; it serves "this
+        # sponsor's children", the packet builder's main query.
+        Index(
+            "ix_final_child_season_sponsor", "season_id", "assigned_sponsor_id"
+        ),
     )
 
     season_id: Mapped[int] = mapped_column(
@@ -178,6 +184,13 @@ class FinalChild(RowVersionMixin, Base):
     clarification_notes: OptionalStr = mapped_column(Text)
     #: Legacy ISO string kept verbatim; the human audit authority.
     audited_at: OptionalStr = mapped_column(Text)
+    #: The sponsor of THIS child (NULL = unassigned).  Canonical: the
+    #: family and sponsor assignment columns are derived from it.  No FK
+    #: to ``final_sponsor``, matching the house convention.
+    assigned_sponsor_id: OptionalBigInt = mapped_column(BigInteger)
+    #: "auto" | "manual" — who placed the child.  A manual assignment
+    #: is protected from the automatic matcher.
+    assignment_source: OptionalStr = mapped_column(Text)
 
 
 class FinalFamily(RowVersionMixin, Base):
@@ -278,6 +291,47 @@ class FinalSponsor(RowVersionMixin, Base):
     clarification_notes: OptionalStr = mapped_column(Text)
     audited_at: OptionalStr = mapped_column(Text)
     ignore: OptionalBool = mapped_column(Boolean)
+
+
+class FamilyHold(Base):
+    """A family set aside on purpose, with the reason (manual matching).
+
+    A hold keeps a family out of the automatic matcher's pool without
+    placing it.  The note is required — a hold without a reason is not a
+    decision.  ``family_id`` carries no FK to ``final_family``, matching
+    the house convention of not putting FKs between the final stores.
+
+    The partial unique index gives at most one ACTIVE hold per family
+    (the same idiom as ``uq_jobs_idempotency_key``).  A released hold
+    keeps its row and note: the decision is history.
+    """
+
+    __tablename__ = "family_holds"
+    __table_args__ = (
+        Index("ix_family_holds_season_family", "season_id", "family_id"),
+        Index(
+            "uq_family_holds_active",
+            "season_id",
+            "family_id",
+            unique=True,
+            sqlite_where=text("released_at IS NULL"),
+            postgresql_where=text("released_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    season_id: Mapped[int] = mapped_column(
+        ForeignKey("seasons.id"), nullable=False
+    )
+    family_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    #: Why the family was set aside.  Never blank.
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    released_at: OptionalTzDateTime = mapped_column(DateTime(timezone=True))
+    released_by: OptionalStr = mapped_column(Text)
 
 
 class AcquisitionRun(Base):

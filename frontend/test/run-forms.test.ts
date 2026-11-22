@@ -64,23 +64,6 @@ describe('pipeline run forms', () => {
     })
   })
 
-  it('maps match options to the CLI payload exactly', async () => {
-    const fetchMock = mockRoutes([
-      (url) => (url.endsWith('/seasons/2026/jobs') ? jsonResponse(202, JOB) : undefined),
-    ])
-    const { wrapper } = await mountForm('match')
-    await wrapper.get('input[name="test"]').setValue(true)
-    await wrapper.get('input[name="skip_match"]').setValue(true)
-    await wrapper.get('form').trigger('submit')
-    await wrapper.get('[data-testid="confirm"]').trigger('click')
-    await flushPromises()
-
-    expect(await enqueueAndRead(fetchMock)).toEqual({
-      job_type: 'match',
-      options: { test: true, overwrite: false, skip_match: true },
-    })
-  })
-
   it('maps generate options to the CLI payload exactly', async () => {
     const fetchMock = mockRoutes([
       (url) => (url.endsWith('/seasons/2026/jobs') ? jsonResponse(202, JOB) : undefined),

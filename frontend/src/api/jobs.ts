@@ -73,10 +73,15 @@ export function enqueueJob(
   season: string,
   jobType: JobCreate['job_type'],
   options: Record<string, unknown>,
+  idempotencyKey?: string,
 ): Promise<Job> {
   return api.post<Job>(
     `/api/v1/seasons/${encodeURIComponent(season)}/jobs`,
-    { job_type: jobType, options },
+    {
+      job_type: jobType,
+      options,
+      ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+    },
   )
 }
 

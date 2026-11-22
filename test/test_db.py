@@ -58,6 +58,7 @@ EXPECTED_TABLES = frozenset(
         "security_audit_events",
         "clarification_families",
         "clarification_drafts",
+        "family_holds",
     }
 )
 
@@ -100,6 +101,8 @@ FINAL_CHILD_COLUMNS = frozenset(
         "generated_info_sheet",
         "screened",
         "potential_duplicate",
+        "assigned_sponsor_id",
+        "assignment_source",
         "status",
         "ignore",
         "clarification_notes",
@@ -191,6 +194,21 @@ FINAL_SPONSOR_COLUMNS = frozenset(
 )
 
 
+#: family_holds column contract: one row per hold decision, history kept.
+FAMILY_HOLDS_COLUMNS = frozenset(
+    {
+        "id",
+        "season_id",
+        "family_id",
+        "note",
+        "created_by",
+        "created_at",
+        "released_at",
+        "released_by",
+    }
+)
+
+
 def test_all_tables_present() -> None:
     """Every planned table exists, and nothing extra."""
     assert set(Base.metadata.tables) == EXPECTED_TABLES
@@ -202,6 +220,7 @@ def test_all_tables_present() -> None:
         ("final_child", FINAL_CHILD_COLUMNS),
         ("final_family", FINAL_FAMILY_COLUMNS),
         ("final_sponsor", FINAL_SPONSOR_COLUMNS),
+        ("family_holds", FAMILY_HOLDS_COLUMNS),
     ],
 )
 def test_final_column_inventories(

@@ -155,6 +155,16 @@ def _load_enriched(
     child = stats_module._coerce_created(
         child, "prepared child" if raw else "final_child"
     )
+    if "assigned_sponsor_id" not in child.columns:
+        if not raw:
+            raise StatsError(
+                f"{child_label} lacks column(s): ['assigned_sponsor_id'];"
+                " run `ccat audit` first"
+            )
+        # Ephemeral prepared rows precede matchmaking assignments.
+        child = child.with_columns(
+            pl.lit(None, dtype=pl.Int64).alias("assigned_sponsor_id")
+        )
     family_prerequisite = "acquire" if raw else "match"
     if family.is_empty():
         raise StatsError(
@@ -166,17 +176,10 @@ def _load_enriched(
         for column in stats_module.FAMILY_JOIN_COLUMNS
         if column not in family.columns
     ]
-    if missing_family and not (
-        raw and missing_family == ["assigned_sponsor_id"]
-    ):
+    if missing_family:
         raise StatsError(
             f"{family_label} lacks column(s): {missing_family}; run"
             f" `ccat {family_prerequisite}` first"
-        )
-    if "assigned_sponsor_id" not in family.columns:
-        # Ephemeral prepared rows precede matchmaking assignments.
-        family = family.with_columns(
-            pl.lit(None, dtype=pl.Int64).alias("assigned_sponsor_id")
         )
     duplicated = family.group_by("family_id").len().filter(pl.col("len") > 1)
     if not duplicated.is_empty():
@@ -191,7 +194,6 @@ def _load_enriched(
         .fill_null("")
         .map_elements(stats_module._normalize_location, return_dtype=pl.String)
         .alias("gift_pickup_location"),
-        pl.col("assigned_sponsor_id").cast(pl.Int64, strict=False),
     )
     enriched = child.join(
         family.select(stats_module.FAMILY_JOIN_COLUMNS),

@@ -69,6 +69,7 @@ from ccat.child_info_generate import (
 from ccat.db.artifacts import artifact_root, register_file
 from ccat.jobs.errors import JobCancelRequested
 from ccat.match import canonical_location
+from ccat.services.db_assignments import child_sponsor
 from ccat.services.db_pipeline import _store
 from ccat.services.results import GenerateResult
 from ccat.sponsor_packets import (
@@ -464,11 +465,11 @@ def _validate_sheets_exist(
     family_frame: pl.DataFrame,
     sponsor_id: int | None = None,
 ) -> None:
-    """Require a sheet PDF for every sponsored eligible angel (D18).
+    """Require a sheet PDF for every sponsored eligible child (D18).
 
     Exact legacy :func:`ccat.sponsor_packets.validate_all_sheets_exist`
-    scope: every output-eligible child of every output-eligible family
-    with an assigned sponsor must have its sheet file — regardless of
+    scope: every output-eligible child with an assigned sponsor (its own
+    ``assigned_sponsor_id``) must have its sheet file — regardless of
     audit status, generation markers, or the sponsor's own stored
     ``assigned_angel_ids``.  This intentionally differs from the
     generation gate (documented divergence, plan §9.5): mixed-status
@@ -486,21 +487,15 @@ def _validate_sheets_exist(
     """
     if child_frame.is_empty():
         return
-    family_rows = family_frame.to_dicts()
-    sponsored_family_ids = {
-        row.get("family_id")
-        for row in family_rows
-        if row.get("assigned_sponsor_id") is not None
-        and (sponsor_id is None or row.get("assigned_sponsor_id") == sponsor_id)
-    }
     location_by_family = {
         row.get("family_id"): row.get("gift_pickup_location")
-        for row in family_rows
+        for row in family_frame.to_dicts()
     }
     missing = [
         str(row["angel_id"])
         for row in child_frame.to_dicts()
-        if row.get("family_id") in sponsored_family_ids
+        if child_sponsor(row) is not None
+        and (sponsor_id is None or child_sponsor(row) == sponsor_id)
         and row.get("angel_id")
         and not _sheet_path(
             root,
@@ -528,13 +523,13 @@ def _sponsors_with_angels(
     family_frame: pl.DataFrame,
     sponsor_id: int | None = None,
 ) -> "list[dict[str, Any]]":
-    """Join eligible assigned sponsors with eligible angels (§13b).
+    """Join eligible sponsors with their children's details (§13b).
 
     Port of the legacy ``_sponsors_with_angels`` over repository
-    frames: every store is filtered independently, so ignoring one
-    entity never cascades into the others (an ignored family's child
-    keeps its blank drop-off).  Unknown angel ids in a sponsor's
-    stored list are dropped with warnings.
+    frames: membership is the child's own ``assigned_sponsor_id``, so a
+    shared angel letter cannot drop a child.  Every store is filtered
+    independently, so ignoring one entity never cascades into the others
+    (an ignored family's child keeps its blank drop-off).
 
     Args:
         cfg: Pipeline configuration.
@@ -544,12 +539,12 @@ def _sponsors_with_angels(
         sponsor_id: Restrict to one sponsor.
 
     Returns:
-        One packet payload per sponsor with assigned angels, angels
+        One packet payload per sponsor with assigned children, angels
         ordered by family id then angel letter.
 
     Raises:
         SponsorPacketError: When a required store is empty or the
-            scoped sponsor has no eligible row/assigned angels.
+            scoped sponsor has no eligible row/assigned children.
     """
     if sponsor_frame.is_empty():
         raise SponsorPacketError(
@@ -578,49 +573,34 @@ def _sponsors_with_angels(
             row.get("family_id"): row.get("gift_pickup_location")
             for row in family_frame.to_dicts()
         }
-    angels_by_id = {
-        row["angel_id"]: row
-        for row in child_frame.to_dicts()
-        if row.get("angel_id")
-    }
+    children_by_sponsor: dict[int, list[dict[str, Any]]] = {}
+    for child in child_frame.to_dicts():
+        owner = child_sponsor(child)
+        if owner is None or not child.get("angel_id"):
+            continue
+        children_by_sponsor.setdefault(owner, []).append(child)
     packets: list[dict[str, Any]] = []
     for row in sponsor_frame.to_dicts():
-        raw_ids = row.get("assigned_angel_ids") or ""
-        angel_ids = [
-            angel_id.strip()
-            for angel_id in str(raw_ids).split(",")
-            if angel_id.strip()
-        ]
-        if not angel_ids:
+        owner = row.get("sponsor_id")
+        sponsor_children = (
+            children_by_sponsor.get(int(owner)) if owner is not None else None
+        )
+        if not sponsor_children:
             continue
-        unknown = [
-            angel_id for angel_id in angel_ids if angel_id not in angels_by_id
-        ]
-        if unknown:
-            logger.warning(
-                "sponsor %s assigned unknown angel id(s) %s; skipping them",
-                row.get("sponsor_id"),
-                unknown,
-            )
         angels = [
             {
-                "angel_id": angel_id,
-                "family_id": angels_by_id[angel_id].get("family_id"),
-                "gender": angels_by_id[angel_id].get("gender"),
-                "age": angels_by_id[angel_id].get("age_at_xmas"),
-                "dropoff": location_by_family.get(
-                    angels_by_id[angel_id].get("family_id")
-                ),
+                "angel_id": child["angel_id"],
+                "family_id": child.get("family_id"),
+                "gender": child.get("gender"),
+                "age": child.get("age_at_xmas"),
+                "dropoff": location_by_family.get(child.get("family_id")),
                 "location": canonical_location(
-                    location_by_family.get(
-                        angels_by_id[angel_id].get("family_id")
-                    ),
+                    location_by_family.get(child.get("family_id")),
                     cfg.location_groups,
                 )
                 or "unknown",
             }
-            for angel_id in angel_ids
-            if angel_id in angels_by_id
+            for child in sponsor_children
         ]
         angels.sort(key=_angel_sort_key)
         packets.append(

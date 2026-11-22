@@ -79,7 +79,24 @@ def _seed(
     children: list[dict[str, Any]],
     families: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Write complete persistent-final stores."""
+    """Write complete persistent-final stores.
+
+    A child row without its own ``assigned_sponsor_id`` inherits the
+    sponsor whose (derived) ``assigned_angel_ids`` lists its letter, so
+    a test can state membership through either column.
+    """
+    ownership = {
+        angel_id.strip(): sponsor["sponsor_id"]
+        for sponsor in sponsors
+        for angel_id in str(sponsor.get("assigned_angel_ids") or "").split(",")
+        if angel_id.strip()
+    }
+    for child in children:
+        if (
+            "assigned_sponsor_id" not in child
+            and child["angel_id"] in ownership
+        ):
+            child["assigned_sponsor_id"] = ownership[child["angel_id"]]
     if families is None:
         # Default: every seeded child's family at one site, assigned
         # to the first sponsor.  Full stores require unique family IDs.
@@ -277,9 +294,102 @@ class TestSponsorsWithAngels:
             _blank_pdf(
                 sheets_dir / "hancock" / f"AT{cfg.season}_{angel_id}.pdf"
             )
-        # Ignored/orphaned children and children of ignored families impose
-        # no PDF requirement; the independent filters do not cascade.
+        # 4A now carries its own sponsor, so its sheet is required; its
+        # ignored family supplies no pickup location, hence "unknown".
+        _blank_pdf(sheets_dir / "unknown" / f"AT{cfg.season}_4A.pdf")
+        # Ignored/orphaned children impose no PDF requirement; the
+        # independent filters do not cascade.
         validate_all_sheets_exist(email_cfg)
+
+
+class TestChildGrainMembership:
+    """Packets follow ``final_child.assigned_sponsor_id`` (§6.5)."""
+
+    def test_split_family_builds_two_packets(
+        self, cfg: Config, tmp_path: Path
+    ) -> None:
+        """Two children of one family can go to two sponsors."""
+        children = [
+            child_row("1A", "Male", 8, family_id=1),
+            child_row("1B", "Female", 5, family_id=1),
+        ]
+        children[0]["assigned_sponsor_id"] = 7
+        children[1]["assigned_sponsor_id"] = 8
+        _seed(
+            cfg,
+            [
+                sponsor_row(7, "Sam", "sam@x.com", None),
+                sponsor_row(8, "Riley", "riley@x.com", None),
+            ],
+            children,
+            families=[
+                {
+                    "family_id": 1,
+                    "gift_pickup_location": "Hancock",
+                    "assigned_sponsor_id": None,
+                }
+            ],
+        )
+        packets = {
+            packet["sponsor_id"]: packet
+            for packet in _sponsors_with_angels(cfg)
+        }
+        assert set(packets) == {7, 8}
+        assert [a["angel_id"] for a in packets[7]["angels"]] == ["1A"]
+        assert [a["angel_id"] for a in packets[8]["angels"]] == ["1B"]
+
+        email_cfg = _email_cfg(cfg, tmp_path)
+        build_packets(email_cfg)
+        packets_dir = Path(email_cfg.sponsor_packets.output_dir)
+        assert {d.name for d in packets_dir.iterdir()} == {"7", "8"}
+
+    def test_shared_angel_letter_keeps_every_child(self, cfg: Config) -> None:
+        """Two children sharing a letter both reach the packet."""
+        first = child_row("1A", "Male", 8, family_id=1)
+        second = child_row("1A", "Female", 6, family_id=2)
+        second["zite_record_id"] = "rec_second"
+        first["assigned_sponsor_id"] = 7
+        second["assigned_sponsor_id"] = 7
+        _seed(
+            cfg,
+            [sponsor_row(7, "Sam", "sam@x.com", "1A,1A")],
+            [first, second],
+            families=[
+                {"family_id": 1, "gift_pickup_location": "Hancock"},
+                {"family_id": 2, "gift_pickup_location": "Calumet"},
+            ],
+        )
+        packets = _sponsors_with_angels(cfg)
+        assert len(packets) == 1
+        assert [
+            (a["angel_id"], a["family_id"], a["dropoff"])
+            for a in packets[0]["angels"]
+        ] == [("1A", 1, "Hancock"), ("1A", 2, "Calumet")]
+
+    def test_validation_reads_child_sponsor(
+        self, cfg: Config, tmp_path: Path
+    ) -> None:
+        """A child's own sponsor decides whether its sheet is required."""
+        children = [
+            child_row("1A", "Male", 8, family_id=1),
+            child_row("1B", "Female", 5, family_id=1),
+        ]
+        children[0]["assigned_sponsor_id"] = None  # unsponsored
+        children[1]["assigned_sponsor_id"] = 7
+        _seed(
+            cfg,
+            [sponsor_row(7, "Sam", "sam@x.com", None)],
+            children,
+            families=[
+                {
+                    "family_id": 1,
+                    "gift_pickup_location": "Hancock",
+                    "assigned_sponsor_id": 7,
+                }
+            ],
+        )
+        with pytest.raises(SponsorPacketError, match=r"\['1B'\]"):
+            validate_all_sheets_exist(_email_cfg(cfg, tmp_path))
 
 
 class TestRun:

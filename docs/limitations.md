@@ -96,6 +96,51 @@ decision before public deployment.
   deliberate escape hatch, not an editing path. SQLite has no statement
   timeout, so a pathological query holds the API worker until it finishes.
 
+## Manual matching (module 4b)
+
+- **The child row is the assignment.** `final_child.assigned_sponsor_id` is
+  the authoritative "this child is sponsored by S" link; the family and
+  sponsor assignment columns are derived summaries of it. A family may
+  therefore be split across two sponsors, and the workbook export carries
+  the assignment on the **child sheet** — the child sheet is the
+  authoritative assignment record in an exported workbook.
+- **Child PII is readable in bulk.** The manual-matching pool returns each
+  child's name, needs, wants, interests, notes and sizes. Any authenticated
+  user may read it, the same as the audit child list, but it makes the whole
+  season's child detail reachable in one request instead of many. The
+  provider/data-processing approval gate above covers this data.
+- **Stale artifacts after a placement.** A manual assignment does not
+  rewrite the information sheets or the packets already on disk. The pool
+  card warns when a child already has a generated sheet, and the manual
+  page offers a "Regenerate this sponsor's sheets" action. Recovery is to
+  re-run the `generate` job with `overwrite` enabled.
+- **Each placement rewrites the whole child, family and sponsor store.**
+  The ownership registry requires the complete row set per entity, so one
+  assignment is one transaction over the season's entire final store, plus
+  one write lock. That is the same cost the audit save already pays; it is
+  the trigger to move to PostgreSQL when a season's entity count grows.
+- **A coordinator can change the default run flags of the matching and
+  generation commands.** The write surface is one command's run flags
+  (`matchmaking.run`, `generate.run`); the weights, the Zite endpoints,
+  the paths and the database URL stay admin-only. The change is recorded in
+  the security audit log with the before and after values, and it persists
+  in the configuration file, so it affects every later operator's run.
+- **The configuration file race.** The admin's whole-tree
+  `PUT /api/v1/config` and the coordinator's scoped
+  `PATCH /runs/{command}/settings` both read-merge-write the file without a
+  lock. Both writes are atomic and the whole tree is re-validated, but a
+  concurrent admin edit and coordinator change to the same subtree can lose
+  one of them.
+- **Holds do not round-trip through the workbook export.** A family hold is
+  matching state, not a final-entity attribute, so an exported workbook
+  carries the assignments but not the holds. The export is rollback
+  evidence, not the active store.
+- **The legacy "Assigned Angel ID Code" field is hidden in the sponsor
+  editor.** `prior_assigned_angel_ids` still works exactly as before — the
+  automatic matcher still reconciles it and still treats it as a manual
+  assignment — but the free-text field cannot express a partial placement,
+  so the editor hides it and points at the manual matching page.
+
 ## PostgreSQL trigger criteria
 
 Move to PostgreSQL when any of these hold:

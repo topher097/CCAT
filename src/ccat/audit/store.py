@@ -64,6 +64,20 @@ CONTROL_COLUMNS = (
     "audited_at",
 )
 
+#: The child's own assignment columns — the canonical assignment grain.
+#: The family and sponsor assignment columns are derived from them.
+CHILD_ASSIGNMENT_COLUMNS = (
+    "assigned_sponsor_id",
+    "assignment_source",
+)
+
+#: Columns a pre-migration workbook may lack.  They are read as NULL
+#: instead of failing the exact-schema check, so an older workbook still
+#: imports.
+OPTIONAL_FINAL_COLUMNS: dict[str, tuple[str, ...]] = {
+    "child": CHILD_ASSIGNMENT_COLUMNS,
+}
+
 #: Pre-filled clarification note for orphaned children (§8.7).
 ORPHAN_NOTE = "No matching family registration for this child's primary email"
 
@@ -110,6 +124,7 @@ FINAL_CHILD_COLUMNS: tuple[str, ...] = (
     "generated_info_sheet",
     "screened",
     "potential_duplicate",
+    *CHILD_ASSIGNMENT_COLUMNS,
     *CONTROL_COLUMNS,
 )
 
@@ -147,6 +162,8 @@ FINAL_CHILD_SCHEMA: dict[str, PolarsDataType] = {
     "generated_info_sheet": pl.Boolean,
     "screened": pl.Boolean,
     "potential_duplicate": pl.Boolean,
+    "assigned_sponsor_id": pl.Int64,
+    "assignment_source": pl.String,
     "status": pl.String,
     "ignore": pl.Boolean,
     "clarification_notes": pl.String,
@@ -896,6 +913,26 @@ def build_final_frame(entity: str, rows: list[dict[str, Any]]) -> pl.DataFrame:
     return frame
 
 
+def _with_optional_columns(entity: str, frame: pl.DataFrame) -> pl.DataFrame:
+    """Add the columns a pre-migration workbook lacks, as NULL.
+
+    Args:
+        entity: The entity name.
+        frame: The sheet as read.
+
+    Returns:
+        The frame with every optional column present.
+    """
+    optional = OPTIONAL_FINAL_COLUMNS.get(entity, ())
+    missing = [column for column in optional if column not in frame.columns]
+    if not missing:
+        return frame
+    schema = ENTITY_SPECS[entity]["schema"]
+    return frame.with_columns(
+        [pl.lit(None, dtype=schema[column]).alias(column) for column in missing]
+    )
+
+
 def read_final(
     cfg: Config,
     entity: str,
@@ -926,7 +963,7 @@ def read_final(
                 " workbook requires `ccat consolidate-migrate` before use"
             )
         return []
-    validate_final_frame(sheet, frame)
+    validate_final_frame(sheet, _with_optional_columns(entity, frame))
     rows = [normalize_row(entity, row) for row in frame.to_dicts()]
     _validate_entity_rows(entity, rows)
     return rows
@@ -1773,7 +1810,12 @@ def _linkage_columns(entity: str) -> tuple[str, ...]:
 def _module_owned_columns(entity: str) -> tuple[str, ...]:
     """Columns owned by other modules and preserved on every save (§4.4)."""
     if entity == "child":
-        return (*CHILD_MODULE_COLUMNS, "screened", "potential_duplicate")
+        return (
+            *CHILD_MODULE_COLUMNS,
+            *CHILD_ASSIGNMENT_COLUMNS,
+            "screened",
+            "potential_duplicate",
+        )
     if entity == "family":
         return (*FAMILY_ASSIGNMENT_COLUMNS, "potential_duplicate")
     return (*SPONSOR_ASSIGNMENT_COLUMNS, "potential_duplicate")

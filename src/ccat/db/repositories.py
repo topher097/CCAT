@@ -53,6 +53,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ccat.audit.store import (
+    CHILD_ASSIGNMENT_COLUMNS,
     CHILD_COMPUTED_COLUMNS,
     CHILD_EDITABLE_COLUMNS,
     CHILD_MODULE_COLUMNS,
@@ -90,6 +91,8 @@ from ccat.db.models import (
     FinalChild,
     FinalFamily,
     FinalSponsor,
+    FamilyHold,
+    Job,
     MatchAssignmentSnapshot,
     MatchReportRow,
     MatchRun,
@@ -98,6 +101,7 @@ from ccat.db.models import (
     RawSponsor,
     ScreeningRun,
     Season,
+    SecurityAuditEvent,
 )
 from ccat.domain import AGE_PREF_BOUNDS, compute_age_at_xmas
 
@@ -132,7 +136,8 @@ WRITABLE_ENTITIES: dict[str, frozenset[str]] = {
     "acquire": frozenset(),
     "screen": frozenset({"child", "family", "sponsor"}),
     "audit": frozenset({"child", "family", "sponsor"}),
-    "match": frozenset({"family", "sponsor"}),
+    "match": frozenset({"child", "family", "sponsor"}),
+    "manual_match": frozenset({"child", "family", "sponsor"}),
     "generate": frozenset({"child"}),
     "migrate": frozenset({"child", "family", "sponsor"}),
     "duplication": frozenset({"child", "family", "sponsor"}),
@@ -157,8 +162,25 @@ ALLOWED_CHANGES: dict[str, dict[str, frozenset[str] | None]] = {
         ),
     },
     "match": {
+        "child": frozenset(CHILD_ASSIGNMENT_COLUMNS),
         "family": frozenset(FAMILY_ASSIGNMENT_COLUMNS),
         "sponsor": frozenset(SPONSOR_ASSIGNMENT_COLUMNS),
+    },
+    # The manual matcher places children by hand.  It writes the child's
+    # own assignment columns and the derived family/sponsor summaries;
+    # nothing else.
+    "manual_match": {
+        "child": frozenset(CHILD_ASSIGNMENT_COLUMNS),
+        "family": frozenset(
+            (
+                "assigned_sponsor_id",
+                "assigned_angel_ids",
+                # The family's angel count is part of the derived summary
+                # the manual matcher writes beside the placement.
+                "num_angels_in_family",
+            )
+        ),
+        "sponsor": frozenset(("assigned_angel_ids", "num_angels_assigned")),
     },
     "generate": {"child": frozenset(CHILD_MODULE_COLUMNS)},
     "acquire": {},
@@ -358,6 +380,45 @@ _DIAGNOSTIC_SPECS: dict[str, _RowSpec] = {
 }
 
 
+def _hold_row(hold: FamilyHold) -> dict[str, Any]:
+    """Render one family-hold ORM row as a plain dict.
+
+    Args:
+        hold: The ORM row.
+
+    Returns:
+        The hold's public fields.
+    """
+    return {
+        "id": int(hold.id),
+        "season_id": int(hold.season_id),
+        "family_id": int(hold.family_id),
+        "note": str(hold.note),
+        "created_by": str(hold.created_by),
+        "created_at": _iso(hold.created_at),
+        "released_at": _iso(hold.released_at),
+        "released_by": hold.released_by,
+    }
+
+
+def _prefixed(versions: Mapping[str, int], entity: str) -> dict[str, int]:
+    """Split one flat prefixed version map into one entity's share.
+
+    Args:
+        versions: Flat map of ``"<entity>:<key>"`` to expected row version.
+        entity: Entity name to keep.
+
+    Returns:
+        The entity's own key -> expected row version mapping.
+    """
+    prefix = f"{entity}:"
+    return {
+        key[len(prefix) :]: version
+        for key, version in versions.items()
+        if key.startswith(prefix)
+    }
+
+
 def _coerce(spec: _FinalSpec, orm_column: str, value: Any) -> Any:
     """Coerce one value to its column type (store read/write semantics).
 
@@ -488,6 +549,7 @@ class MatchCommitResult(BaseModel):
     run_id: int | None
     families_updated: int = 0
     sponsors_updated: int = 0
+    children_updated: int = 0
     report_rows: int = 0
 
 
@@ -632,6 +694,243 @@ class SeasonStoreRepository:
             changed = await self._write_finals(
                 module, entity, rows, actor or "system", expected_versions
             )
+        return changed
+
+    # ------------------------------------------------------------------
+    # Family holds (manual matching).
+    # ------------------------------------------------------------------
+
+    async def active_match_job(self) -> dict[str, Any] | None:
+        """Return the season's active automatic match job, if any.
+
+        The manual matcher refuses to write while the automatic matcher
+        is running: the automatic run snapshots the stores, computes
+        outside any write transaction, and re-checks the snapshot before
+        committing, so a manual write in that window fails the run.
+
+        Returns:
+            The job's id, status, and start time, or None.
+        """
+        from ccat.jobs.registry import ACTIVE_STATUSES
+
+        job = await self._session.scalar(
+            select(Job)
+            .where(
+                Job.season_id == self._season_id,
+                Job.job_type == "match",
+                Job.status.in_(ACTIVE_STATUSES),
+            )
+            .order_by(Job.id)
+        )
+        if job is None:
+            return None
+        return {
+            "job_id": int(job.id),
+            "status": str(job.status),
+            "started_at": _iso(job.started_at),
+        }
+
+    async def family_hold(self, family_id: int) -> dict[str, Any] | None:
+        """Return the active hold for one family, if any.
+
+        Args:
+            family_id: The family id.
+
+        Returns:
+            The hold row as a dict, or None when the family is not held.
+        """
+        result = await self._session.scalars(
+            select(FamilyHold).where(
+                FamilyHold.season_id == self._season_id,
+                FamilyHold.family_id == family_id,
+                FamilyHold.released_at.is_(None),
+            )
+        )
+        hold = result.first()
+        if hold is None:
+            return None
+        return _hold_row(hold)
+
+    async def family_holds(
+        self, family_ids: Iterable[int]
+    ) -> dict[int, dict[str, Any]]:
+        """Return the active holds for a set of families.
+
+        Args:
+            family_ids: The family ids to look up.
+
+        Returns:
+            Mapping of family id -> hold row, for the active holds only.
+        """
+        ids = {int(value) for value in family_ids}
+        if not ids:
+            return {}
+        result = await self._session.scalars(
+            select(FamilyHold).where(
+                FamilyHold.season_id == self._season_id,
+                FamilyHold.family_id.in_(ids),
+                FamilyHold.released_at.is_(None),
+            )
+        )
+        return {int(hold.family_id): _hold_row(hold) for hold in result}
+
+    async def active_hold_family_ids(self) -> set[int]:
+        """Return every family carrying an active hold.
+
+        Returns:
+            The set of held family ids.
+        """
+        result = await self._session.scalars(
+            select(FamilyHold.family_id).where(
+                FamilyHold.season_id == self._season_id,
+                FamilyHold.released_at.is_(None),
+            )
+        )
+        return {int(family_id) for family_id in result}
+
+    async def record_family_hold(
+        self, family_id: int, note: str, actor: str
+    ) -> dict[str, Any]:
+        """Hold a family, replacing any existing active hold.
+
+        Args:
+            family_id: The family to hold.
+            note: Why the family is set aside.  Must be non-blank.
+            actor: Attribution identity.
+
+        Returns:
+            The new hold row as a dict.
+
+        Raises:
+            DbStoreError: When the note is blank.
+        """
+        text = str(note).strip()
+        if not text:
+            raise DbStoreError("a family hold requires a note")
+        now = datetime.now(UTC)
+        async with self._transaction():
+            result = await self._session.scalars(
+                select(FamilyHold).where(
+                    FamilyHold.season_id == self._season_id,
+                    FamilyHold.family_id == family_id,
+                    FamilyHold.released_at.is_(None),
+                )
+            )
+            for hold in result:
+                hold.released_at = now
+                hold.released_by = actor
+            hold = FamilyHold(
+                season_id=self._season_id,
+                family_id=int(family_id),
+                note=text,
+                created_by=actor,
+                created_at=now,
+            )
+            self._session.add(hold)
+            await self._session.flush()
+        return _hold_row(hold)
+
+    async def release_family_hold(
+        self, family_id: int, actor: str
+    ) -> dict[str, Any] | None:
+        """Release the active hold on one family.
+
+        Releasing a family with no active hold is a no-op success.
+
+        Args:
+            family_id: The family to release.
+            actor: Attribution identity.
+
+        Returns:
+            The released hold row, or None when there was no hold.
+        """
+        now = datetime.now(UTC)
+        async with self._transaction():
+            result = await self._session.scalars(
+                select(FamilyHold).where(
+                    FamilyHold.season_id == self._season_id,
+                    FamilyHold.family_id == family_id,
+                    FamilyHold.released_at.is_(None),
+                )
+            )
+            hold = result.first()
+            if hold is None:
+                return None
+            hold.released_at = now
+            hold.released_by = actor
+            await self._session.flush()
+        return _hold_row(hold)
+
+    async def commit_assignments(
+        self,
+        module: str,
+        child_rows: list[dict[str, Any]],
+        family_rows: list[dict[str, Any]],
+        sponsor_rows: list[dict[str, Any]],
+        actor: str,
+        expected_versions: Mapping[str, int] | None = None,
+        audit_events: list[dict[str, Any]] | None = None,
+        release_holds: Iterable[int] | None = None,
+    ) -> int:
+        """Commit child, family, and sponsor assignment rows atomically.
+
+        One transaction covers the three final stores, the released family
+        holds, and the security audit rows, so a crash can never leave
+        children assigned while the sponsor summary still says otherwise,
+        and a hold can never outlive the placement that released it.
+
+        ``expected_versions`` is one flat map keyed by prefixed entity
+        keys — ``child:<zite_record_id>``, ``family:<family_id>``,
+        ``sponsor:<sponsor_id>``.
+
+        Args:
+            module: Writing module identity ("match" / "manual_match").
+            child_rows: The complete final child store.
+            family_rows: The complete final family store.
+            sponsor_rows: The complete final sponsor store.
+            actor: Attribution identity.
+            expected_versions: Optional prefixed key -> expected row version.
+            audit_events: Optional ``security_audit_events`` rows to
+                insert in the same transaction.
+            release_holds: Family ids whose active hold is released in the
+                same transaction.
+
+        Returns:
+            The number of final rows inserted or updated.
+
+        Raises:
+            DbStoreError: On any validation failure; nothing is written.
+        """
+        expected = dict(expected_versions or {})
+        async with self._transaction():
+            changed = 0
+            for entity, rows in (
+                ("child", child_rows),
+                ("family", family_rows),
+                ("sponsor", sponsor_rows),
+            ):
+                changed += await self._write_finals(
+                    module,
+                    entity,
+                    rows,
+                    actor or "system",
+                    _prefixed(expected, entity),
+                )
+            now = datetime.now(UTC)
+            for family_id in release_holds or ():
+                hold = await self._session.scalar(
+                    select(FamilyHold).where(
+                        FamilyHold.season_id == self._season_id,
+                        FamilyHold.family_id == int(family_id),
+                        FamilyHold.released_at.is_(None),
+                    )
+                )
+                if hold is None:
+                    continue
+                hold.released_at = now
+                hold.released_by = actor
+            for event in audit_events or []:
+                self._session.add(SecurityAuditEvent(**event))
         return changed
 
     @asynccontextmanager
@@ -1529,14 +1828,15 @@ class SeasonStoreRepository:
         report_rows: list[dict[str, Any]] | None,
         actor: str | None = None,
         *,
+        child_rows: list[dict[str, Any]] | None = None,
         overwrite: bool = False,
         test_mode: bool = False,
     ) -> MatchCommitResult:
         """Commit one match run's archive, report, and assignments.
 
-        One transaction: the prior family/sponsor assignment columns
-        are archived into ``match_assignment_snapshots`` (always —
-        ``overwrite`` only governs whether a prior *report* is
+        One transaction: the prior family/sponsor/child assignment
+        columns are archived into ``match_assignment_snapshots`` (always
+        — ``overwrite`` only governs whether a prior *report* is
         superseded by making this run the latest), the report rows are
         inserted, and the assignment columns are applied through the
         module-"match" ownership path with version bumps.  Only
@@ -1552,6 +1852,8 @@ class SeasonStoreRepository:
                 assignment fields.
             report_rows: The new match-report rows, or None.
             actor: Requesting user/job identity.
+            child_rows: Complete child rows with patched assignment
+                fields.  None leaves the child store untouched.
             overwrite: Recorded on the run; latest run stays current.
             test_mode: Recorded on the run.
 
@@ -1580,16 +1882,12 @@ class SeasonStoreRepository:
                 self._session.add(run)
                 await self._session.flush()
                 run_id = run.id
-                for entity, model in (
-                    ("family", FinalFamily),
-                    ("sponsor", FinalSponsor),
+                for entity, model, columns in (
+                    ("family", FinalFamily, FAMILY_ASSIGNMENT_COLUMNS),
+                    ("sponsor", FinalSponsor, SPONSOR_ASSIGNMENT_COLUMNS),
+                    ("child", FinalChild, CHILD_ASSIGNMENT_COLUMNS),
                 ):
                     spec = self._spec(entity)
-                    columns = (
-                        FAMILY_ASSIGNMENT_COLUMNS
-                        if entity == "family"
-                        else SPONSOR_ASSIGNMENT_COLUMNS
-                    )
                     for obj in await self._session.scalars(
                         select(model).where(model.season_id == self._season_id)
                     ):
@@ -1622,6 +1920,11 @@ class SeasonStoreRepository:
                             reason=_as_text(row.get("reason")),
                         )
                     )
+            children_updated = 0
+            if child_rows is not None:
+                children_updated = await self._write_finals(
+                    "match", "child", child_rows, actor or "system", None
+                )
             families_updated = await self._write_finals(
                 "match", "family", family_rows, actor or "system", None
             )
@@ -1632,6 +1935,7 @@ class SeasonStoreRepository:
             run_id=run_id,
             families_updated=families_updated,
             sponsors_updated=sponsors_updated,
+            children_updated=children_updated,
             report_rows=len(report_rows or []),
         )
 

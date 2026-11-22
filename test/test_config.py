@@ -299,6 +299,58 @@ def test_legacy_workbook_command_refuses_without_a_workbook_path(
         _acquire_cmd(str(path))
 
 
+def test_match_run_spec_rejects_test_and_skip_match() -> None:
+    """The matcher's flag combination the runtime ignores is rejected."""
+    from ccat.config import MatchRunSpec
+
+    plain = MatchRunSpec()
+    assert plain.test is False
+    assert plain.skip_match is False
+    with pytest.raises(ValueError, match="cannot both be set"):
+        MatchRunSpec(test=True, skip_match=True)
+
+
+def test_run_sections_merge_from_defaults_and_save(tmp_path: Path) -> None:
+    """Run sections appear from the defaults and materialize on save."""
+    data = json.loads(CONFIG_PATH.read_text())
+    data.pop("generate", None)
+    data["matchmaking"].pop("run", None)
+    path = _write(tmp_path, data)
+    tree, dropped = effective_config(path, load_config(CONFIG_PATH))
+    assert tree["matchmaking"]["run"] == {
+        "test": False,
+        "skip_match": False,
+    }
+    assert tree["generate"]["run"] == {
+        "test": False,
+        "overwrite": False,
+        "max_workers": 4,
+    }
+    assert dropped == []
+    tree["matchmaking"]["run"] = {"test": True, "skip_match": False}
+    tree["generate"]["run"]["max_workers"] = 2
+    config = save_config(path, tree)
+    on_disk = json.loads(path.read_text())
+    assert on_disk["matchmaking"]["run"] == {
+        "test": True,
+        "skip_match": False,
+    }
+    assert on_disk["generate"]["run"]["max_workers"] == 2
+    assert config.matchmaking.run.test is True
+    assert config.generate.run.max_workers == 2
+
+
+def test_config_without_generate_section_keeps_working(
+    tmp_path: Path,
+) -> None:
+    """An older file with no generate section validates on defaults."""
+    data = json.loads(CONFIG_PATH.read_text())
+    data.pop("generate", None)
+    config = load_config(_write(tmp_path, data))
+    assert config.generate.run.overwrite is False
+    assert config.generate.run.max_workers == 4
+
+
 def test_info_sheet_conversion_timeout_default_and_validation() -> None:
     """conversion_timeout_seconds defaults to the legacy 300s and is > 0."""
     from ccat.config import InfoSheetSpec

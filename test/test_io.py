@@ -613,7 +613,12 @@ class TestOwnershipMatrix:
             "screen": FINAL_SHEETS | LOG_SHEETS,
             "audit": FINAL_SHEETS,
             "match": frozenset(
-                {"final_family", "final_sponsor", "match_report"}
+                {
+                    "final_child",
+                    "final_family",
+                    "final_sponsor",
+                    "match_report",
+                }
             ),
             "generate": frozenset({"final_child"}),
             "migrate": RAW_SHEETS
@@ -753,7 +758,6 @@ class TestOwnershipMatrix:
     @pytest.mark.parametrize(
         ("module", "old_name", "new_name"),
         [
-            ("match", "final_child", "final_child_2026"),
             ("match", "raw_child", "raw_child_2026"),
             ("match", "final_family", "archive_2026"),
             ("match", "match_report", "final_family_2026"),

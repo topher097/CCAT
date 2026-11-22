@@ -143,6 +143,9 @@ def _build_source(cfg: Config) -> Path:
     for row in children:
         if row["zite_record_id"] == "c-old-original":
             row["potential_anomoly"] = "AI flagged a need mismatch"
+            # The child row is the assignment grain now.
+            row["assigned_sponsor_id"] = 1
+            row["assignment_source"] = "auto"
     children.append(
         _final(
             "child",
@@ -853,6 +856,16 @@ def test_workbook_export_round_trip(tmp_path: Path) -> None:
     assert child_sheet is not None
     assert "potential_anomoly" in child_sheet.columns  # reverse mapping
     assert "ai_screening_notes" not in child_sheet.columns
+    # The canonical assignment columns round-trip on the child sheet.
+    assert {"assigned_sponsor_id", "assignment_source"} <= set(
+        child_sheet.columns
+    )
+    exported_assigned = {
+        row["zite_record_id"]: row["assigned_sponsor_id"]
+        for row in child_sheet.to_dicts()
+        if row["assigned_sponsor_id"] is not None
+    }
+    assert exported_assigned == {"c-old-original": 1}
     sponsor_sheet = read_sheet(output, "final_sponsor")
     assert sponsor_sheet is not None
     assert "create" in sponsor_sheet.columns
@@ -865,6 +878,44 @@ def test_workbook_export_round_trip(tmp_path: Path) -> None:
     db_import(cfg2, str(output))
     for entity in ("child", "family", "sponsor"):
         assert _read_db_rows(cfg2, entity) == _read_db_rows(cfg, entity)
+
+
+def test_import_accepts_workbook_without_child_assignment_columns(
+    tmp_path: Path,
+) -> None:
+    """A pre-assignment workbook imports, keeping its placement."""
+    cfg = _import_cfg(tmp_path)
+    source = _build_source(cfg)
+    # Simulate an older export: strip the two child assignment columns.
+    book = load_workbook(source)
+    try:
+        sheet = book["final_child"]
+        headers = [cell.value for cell in next(sheet.iter_rows())]
+        for column in ("assignment_source", "assigned_sponsor_id"):
+            sheet.delete_cols(headers.index(column) + 1)
+        book.save(source)
+    finally:
+        book.close()
+
+    report = _report_of(db_import(cfg, str(source)))
+
+    assert report["counts"]["child"]["imported"] > 0
+    children = _read_db_rows(cfg, "child")
+    assert children
+    # The missing columns are read as NULL, then the placement is
+    # rebuilt from the family and sponsor summary columns: an import
+    # must not drop the season's assignments.
+    assigned = {
+        row["zite_record_id"]: row["assigned_sponsor_id"]
+        for row in children
+        if row["assigned_sponsor_id"] is not None
+    }
+    assert assigned == {"c-old-original": 1}
+    assert all(
+        row["assignment_source"] == "auto"
+        for row in children
+        if row["assigned_sponsor_id"] is not None
+    )
 
 
 def test_workbook_export_refuses_existing_output(tmp_path: Path) -> None:

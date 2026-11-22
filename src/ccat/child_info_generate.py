@@ -1,7 +1,8 @@
 """Module 5 — child info sheet generation (§13).
 
-For every ``final_child`` row whose family has an **assigned sponsor**
-and whose ``generated_info_sheet`` flag is ``False``, renders the
+For every ``final_child`` row with an **assigned sponsor**
+(``assigned_sponsor_id``) and whose ``generated_info_sheet`` flag is
+``False``, renders the
 LibreOffice template ``info_sheet.template_file`` with the child's data
 via py3o and converts the result to a PDF named
 ``AT<season>_<angel_id>.pdf`` in ``info_sheet.output_dir``.  Children
@@ -27,11 +28,12 @@ atomic sheet write, and the interrupt is re-raised.
 
 Template variables are mapped onto columns by ``info_sheet.mappings``
 (config-driven).  Mapped sources are resolved against an *enriched* row:
-the ``final_child`` columns plus ``gift_pickup_location`` and
-``assigned_sponsor_id`` joined from ``final_family`` by ``family_id``,
-plus ``family_size`` (the number of ``final_child`` rows sharing that
-``family_id``).  The ``sponsor.*`` section fills from the child's
-assigned ``final_sponsor`` row (joined by ``assigned_sponsor_id``):
+the ``final_child`` columns (including the child's own
+``assigned_sponsor_id``), plus ``gift_pickup_location`` joined from
+``final_family`` by ``family_id``, plus ``family_size`` (the number of
+``final_child`` rows sharing that ``family_id``).  The ``sponsor.*``
+section fills from the child's assigned ``final_sponsor`` row (joined by
+the child's ``assigned_sponsor_id``):
 name (organization name, falling back to first + last name), email,
 phone, and sponsor id; ``sponsor.angel_id`` shows the child's own
 ``angel_id`` (the same value as ``info.angel_id``), and
@@ -96,11 +98,12 @@ SPONSOR_PLACEHOLDERS: frozenset[str] = frozenset(
     }
 )
 
-#: ``final_family`` columns joined onto each child row (§13).
+#: ``final_family`` columns joined onto each child row (§13).  The
+#: sponsor is the child's own ``assigned_sponsor_id`` column, not a
+#: family join: the child row is the assignment grain.
 FAMILY_JOIN_COLUMNS = (
     "family_id",
     "gift_pickup_location",
-    "assigned_sponsor_id",
 )
 
 #: ``final_sponsor`` columns joined onto each child row (§13), aliased to
@@ -323,21 +326,22 @@ def _pending_rows(
     """Select rows still awaiting a generated info sheet (§13.4, §7.5).
 
     A row is pending when it is **audited** (``status == "audited"``,
-    the readiness gate replacing the old ``audited`` Boolean), its
-    family has an **assigned sponsor**, and its ``generated_info_sheet``
+    the readiness gate replacing the old ``audited`` Boolean), it has an
+    **assigned sponsor** (its own ``assigned_sponsor_id``), and its
+    ``generated_info_sheet``
     flag is False (every sponsored audited row, with ``overwrite``) --
     the sheet's purpose is to hand the sponsor their child's wish list,
     so unsponsored or unaudited children get no sheet.
 
     Args:
-        frame: An enriched ``final_child`` frame (needs the
-            ``assigned_sponsor_id`` join column and ``status``).
+        frame: An enriched ``final_child`` frame (needs the child's own
+            ``assigned_sponsor_id`` column and ``status``).
         overwrite: Ignore the ``generated_info_sheet`` column: every
             sponsored audited row is pending.
 
     Returns:
         A tuple of (the pending rows, how many rows were skipped
-        because their family has no assigned sponsor).
+        because the child has no assigned sponsor).
 
     Raises:
         InfoSheetError: If a pending row lacks ``zite_record_id`` or a
@@ -623,8 +627,9 @@ def run(
 ) -> None:
     """Generate child info sheet PDFs, then sponsor packets (§13, §13b).
 
-    Sheet phase: pending rows are children whose family has an
-    **assigned sponsor** and whose ``generated_info_sheet`` flag is
+    Sheet phase: pending rows are children with an **assigned sponsor**
+    (their own ``assigned_sponsor_id``) whose ``generated_info_sheet``
+    flag is
     False (all sponsored rows when ``overwrite`` is set) --
     unsponsored children get no sheet.  Pending rows are rendered with
     py3o and converted to ``AT<season>_<angel_id>.pdf`` in

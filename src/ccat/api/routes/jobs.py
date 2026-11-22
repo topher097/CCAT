@@ -124,7 +124,7 @@ async def enqueue(
     request: Request,
     repo: SeasonStoreRepository = Depends(season_repo),
     session_factory: Any = Depends(session_factory_dep),
-    user: AuthUser = Depends(require_roles("coordinator")),
+    user: AuthUser = Depends(require_roles("coordinator", "admin")),
 ) -> JobView:
     """Enqueue one durable job (202 + job view).
 

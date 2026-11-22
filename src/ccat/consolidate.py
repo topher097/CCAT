@@ -25,6 +25,7 @@ import polars as pl
 
 from ccat.audit.store import (
     ENTITY_SPECS,
+    OPTIONAL_FINAL_COLUMNS,
     as_bool,
     build_final_frame,
     normalize_row,
@@ -205,7 +206,14 @@ def _source_frames(
             for column in ("audited", "require_clarification")
             if column in frame.columns
         }
-        missing = [column for column in expected if column not in frame.columns]
+        # A pre-assignment workbook has no child assignment columns; they
+        # are legitimately absent and are read as NULL below.
+        optional = set(OPTIONAL_FINAL_COLUMNS.get(entity, ()))
+        missing = [
+            column
+            for column in expected
+            if column not in frame.columns and column not in optional
+        ]
         extra = [
             column
             for column in frame.columns
@@ -421,6 +429,9 @@ def _entity_metrics(
             ),
             "with_family_id": sum(
                 row.get("family_id") is not None for row in rows
+            ),
+            "with_sponsor": sum(
+                row.get("assigned_sponsor_id") is not None for row in rows
             ),
         }
         generated = sum(

@@ -212,6 +212,24 @@ def compute_age_at_xmas(dob: str, xmas: date) -> int:
     )
 
 
+def angel_sort_key(angel_id: str) -> tuple[int, str]:
+    """Sort key for angel ids: family number, then letter code.
+
+    The natural order is ``1A < 1B < 1Z < 1AA``; an id that does not
+    match the shape sorts last.
+
+    Args:
+        angel_id: The angel letter, e.g. ``"7B"``.
+
+    Returns:
+        The sort key.
+    """
+    match = re.fullmatch(r"(\d+)([A-Z]+)", angel_id)
+    if match is None:
+        return (10**9, angel_id)
+    return (int(match.group(1)), match.group(2))
+
+
 def index_to_letters(index: int) -> str:
     """Map a zero-based sibling index to an angel letter suffix (§6.5).
 

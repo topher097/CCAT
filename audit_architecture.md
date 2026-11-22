@@ -143,8 +143,10 @@ fails closed and directs the user to `ccat consolidate-migrate` or
 7. Set supplied controls, stamp `audited_at`, recompute child age or
    sponsor bounds.
 8. Preserve module-owned fields from the stored row: child
-   `generated_info_sheet`, `screened`, and `potential_duplicate`; family/
-   sponsor assignment fields and `potential_duplicate`.
+   `generated_info_sheet`, `screened`, `potential_duplicate`, and the
+   child's own assignment columns `assigned_sponsor_id` and
+   `assignment_source`; family/sponsor assignment fields and
+   `potential_duplicate`.
 9. For non-ignored children, merge current sibling-DOB notes.
 10. Recompute status against the baseline, upsert by key, validate the full
     store, and atomically write it.
@@ -179,6 +181,9 @@ duplicate child with a family is not treated as an orphan.
   status authority (`status == "audited"`), ignore confirmation/unignore
   confirmation, and
   clarification note editing.
+- The admin **Settings** tab (`/settings`): the configuration file edited in
+  place, one nested group per JSON level, saved back to the file and reloaded
+  into the running server (pipeline architecture §3.1).
 
 The full stores intentionally include ignored and orphan rows so correction
 workflows work. Listing/dashboard-level test scoping occurs in memory after
@@ -250,6 +255,10 @@ adjudication rules; this section describes how they are exposed.
   user touched. Omitted means unchanged, explicit null clears, a value
   sets. The server derives the final status; a client cannot post an
   arbitrary status string.
+- The child's own assignment columns (`assigned_sponsor_id`,
+  `assignment_source`) are module-owned: an audit edit never changes them,
+  and the audit carries them through unchanged. They are placed by the
+  matchers, not by the audit tool.
 - Every write carries `If-Match: <row_version>`. A stale version returns
   `412` with the current server row, its version, and the winner's
   `last_updated_by`/`last_updated_at` so the client can review or rebase.

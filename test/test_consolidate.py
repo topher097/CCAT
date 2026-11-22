@@ -511,6 +511,10 @@ def test_consolidate_golden_preserves_every_layer_field_and_formula(
     assert report["entities"]["sponsor"]["raw_missing"] == 1
     assert report["entities"]["child"]["generated"]["info_sheet_true"] == 3
     assert report["entities"]["family"]["assignments"]["with_sponsor"] == 2
+    # The dense adj source predates the child-grain assignment columns;
+    # consolidation carries no child sponsor (the workbook export is the
+    # family summary).
+    assert report["entities"]["child"]["assignments"]["with_sponsor"] == 0
     assert (
         report["entities"]["sponsor"]["assignments"][
             "num_angels_assigned_total"

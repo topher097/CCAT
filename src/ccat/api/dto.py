@@ -552,6 +552,480 @@ class DbQueryResult(StrictModel):
     duration_ms: float = 0.0
 
 
+class ManualMatchHold(StrictModel):
+    """One family hold (manual matching).
+
+    Attributes:
+        held: Whether the family carries an active hold.
+        note: Why the family was set aside; the reason, verbatim.
+        created_by: Who set it aside.
+        created_at: When it was set aside.
+    """
+
+    held: bool = False
+    note: str | None = None
+    created_by: str | None = None
+    created_at: str | None = None
+
+
+class ManualMatchChildCard(StrictModel):
+    """One child's overview line on a family card.
+
+    Attributes:
+        zite_record_id: The child's key; the assignment grain.
+        angel_id: The child's angel letter.
+        first_name: The child's first name.
+        age_at_xmas: The child's age at Christmas.
+        gender: The child's gender.
+        special_needs: Whether the child has special needs.
+        need_1: First stated need.
+        need_2: Second stated need.
+        desire_1: First stated want.
+        desire_2: Second stated want.
+        interests: The child's interests.
+        other_notes: Free-text notes.
+        favorite_colors: The child's favourite colours.
+        sizes: The child's sizes, grouped for display.
+        status: The child's audit status.
+        assigned_sponsor_id: The child's sponsor, when placed.
+        assignment_source: "auto" or "manual".
+        generated_info_sheet: Whether a sheet already exists on disk.
+        row_version: The child's optimistic-concurrency version.
+        selectable: Whether the child may be assigned.
+        unselectable_reason: Why the child may not be assigned.
+    """
+
+    zite_record_id: str
+    angel_id: str | None = None
+    first_name: str | None = None
+    age_at_xmas: int | None = None
+    gender: str | None = None
+    special_needs: bool = False
+    need_1: str | None = None
+    need_2: str | None = None
+    desire_1: str | None = None
+    desire_2: str | None = None
+    interests: str | None = None
+    other_notes: str | None = None
+    favorite_colors: str | None = None
+    sizes: dict[str, str | None] = Field(default_factory=dict)
+    status: str | None = None
+    assigned_sponsor_id: int | None = None
+    assignment_source: str | None = None
+    generated_info_sheet: bool = False
+    row_version: int = 0
+    selectable: bool = True
+    unselectable_reason: str | None = None
+
+
+class ManualMatchFamilyCard(StrictModel):
+    """One family's card: the header plus its children.
+
+    Attributes:
+        family_id: The family's key.
+        row_version: The family's optimistic-concurrency version.
+        first_name: The family's first name.
+        last_name: The family's last name.
+        primary_email: The family's email.
+        phone: The family's phone.
+        city: The family's city.
+        zip_code: The family's zip code.
+        state: The family's state.
+        gift_pickup_location: The family's pickup location label.
+        status: The family's audit status.
+        family_size: The number of non-ignored children.
+        assigned_count: The number of children with a sponsor.
+        assigned_sponsor_ids: The sponsors the family's children hold.
+        assignment_state: "unassigned", "partial", "split", "assigned".
+        children: The family's children.
+        hold: The family's active hold, if any.
+        warnings: Family-level advisories.
+    """
+
+    family_id: int
+    row_version: int = 0
+    first_name: str | None = None
+    last_name: str | None = None
+    primary_email: str | None = None
+    phone: str | None = None
+    city: str | None = None
+    zip_code: str | None = None
+    state: str | None = None
+    gift_pickup_location: str | None = None
+    status: str | None = None
+    family_size: int = 0
+    assigned_count: int = 0
+    assigned_sponsor_ids: list[int] = Field(default_factory=list)
+    assignment_state: str = "unassigned"
+    children: list[ManualMatchChildCard] = Field(default_factory=list)
+    hold: ManualMatchHold = Field(default_factory=ManualMatchHold)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ManualMatchAutomaticRun(StrictModel):
+    """The automatic matcher's state for the season.
+
+    Attributes:
+        active: Whether a match job is queued or running.
+        job_id: The active job's id.
+        status: The active job's status.
+        started_at: When the active job started.
+    """
+
+    active: bool = False
+    job_id: int | None = None
+    status: str | None = None
+    started_at: str | None = None
+
+
+class ManualMatchPoolPage(StrictModel):
+    """One page of the manual-matching pool.
+
+    Attributes:
+        items: The family cards.
+        total: The number of matching families.
+        page: The 1-based page number.
+        page_size: The page size.
+        automatic_run: The automatic matcher's state.
+    """
+
+    items: list[ManualMatchFamilyCard] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 25
+    automatic_run: ManualMatchAutomaticRun = Field(
+        default_factory=ManualMatchAutomaticRun
+    )
+
+
+class ManualMatchSponsor(StrictModel):
+    """One sponsor in the manual picker.
+
+    Attributes:
+        sponsor_id: The sponsor's key.
+        row_version: The sponsor's optimistic-concurrency version.
+        display_name: The organization name, or the first and last name.
+        email: The sponsor's email.
+        phone: The sponsor's phone.
+        sponsor_type: "Individual", "Organization", "Walmart", ...
+        num_children: How many children the sponsor committed to.
+        assigned_count: How many children are placed with the sponsor.
+        remaining: The free capacity; None when uncapped.
+        age_preference: The sponsor's age preference label.
+        gender_preference: The sponsor's gender preference label.
+        dropoff_location: The sponsor's drop-off location label.
+        pref_age_min: The lowest preferred age.
+        pref_age_max: The highest preferred age.
+        status: The sponsor's audit status.
+    """
+
+    sponsor_id: int
+    row_version: int = 0
+    display_name: str = ""
+    email: str | None = None
+    phone: str | None = None
+    sponsor_type: str | None = None
+    num_children: int | None = None
+    assigned_count: int = 0
+    remaining: int | None = None
+    age_preference: str | None = None
+    gender_preference: str | None = None
+    dropoff_location: str | None = None
+    pref_age_min: int | None = None
+    pref_age_max: int | None = None
+    status: str | None = None
+
+
+class ManualMatchSponsorPage(StrictModel):
+    """One page of the manual sponsor picker.
+
+    Attributes:
+        items: The sponsors.
+        total: The number of matching sponsors.
+        page: The 1-based page number.
+        page_size: The page size.
+    """
+
+    items: list[ManualMatchSponsor] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 25
+
+
+class ManualAssignmentRequest(StrictModel):
+    """Assign a selection of children to a sponsor.
+
+    Attributes:
+        sponsor_id: The sponsor the selection goes to.
+        family_ids: Whole families to place; the server expands each to
+            its eligible children.
+        child_ids: Individual children, by ``zite_record_id``.
+        expected_versions: The caller's expected row versions, keyed
+            ``child:<id>``, ``family:<id>``, ``sponsor:<id>``.
+        confirm: Required when a selected child already has a sponsor.
+        note: Free text recorded in the audit event.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sponsor_id: int
+    family_ids: list[int] = Field(default_factory=list)
+    child_ids: list[str] = Field(default_factory=list)
+    expected_versions: dict[str, int] = Field(default_factory=dict)
+    confirm: bool = False
+    note: str | None = None
+
+
+class ManualReleaseRequest(StrictModel):
+    """Release assignments.
+
+    Attributes:
+        child_ids: Individual children to release.
+        family_ids: Families whose assigned children are all released.
+        expected_versions: The caller's expected row versions.
+        confirm: Required; releasing is destructive.
+        note: Free text recorded in the audit event.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    child_ids: list[str] = Field(default_factory=list)
+    family_ids: list[int] = Field(default_factory=list)
+    expected_versions: dict[str, int] = Field(default_factory=dict)
+    confirm: bool = False
+    note: str | None = None
+
+
+class ManualAssignmentEntry(StrictModel):
+    """One child's assignment outcome.
+
+    Attributes:
+        zite_record_id: The child's key.
+        angel_id: The child's angel letter.
+        family_id: The child's family.
+        from_sponsor_id: The child's previous sponsor, when it moved.
+    """
+
+    zite_record_id: str
+    angel_id: str | None = None
+    family_id: int | None = None
+    from_sponsor_id: int | None = None
+
+
+class ManualAssignmentFamilySummary(StrictModel):
+    """One family's assignment summary after a write.
+
+    Attributes:
+        family_id: The family's key.
+        assigned_sponsor_id: The family's single sponsor, when it has one.
+        assigned_sponsor_ids: Every sponsor the family's children hold.
+        assigned_count: The number of placed children.
+        family_size: The number of non-ignored children.
+        assignment_state: "unassigned", "partial", "split", "assigned".
+        hold_released: Whether the write released the family's hold.
+    """
+
+    family_id: int
+    assigned_sponsor_id: int | None = None
+    assigned_sponsor_ids: list[int] = Field(default_factory=list)
+    assigned_count: int = 0
+    family_size: int = 0
+    assignment_state: str = "unassigned"
+    hold_released: bool = False
+
+
+class ManualAssignmentSponsorSummary(StrictModel):
+    """One sponsor's assignment summary after a write.
+
+    Attributes:
+        sponsor_id: The sponsor's key.
+        assigned_count: The number of children placed with the sponsor.
+        remaining: The free capacity; None when uncapped.
+    """
+
+    sponsor_id: int
+    assigned_count: int = 0
+    remaining: int | None = None
+
+
+class ManualAssignmentResult(StrictModel):
+    """The outcome of an assign or release request.
+
+    Attributes:
+        assigned: The children newly assigned.
+        reassigned: The children moved from another sponsor.
+        released: The children released.
+        unchanged: The children already held by this sponsor.
+        warnings: The advisories; they never block.
+        families: The affected families' summaries.
+        sponsors: The affected sponsors' summaries.  A release that
+            frees children on several sponsors names each of them.
+        versions: The new row versions, so the client need not reload.
+    """
+
+    assigned: list[ManualAssignmentEntry] = Field(default_factory=list)
+    reassigned: list[ManualAssignmentEntry] = Field(default_factory=list)
+    released: list[ManualAssignmentEntry] = Field(default_factory=list)
+    unchanged: list[ManualAssignmentEntry] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    families: list[ManualAssignmentFamilySummary] = Field(default_factory=list)
+    sponsors: list[ManualAssignmentSponsorSummary] = Field(default_factory=list)
+    versions: dict[str, int] = Field(default_factory=dict)
+
+
+class ManualAssignmentListItem(StrictModel):
+    """One current assignment, as the manual list shows it.
+
+    Attributes:
+        zite_record_id: The child's key.
+        angel_id: The child's angel letter.
+        family_id: The child's family.
+        sponsor_id: The child's sponsor.
+        assignment_source: "auto" or "manual".
+        last_updated_by: Who last wrote the child row.
+        last_updated_at: When the child row was last written.
+    """
+
+    zite_record_id: str
+    angel_id: str | None = None
+    family_id: int | None = None
+    sponsor_id: int | None = None
+    assignment_source: str | None = None
+    last_updated_by: str | None = None
+    last_updated_at: str | None = None
+
+
+class ManualAssignmentListPage(StrictModel):
+    """One page of the current assignment list.
+
+    Attributes:
+        items: The assignments.
+        total: The number of matching assignments.
+        page: The 1-based page number.
+        page_size: The page size.
+    """
+
+    items: list[ManualAssignmentListItem] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 25
+
+
+class ManualHoldRequest(StrictModel):
+    """Hold a family, with the reason.
+
+    Attributes:
+        family_id: The family to hold.
+        note: Why the family is set aside.  Required, never blank.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    family_id: int
+    note: str
+
+
+class ManualHoldReleaseRequest(StrictModel):
+    """Release a family's hold.
+
+    Attributes:
+        family_id: The family whose hold is released.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    family_id: int
+
+
+class ManualHoldResult(StrictModel):
+    """One hold's state.
+
+    Attributes:
+        family_id: The family's key.
+        held: Whether the family carries an active hold.
+        note: The hold's note.
+        created_by: Who set it aside.
+        created_at: When it was set aside.
+        released_at: When it was released.
+        released_by: Who released it.
+    """
+
+    family_id: int
+    held: bool = False
+    note: str | None = None
+    created_by: str | None = None
+    created_at: str | None = None
+    released_at: str | None = None
+    released_by: str | None = None
+
+
+class ManualHoldListPage(StrictModel):
+    """One page of the active holds.
+
+    Attributes:
+        items: The active holds.
+        total: The number of active holds.
+        page: The 1-based page number.
+        page_size: The page size.
+    """
+
+    items: list[ManualHoldResult] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 25
+
+
+class MatchRunSettings(StrictModel):
+    """The automatic matcher's rememberable run flags.
+
+    Attributes:
+        test: Match only the first sponsor in phase order.  It still
+            mutates persistent state.
+        skip_match: Reconcile the assignment summaries without searching.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    test: bool = False
+    skip_match: bool = False
+
+
+class GenerateRunSettings(StrictModel):
+    """The sheet and packet generation command's rememberable run flags.
+
+    Attributes:
+        test: Render only the first unit of work.
+        overwrite: Re-render sheets that already exist.
+        max_workers: The number of rendering workers.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    test: bool = False
+    overwrite: bool = False
+    max_workers: int = 4
+
+
+class RunSettingsView(StrictModel):
+    """One command's effective run settings.
+
+    Attributes:
+        command: The command name.
+        run: The command's run flags.
+        weights: The matcher's tier weights; only for "match".
+        config_path: The configuration file the flags live in.
+        editable: Whether the caller may change them.
+        saved: True when the response follows a successful write.
+    """
+
+    command: str
+    run: dict[str, Any] = Field(default_factory=dict)
+    weights: dict[str, Any] | None = None
+    config_path: str = ""
+    editable: bool = False
+    saved: bool = False
+
+
 __all__ = [
     "ArtifactView",
     "ClarifyDraftView",
@@ -572,14 +1046,36 @@ __all__ = [
     "EntityDetail",
     "EntityListPage",
     "EntityPatch",
+    "GenerateRunSettings",
     "HealthView",
     "IgnoreRequest",
     "JobCreate",
     "JobEventView",
     "JobView",
+    "ManualAssignmentEntry",
+    "ManualAssignmentFamilySummary",
+    "ManualAssignmentListItem",
+    "ManualAssignmentListPage",
+    "ManualAssignmentRequest",
+    "ManualAssignmentResult",
+    "ManualAssignmentSponsorSummary",
+    "ManualHoldListPage",
+    "ManualHoldReleaseRequest",
+    "ManualHoldRequest",
+    "ManualHoldResult",
+    "ManualMatchAutomaticRun",
+    "ManualMatchChildCard",
+    "ManualMatchFamilyCard",
+    "ManualMatchHold",
+    "ManualMatchPoolPage",
+    "ManualMatchSponsor",
+    "ManualMatchSponsorPage",
+    "ManualReleaseRequest",
+    "MatchRunSettings",
     "MeView",
     "NeighbourView",
     "Overview",
+    "RunSettingsView",
     "SeasonView",
     "UserCreate",
     "UserPatch",

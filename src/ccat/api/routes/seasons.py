@@ -75,12 +75,15 @@ def _entity_counts(entity: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     Returns:
         total, by_status (all five), ignored, orphans, raw_missing,
         pending_ai, generated, and assigned counts.  ``raw_missing``
-        is filled by the caller (needs the raw snapshot).
+        is filled by the caller (needs the raw snapshot).  Family counts
+        add ``split``: families with placed children that span two or
+        more sponsors (they have no single ``assigned_sponsor_id``, so
+        they are neither assigned nor unassigned).
     """
     from ccat.audit.store import STATUS_ORDER, as_bool
 
     by_status = {status: 0 for status in STATUS_ORDER}
-    ignored = orphans = pending_ai = generated = assigned = 0
+    ignored = orphans = pending_ai = generated = assigned = split = 0
     for row in rows:
         status = str(row.get("status") or "new")
         by_status[status] = by_status.get(status, 0) + 1
@@ -95,11 +98,14 @@ def _entity_counts(entity: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
                 pending_ai += 1
             if as_bool(row.get("generated_info_sheet")):
                 generated += 1
-        if entity == "family" and row.get("assigned_sponsor_id") is not None:
-            assigned += 1
+        if entity == "family":
+            if row.get("assigned_sponsor_id") is not None:
+                assigned += 1
+            elif row.get("assigned_angel_ids"):
+                split += 1
         if entity == "sponsor" and row.get("assigned_angel_ids"):
             assigned += 1
-    return {
+    counts = {
         "total": len(rows),
         "by_status": by_status,
         "ignored": ignored,
@@ -109,6 +115,9 @@ def _entity_counts(entity: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "generated": generated,
         "assigned": assigned,
     }
+    if entity == "family":
+        counts["split"] = split
+    return counts
 
 
 @router.get("/{season}/overview", response_model=Overview)

@@ -349,12 +349,13 @@ def _match_cmd(
             in place instead of archiving them. The audited-child
             participation gate still applies.
         skip_match: Reconcile assignment-owned columns in the persistent
-            family/sponsor stores without running matching. Existing
-            assignments carry over; prior_assigned_angel_ids propagates to
-            assigned_angel_ids and points the angel's family at that sponsor.
-            Duplicate angel ids across sponsors raise before writes.
-            match_report is untouched.
-            Without skip_match the §8.5 reconciliation stays
+            child, family and sponsor stores without running matching.
+            The child's own assigned_sponsor_id is the assignment,
+            reconciled from prior_assigned_angel_ids; the family and
+            sponsor assignment columns are derived summaries of the
+            children. Existing assignments carry over. Duplicate angel
+            ids across sponsors raise before writes. match_report is
+            untouched. Without skip_match the §8.5 reconciliation stays
             authoritative; prior angels only fill in families the
             matching left unassigned.
     """

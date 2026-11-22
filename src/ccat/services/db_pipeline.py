@@ -29,6 +29,7 @@ import polars as pl
 from ccat.acquire import AcquisitionError, import_table, pull_tables
 from ccat.audit import AuditError
 from ccat.audit.store import (
+    CHILD_ASSIGNMENT_COLUMNS,
     FAMILY_ASSIGNMENT_COLUMNS,
     SPONSOR_ASSIGNMENT_COLUMNS,
     _prepared_groups,
@@ -44,14 +45,14 @@ from ccat.match import (
     MatchError,
     PoolFamily,
     SponsorPlan,
-    _angel_family_map,
     _angel_sort_key,
-    _apply_prior_to_family_rows,
-    _children_per_family,
+    _apply_child_assignments,
+    _apply_summaries,
     _duplicate_pool_warnings,
+    _excluded_family_report,
+    _manual_family_ids,
     _participating_children,
-    _reconcile_family_assignments,
-    _reconcile_sponsor_assignments,
+    _prior_child_assignments,
     match_sponsors,
     reconcile_pre_assignments,
     special_needs_weight,
@@ -75,6 +76,12 @@ from ccat.screening import (
     first_family_children,
 )
 from ccat.services.audit import entity_count_changes
+from ccat.services.db_assignments import (
+    STATE_SPLIT,
+    STATE_UNASSIGNED,
+    assignment_state,
+    group_children_by_family,
+)
 from ccat.services.db_duplications import sync_pending_angel_letters
 from ccat.services.results import (
     AcquireResult,
@@ -805,16 +812,24 @@ def _assert_snapshot_current(
 ) -> None:
     """Fail the match when final rows changed since the snapshot (D8).
 
+    The child store is compared too: the matcher writes child assignments,
+    so a manual write during the compute window must fail the run rather
+    than be silently overwritten by the complete-store write.
+
     Args:
         before: The rows the search ran against.
         current: The rows as they stand before the commit.
 
     Raises:
-        MatchError: When any family/sponsor key or row version differs
+        MatchError: When any family/sponsor/child key or row version differs
             (no silent mixing of assignments across snapshots).
     """
-    for entity in ("family", "sponsor"):
-        key = "family_id" if entity == "family" else "sponsor_id"
+    keys = {
+        "family": "family_id",
+        "sponsor": "sponsor_id",
+        "child": "zite_record_id",
+    }
+    for entity, key in keys.items():
         before_map = _version_map(before[entity], key)
         current_map = _version_map(current[entity], key)
         if before_map != current_map:
@@ -836,20 +851,30 @@ def _match_compute(
     *,
     test: bool,
     skip_match: bool,
+    holds: dict[int, str] | None = None,
 ) -> tuple[
-    list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]] | None
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, str]] | None,
 ]:
     """Run the pure match algorithm over the snapshotted final rows.
+
+    The search and scoring are unchanged; the assignments land on the child
+    rows, and the family and sponsor columns are derived from them with the
+    shared helpers. Manual child assignments and held families leave the
+    automatic pool (D3, D14).
 
     Args:
         cfg: Pipeline configuration.
         stored: Complete final stores keyed by entity.
         test: Match only the first sponsor in phase order.
         skip_match: Reconcile assignments without the search/report.
+        holds: family_id -> "author: note" for the held families.
 
     Returns:
-        The updated non-ignored family/sponsor pool rows and the report
-        rows (None for ``skip_match``).
+        The updated family pool, sponsor pool and complete child store, plus
+        the report rows (None for ``skip_match``).
 
     Raises:
         MatchError: On empty pools or duplicate angel assignments.
@@ -859,6 +884,7 @@ def _match_compute(
         stored["sponsor"],
         stored["child"],
     )
+    child_store = [dict(row) for row in final_child]
     family_pool = sorted(
         (dict(row) for row in eligible_output_rows(stored_family, "family")),
         key=lambda row: row["family_id"],
@@ -873,22 +899,23 @@ def _match_compute(
             " non-ignored rows; run screen to seed persistent finals and"
             " audit to review them"
         )
-    children_per_family = _children_per_family(final_child)
 
     if skip_match:
         if test:
             logger.warning("--test has no effect with --skip-match")
-        _reconcile_sponsor_assignments(sponsor_pool)
-        _reconcile_family_assignments(family_pool, children_per_family)
-        _apply_prior_to_family_rows(
-            family_pool,
-            sponsor_pool,
-            _angel_family_map(final_child),
-            {row["sponsor_id"] for row in sponsor_pool},
+        children = _participating_children(
+            eligible_output_rows(child_store, "child")
         )
-        return family_pool, sponsor_pool, None
+        _apply_child_assignments(
+            child_store,
+            children,
+            prior_assignments=_prior_child_assignments(sponsor_pool, children),
+            clear_auto=False,
+        )
+        _apply_summaries(family_pool, sponsor_pool, child_store)
+        return family_pool, sponsor_pool, child_store, None
 
-    linked_children = eligible_output_rows(final_child, "child")
+    linked_children = eligible_output_rows(child_store, "child")
     children = _participating_children(linked_children)
     logger.info("participating audited children: %d", len(children))
 
@@ -902,6 +929,8 @@ def _match_compute(
     for child in children:
         children_by_family.setdefault(child["family_id"], []).append(child)
 
+    manual_families = _manual_family_ids(child_store)
+    held = holds or {}
     family_by_id = {row["family_id"]: row for row in family_pool}
     pool_families = [
         PoolFamily(
@@ -911,6 +940,8 @@ def _match_compute(
         )
         for family_id, family_children in sorted(children_by_family.items())
         if family_id in family_by_id
+        and family_id not in manual_families
+        and family_id not in held
         and not any(
             child["angel_id"] in pre_assigned_angels
             for child in family_children
@@ -945,6 +976,7 @@ def _match_compute(
                 ),
             }
         )
+    report.extend(_excluded_family_report(family_pool, manual_families, held))
 
     pre_family_assignments: dict[int, int] = {}
     for plan in pre_assigned.values():
@@ -992,52 +1024,22 @@ def _match_compute(
                 }
             )
 
-    for row in family_pool:
-        family_id = row["family_id"]
-        sponsor_id = assignments.get(family_id) or pre_family_assignments.get(
-            family_id
-        )
-        family_children = children_by_family.get(family_id, [])
-        assigned_angels = (
-            ",".join(
-                sorted(
-                    {
-                        child["angel_id"]
-                        for child in family_children
-                        if child.get("angel_id")
-                    },
-                    key=_angel_sort_key,
-                )
-            )
-            if sponsor_id is not None and family_children
-            else None
-        )
-        row["assigned_sponsor_id"] = sponsor_id
-        row["assigned_angel_ids"] = assigned_angels
-        row["num_angels_in_family"] = children_per_family.get(family_id, 0)
-    _apply_prior_to_family_rows(
-        family_pool,
-        sponsor_pool,
-        _angel_family_map(final_child),
-        {row["sponsor_id"] for row in sponsor_pool},
-        unassigned_only=True,
-    )
-    sponsor_plans = {
-        plan.sponsor_id: plan
-        for plan in pool_sponsors + list(pre_assigned.values())
+    prior_assignments = {
+        angel_id: plan.sponsor_id
+        for plan in pre_assigned.values()
+        for angel_id in plan.assigned_angel_ids
     }
-    for row in sponsor_pool:
-        plan = sponsor_plans.get(row["sponsor_id"])
-        angel_ids = (
-            sorted(set(plan.assigned_angel_ids), key=_angel_sort_key)
-            if plan
-            else []
-        )
-        row["assigned_angel_ids"] = ",".join(angel_ids) if angel_ids else None
-        row["num_angels_assigned"] = len(angel_ids)
+    _apply_child_assignments(
+        child_store,
+        children,
+        family_assignments=assignments,
+        prior_assignments=prior_assignments,
+        clear_auto=True,
+    )
+    _apply_summaries(family_pool, sponsor_pool, child_store)
 
     report.extend(_duplicate_pool_warnings(family_pool, sponsor_pool))
-    return family_pool, sponsor_pool, report
+    return family_pool, sponsor_pool, child_store, report
 
 
 async def match(
@@ -1051,9 +1053,10 @@ async def match(
 
     The deterministic search runs against a version snapshot with no
     write transaction open; the snapshot is re-verified before the
-    single commit (D8).  ``skip_match`` reconciles assignments without
-    a report.  The match CSV becomes a tracked artifact written after
-    the DB commit; its failure leaves ``csv_export_ok=False`` (§9.4).
+    single commit (D8), child rows included.  ``skip_match`` reconciles
+    assignments without a report.  The child, family and sponsor stores
+    commit in one transaction; the match CSV becomes a tracked artifact
+    written after it, whose failure leaves ``csv_export_ok=False`` (§9.4).
 
     Args:
         cfg: Pipeline configuration.
@@ -1063,7 +1066,7 @@ async def match(
         cancel: Cooperative cancel check.
 
     Returns:
-        The typed match result.
+        The typed match result, counted at the child grain.
 
     Raises:
         MatchError: On empty pools, duplicate assignments, or a
@@ -1076,17 +1079,30 @@ async def match(
 
     async with _store(cfg, actor) as repo:
         stored = {entity: await repo.final_rows(entity) for entity in _ENTITIES}
+        hold_rows = await repo.family_holds(
+            int(row["family_id"])
+            for row in stored["family"]
+            if row.get("family_id") is not None
+        )
+    holds = {
+        family_id: f"{row['created_by']}: {row['note']}"
+        for family_id, row in hold_rows.items()
+    }
     progress("pools", total=len(stored["child"]))
-    family_pool, sponsor_pool, report = await asyncio.to_thread(
-        _match_compute, cfg, stored, test=test, skip_match=skip_match
+    family_pool, sponsor_pool, child_pool, report = await asyncio.to_thread(
+        _match_compute,
+        cfg,
+        stored,
+        test=test,
+        skip_match=skip_match,
+        holds=holds,
     )
     cancel()
     progress("commit", total=len(report or []))
 
     async with _store(cfg, actor) as repo:
         current = {
-            entity: await repo.final_rows(entity)
-            for entity in ("family", "sponsor")
+            entity: await repo.final_rows(entity) for entity in _ENTITIES
         }
     _assert_snapshot_current(stored, current)
 
@@ -1100,11 +1116,15 @@ async def match(
             "sponsor",
             SPONSOR_ASSIGNMENT_COLUMNS,
         )
+        merged_child = merge_owned_fields(
+            stored["child"], child_pool, "child", CHILD_ASSIGNMENT_COLUMNS
+        )
         commit = await repo.commit_match(
             merged_family,
             merged_sponsor,
             report,
             actor,
+            child_rows=merged_child,
             overwrite=overwrite,
             test_mode=test,
         )
@@ -1139,6 +1159,19 @@ async def match(
 
     families = eligible_output_rows(post["family"], "family")
     sponsors = eligible_output_rows(post["sponsor"], "sponsor")
+    grouped = group_children_by_family(post["child"])
+    matched_families = 0
+    unmatched_family_ids: list[int] = []
+    split_family_ids: list[int] = []
+    for row in families:
+        family_id = int(row["family_id"])
+        state = assignment_state(grouped.get(row["family_id"], []))
+        if state == STATE_SPLIT:
+            split_family_ids.append(family_id)
+        elif state == STATE_UNASSIGNED:
+            unmatched_family_ids.append(family_id)
+        else:
+            matched_families += 1
     angel_ids = {
         angel.strip()
         for row in sponsors
@@ -1147,18 +1180,13 @@ async def match(
         if angel.strip()
     }
     return MatchResult(
-        matched_families=sum(
-            1 for row in families if row.get("assigned_sponsor_id") is not None
-        ),
+        matched_families=matched_families,
         matched_sponsors=sum(
             1 for row in sponsors if row.get("assigned_angel_ids")
         ),
         assigned_angel_ids=sorted(angel_ids, key=_angel_sort_key),
-        unmatched_family_ids=[
-            int(row["family_id"])
-            for row in families
-            if row.get("assigned_sponsor_id") is None
-        ],
+        unmatched_family_ids=sorted(unmatched_family_ids),
+        split_family_ids=sorted(split_family_ids),
         unmatched_sponsor_ids=[
             int(row["sponsor_id"])
             for row in sponsors

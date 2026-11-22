@@ -82,6 +82,7 @@ export async function mountRouted(
       { path: '/clarify', component: placeholder },
       { path: '/clarify/:familyId', component: placeholder },
       { path: '/match', component: placeholder },
+      { path: '/match/manual', component: placeholder },
       { path: '/generate', component: placeholder },
       { path: '/stats', component: placeholder },
       { path: '/screen', component: placeholder },

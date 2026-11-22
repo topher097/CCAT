@@ -417,6 +417,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runs/{command}/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Run Settings
+         * @description Return one command's run settings from the running configuration.
+         *
+         *     Args:
+         *         command: ``match`` or ``generate``.
+         *         request: The current request.
+         *         user: The authenticated identity (drives ``editable``).
+         *
+         *     Returns:
+         *         The command's effective run settings.
+         */
+        get: operations["get_run_settings_api_v1_runs__command__settings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Patch Run Settings
+         * @description Persist one command's run flags to the configuration file.
+         *
+         *     Args:
+         *         command: ``match`` or ``generate``.
+         *         body: The command's run flags.
+         *         request: The current request.
+         *         user: The authenticated editor.
+         *
+         *     Returns:
+         *         The saved run settings.
+         *
+         *     Raises:
+         *         ApiError: 404 for an unknown command; 422 when the body or the
+         *             resulting tree violates the contract; 500 when the file
+         *             cannot be read or written.
+         */
+        patch: operations["patch_run_settings_api_v1_runs__command__settings_patch"];
+        trace?: never;
+    };
     "/api/v1/seasons": {
         parameters: {
             query?: never;
@@ -1346,6 +1392,236 @@ export interface paths {
          *             pipeline job or idempotency-key reuse.
          */
         post: operations["enqueue_api_v1_seasons__season__jobs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/manual-match/assignments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Assignments
+         * @description List the current assignments, derived from the children.
+         *
+         *     Args:
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         page: The 1-based page number.
+         *         page_size: The page size (1-200).
+         *         sponsor_id: Only this sponsor's children.
+         *         source: Only "auto" or "manual" assignments.
+         *         family_id: Only this family's children.
+         *
+         *     Returns:
+         *         The assignment list page.
+         */
+        get: operations["get_assignments_api_v1_seasons__season__manual_match_assignments_get"];
+        put?: never;
+        /**
+         * Post Assignments
+         * @description Assign the selection to a sponsor (coordinator/admin; confirmed).
+         *
+         *     Args:
+         *         body: The assign request.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The outcome, or a 412 body with the fresh row.
+         *
+         *     Raises:
+         *         ApiError: The mapped 404/409/412/422 refusal.
+         */
+        post: operations["post_assignments_api_v1_seasons__season__manual_match_assignments_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/manual-match/holds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Holds
+         * @description List the active family holds, with their notes.
+         *
+         *     Args:
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         page: The 1-based page number.
+         *         page_size: The page size (1-200).
+         *
+         *     Returns:
+         *         The hold page.
+         */
+        get: operations["get_holds_api_v1_seasons__season__manual_match_holds_get"];
+        put?: never;
+        /**
+         * Post Hold
+         * @description Hold a family, with the reason (coordinator/admin).
+         *
+         *     Args:
+         *         body: The hold request (the note is required).
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The new hold.
+         *
+         *     Raises:
+         *         ApiError: The mapped 404/409/422 refusal.
+         */
+        post: operations["post_hold_api_v1_seasons__season__manual_match_holds_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/manual-match/holds/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Release Hold
+         * @description Release a family's hold (coordinator/admin; idempotent).
+         *
+         *     Args:
+         *         body: The release request.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The released hold, or ``held=False`` when there was none.
+         */
+        post: operations["post_release_hold_api_v1_seasons__season__manual_match_holds_release_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/manual-match/pool": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Pool
+         * @description List the filtered family cards of the manual pool.
+         *
+         *     Args:
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         page: The 1-based page number.
+         *         page_size: The page size (1-200).
+         *         q: Free text over family name, email, city, zip, child name.
+         *         assignment: The family assignment state filter.
+         *         child_gender: The child gender filter.
+         *         age_min: The lowest child age at Christmas.
+         *         age_max: The highest child age at Christmas.
+         *         special_needs: Whether a child has stated special needs.
+         *         location: The canonical pickup-location bucket.
+         *         family_size_min: The smallest non-ignored family.
+         *         family_size_max: The largest non-ignored family.
+         *         child_status: The child audit-lifecycle filter.
+         *         hold: Whether the family carries an active hold.
+         *         sponsor_id: Order by fit for this sponsor; drop forbidden families.
+         *
+         *     Returns:
+         *         The pool page.
+         *
+         *     Raises:
+         *         ApiError: 404 for an unknown sponsor.
+         */
+        get: operations["get_pool_api_v1_seasons__season__manual_match_pool_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/manual-match/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Release
+         * @description Release assignments (coordinator/admin; confirmed).
+         *
+         *     Args:
+         *         body: The release request.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The outcome, or a 412 body with the fresh row.
+         *
+         *     Raises:
+         *         ApiError: 422 without confirmation; mapped refusals otherwise.
+         */
+        post: operations["post_release_api_v1_seasons__season__manual_match_release_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/manual-match/sponsors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Sponsors
+         * @description List the sponsor picker with capacity.
+         *
+         *     Args:
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         page: The 1-based page number.
+         *         page_size: The page size (1-200).
+         *         q: Free text over name, organization, and email.
+         *         affiliation: The exact sponsor type filter.
+         *         has_capacity: True for sponsors with room, False for full ones.
+         *
+         *     Returns:
+         *         The sponsor page.
+         */
+        get: operations["get_sponsors_api_v1_seasons__season__manual_match_sponsors_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2346,6 +2622,683 @@ export interface components {
             username: string;
         };
         /**
+         * ManualAssignmentEntry
+         * @description One child's assignment outcome.
+         *
+         *     Attributes:
+         *         zite_record_id: The child's key.
+         *         angel_id: The child's angel letter.
+         *         family_id: The child's family.
+         *         from_sponsor_id: The child's previous sponsor, when it moved.
+         */
+        ManualAssignmentEntry: {
+            /** Angel Id */
+            angel_id?: string | null;
+            /** Family Id */
+            family_id?: number | null;
+            /** From Sponsor Id */
+            from_sponsor_id?: number | null;
+            /** Zite Record Id */
+            zite_record_id: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualAssignmentFamilySummary
+         * @description One family's assignment summary after a write.
+         *
+         *     Attributes:
+         *         family_id: The family's key.
+         *         assigned_sponsor_id: The family's single sponsor, when it has one.
+         *         assigned_sponsor_ids: Every sponsor the family's children hold.
+         *         assigned_count: The number of placed children.
+         *         family_size: The number of non-ignored children.
+         *         assignment_state: "unassigned", "partial", "split", "assigned".
+         *         hold_released: Whether the write released the family's hold.
+         */
+        ManualAssignmentFamilySummary: {
+            /**
+             * Assigned Count
+             * @default 0
+             */
+            assigned_count: number;
+            /** Assigned Sponsor Id */
+            assigned_sponsor_id?: number | null;
+            /** Assigned Sponsor Ids */
+            assigned_sponsor_ids?: number[];
+            /**
+             * Assignment State
+             * @default unassigned
+             */
+            assignment_state: string;
+            /** Family Id */
+            family_id: number;
+            /**
+             * Family Size
+             * @default 0
+             */
+            family_size: number;
+            /**
+             * Hold Released
+             * @default false
+             */
+            hold_released: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualAssignmentListItem
+         * @description One current assignment, as the manual list shows it.
+         *
+         *     Attributes:
+         *         zite_record_id: The child's key.
+         *         angel_id: The child's angel letter.
+         *         family_id: The child's family.
+         *         sponsor_id: The child's sponsor.
+         *         assignment_source: "auto" or "manual".
+         *         last_updated_by: Who last wrote the child row.
+         *         last_updated_at: When the child row was last written.
+         */
+        ManualAssignmentListItem: {
+            /** Angel Id */
+            angel_id?: string | null;
+            /** Assignment Source */
+            assignment_source?: string | null;
+            /** Family Id */
+            family_id?: number | null;
+            /** Last Updated At */
+            last_updated_at?: string | null;
+            /** Last Updated By */
+            last_updated_by?: string | null;
+            /** Sponsor Id */
+            sponsor_id?: number | null;
+            /** Zite Record Id */
+            zite_record_id: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualAssignmentListPage
+         * @description One page of the current assignment list.
+         *
+         *     Attributes:
+         *         items: The assignments.
+         *         total: The number of matching assignments.
+         *         page: The 1-based page number.
+         *         page_size: The page size.
+         */
+        ManualAssignmentListPage: {
+            /** Items */
+            items?: components["schemas"]["ManualAssignmentListItem"][];
+            /**
+             * Page
+             * @default 1
+             */
+            page: number;
+            /**
+             * Page Size
+             * @default 25
+             */
+            page_size: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualAssignmentRequest
+         * @description Assign a selection of children to a sponsor.
+         *
+         *     Attributes:
+         *         sponsor_id: The sponsor the selection goes to.
+         *         family_ids: Whole families to place; the server expands each to
+         *             its eligible children.
+         *         child_ids: Individual children, by ``zite_record_id``.
+         *         expected_versions: The caller's expected row versions, keyed
+         *             ``child:<id>``, ``family:<id>``, ``sponsor:<id>``.
+         *         confirm: Required when a selected child already has a sponsor.
+         *         note: Free text recorded in the audit event.
+         */
+        ManualAssignmentRequest: {
+            /** Child Ids */
+            child_ids?: string[];
+            /**
+             * Confirm
+             * @default false
+             */
+            confirm: boolean;
+            /** Expected Versions */
+            expected_versions?: {
+                [key: string]: number;
+            };
+            /** Family Ids */
+            family_ids?: number[];
+            /** Note */
+            note?: string | null;
+            /** Sponsor Id */
+            sponsor_id: number;
+        };
+        /**
+         * ManualAssignmentResult
+         * @description The outcome of an assign or release request.
+         *
+         *     Attributes:
+         *         assigned: The children newly assigned.
+         *         reassigned: The children moved from another sponsor.
+         *         released: The children released.
+         *         unchanged: The children already held by this sponsor.
+         *         warnings: The advisories; they never block.
+         *         families: The affected families' summaries.
+         *         sponsors: The affected sponsors' summaries.  A release that
+         *             frees children on several sponsors names each of them.
+         *         versions: The new row versions, so the client need not reload.
+         */
+        ManualAssignmentResult: {
+            /** Assigned */
+            assigned?: components["schemas"]["ManualAssignmentEntry"][];
+            /** Families */
+            families?: components["schemas"]["ManualAssignmentFamilySummary"][];
+            /** Reassigned */
+            reassigned?: components["schemas"]["ManualAssignmentEntry"][];
+            /** Released */
+            released?: components["schemas"]["ManualAssignmentEntry"][];
+            /** Sponsors */
+            sponsors?: components["schemas"]["ManualAssignmentSponsorSummary"][];
+            /** Unchanged */
+            unchanged?: components["schemas"]["ManualAssignmentEntry"][];
+            /** Versions */
+            versions?: {
+                [key: string]: number;
+            };
+            /** Warnings */
+            warnings?: string[];
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualAssignmentSponsorSummary
+         * @description One sponsor's assignment summary after a write.
+         *
+         *     Attributes:
+         *         sponsor_id: The sponsor's key.
+         *         assigned_count: The number of children placed with the sponsor.
+         *         remaining: The free capacity; None when uncapped.
+         */
+        ManualAssignmentSponsorSummary: {
+            /**
+             * Assigned Count
+             * @default 0
+             */
+            assigned_count: number;
+            /** Remaining */
+            remaining?: number | null;
+            /** Sponsor Id */
+            sponsor_id: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualHoldListPage
+         * @description One page of the active holds.
+         *
+         *     Attributes:
+         *         items: The active holds.
+         *         total: The number of active holds.
+         *         page: The 1-based page number.
+         *         page_size: The page size.
+         */
+        ManualHoldListPage: {
+            /** Items */
+            items?: components["schemas"]["ManualHoldResult"][];
+            /**
+             * Page
+             * @default 1
+             */
+            page: number;
+            /**
+             * Page Size
+             * @default 25
+             */
+            page_size: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualHoldReleaseRequest
+         * @description Release a family's hold.
+         *
+         *     Attributes:
+         *         family_id: The family whose hold is released.
+         */
+        ManualHoldReleaseRequest: {
+            /** Family Id */
+            family_id: number;
+        };
+        /**
+         * ManualHoldRequest
+         * @description Hold a family, with the reason.
+         *
+         *     Attributes:
+         *         family_id: The family to hold.
+         *         note: Why the family is set aside.  Required, never blank.
+         */
+        ManualHoldRequest: {
+            /** Family Id */
+            family_id: number;
+            /** Note */
+            note: string;
+        };
+        /**
+         * ManualHoldResult
+         * @description One hold's state.
+         *
+         *     Attributes:
+         *         family_id: The family's key.
+         *         held: Whether the family carries an active hold.
+         *         note: The hold's note.
+         *         created_by: Who set it aside.
+         *         created_at: When it was set aside.
+         *         released_at: When it was released.
+         *         released_by: Who released it.
+         */
+        ManualHoldResult: {
+            /** Created At */
+            created_at?: string | null;
+            /** Created By */
+            created_by?: string | null;
+            /** Family Id */
+            family_id: number;
+            /**
+             * Held
+             * @default false
+             */
+            held: boolean;
+            /** Note */
+            note?: string | null;
+            /** Released At */
+            released_at?: string | null;
+            /** Released By */
+            released_by?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualMatchAutomaticRun
+         * @description The automatic matcher's state for the season.
+         *
+         *     Attributes:
+         *         active: Whether a match job is queued or running.
+         *         job_id: The active job's id.
+         *         status: The active job's status.
+         *         started_at: When the active job started.
+         */
+        ManualMatchAutomaticRun: {
+            /**
+             * Active
+             * @default false
+             */
+            active: boolean;
+            /** Job Id */
+            job_id?: number | null;
+            /** Started At */
+            started_at?: string | null;
+            /** Status */
+            status?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualMatchChildCard
+         * @description One child's overview line on a family card.
+         *
+         *     Attributes:
+         *         zite_record_id: The child's key; the assignment grain.
+         *         angel_id: The child's angel letter.
+         *         first_name: The child's first name.
+         *         age_at_xmas: The child's age at Christmas.
+         *         gender: The child's gender.
+         *         special_needs: Whether the child has special needs.
+         *         need_1: First stated need.
+         *         need_2: Second stated need.
+         *         desire_1: First stated want.
+         *         desire_2: Second stated want.
+         *         interests: The child's interests.
+         *         other_notes: Free-text notes.
+         *         favorite_colors: The child's favourite colours.
+         *         sizes: The child's sizes, grouped for display.
+         *         status: The child's audit status.
+         *         assigned_sponsor_id: The child's sponsor, when placed.
+         *         assignment_source: "auto" or "manual".
+         *         generated_info_sheet: Whether a sheet already exists on disk.
+         *         row_version: The child's optimistic-concurrency version.
+         *         selectable: Whether the child may be assigned.
+         *         unselectable_reason: Why the child may not be assigned.
+         */
+        ManualMatchChildCard: {
+            /** Age At Xmas */
+            age_at_xmas?: number | null;
+            /** Angel Id */
+            angel_id?: string | null;
+            /** Assigned Sponsor Id */
+            assigned_sponsor_id?: number | null;
+            /** Assignment Source */
+            assignment_source?: string | null;
+            /** Desire 1 */
+            desire_1?: string | null;
+            /** Desire 2 */
+            desire_2?: string | null;
+            /** Favorite Colors */
+            favorite_colors?: string | null;
+            /** First Name */
+            first_name?: string | null;
+            /** Gender */
+            gender?: string | null;
+            /**
+             * Generated Info Sheet
+             * @default false
+             */
+            generated_info_sheet: boolean;
+            /** Interests */
+            interests?: string | null;
+            /** Need 1 */
+            need_1?: string | null;
+            /** Need 2 */
+            need_2?: string | null;
+            /** Other Notes */
+            other_notes?: string | null;
+            /**
+             * Row Version
+             * @default 0
+             */
+            row_version: number;
+            /**
+             * Selectable
+             * @default true
+             */
+            selectable: boolean;
+            /** Sizes */
+            sizes?: {
+                [key: string]: string | null;
+            };
+            /**
+             * Special Needs
+             * @default false
+             */
+            special_needs: boolean;
+            /** Status */
+            status?: string | null;
+            /** Unselectable Reason */
+            unselectable_reason?: string | null;
+            /** Zite Record Id */
+            zite_record_id: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualMatchFamilyCard
+         * @description One family's card: the header plus its children.
+         *
+         *     Attributes:
+         *         family_id: The family's key.
+         *         row_version: The family's optimistic-concurrency version.
+         *         first_name: The family's first name.
+         *         last_name: The family's last name.
+         *         primary_email: The family's email.
+         *         phone: The family's phone.
+         *         city: The family's city.
+         *         zip_code: The family's zip code.
+         *         state: The family's state.
+         *         gift_pickup_location: The family's pickup location label.
+         *         status: The family's audit status.
+         *         family_size: The number of non-ignored children.
+         *         assigned_count: The number of children with a sponsor.
+         *         assigned_sponsor_ids: The sponsors the family's children hold.
+         *         assignment_state: "unassigned", "partial", "split", "assigned".
+         *         children: The family's children.
+         *         hold: The family's active hold, if any.
+         *         warnings: Family-level advisories.
+         */
+        ManualMatchFamilyCard: {
+            /**
+             * Assigned Count
+             * @default 0
+             */
+            assigned_count: number;
+            /** Assigned Sponsor Ids */
+            assigned_sponsor_ids?: number[];
+            /**
+             * Assignment State
+             * @default unassigned
+             */
+            assignment_state: string;
+            /** Children */
+            children?: components["schemas"]["ManualMatchChildCard"][];
+            /** City */
+            city?: string | null;
+            /** Family Id */
+            family_id: number;
+            /**
+             * Family Size
+             * @default 0
+             */
+            family_size: number;
+            /** First Name */
+            first_name?: string | null;
+            /** Gift Pickup Location */
+            gift_pickup_location?: string | null;
+            hold?: components["schemas"]["ManualMatchHold"];
+            /** Last Name */
+            last_name?: string | null;
+            /** Phone */
+            phone?: string | null;
+            /** Primary Email */
+            primary_email?: string | null;
+            /**
+             * Row Version
+             * @default 0
+             */
+            row_version: number;
+            /** State */
+            state?: string | null;
+            /** Status */
+            status?: string | null;
+            /** Warnings */
+            warnings?: string[];
+            /** Zip Code */
+            zip_code?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualMatchHold
+         * @description One family hold (manual matching).
+         *
+         *     Attributes:
+         *         held: Whether the family carries an active hold.
+         *         note: Why the family was set aside; the reason, verbatim.
+         *         created_by: Who set it aside.
+         *         created_at: When it was set aside.
+         */
+        ManualMatchHold: {
+            /** Created At */
+            created_at?: string | null;
+            /** Created By */
+            created_by?: string | null;
+            /**
+             * Held
+             * @default false
+             */
+            held: boolean;
+            /** Note */
+            note?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualMatchPoolPage
+         * @description One page of the manual-matching pool.
+         *
+         *     Attributes:
+         *         items: The family cards.
+         *         total: The number of matching families.
+         *         page: The 1-based page number.
+         *         page_size: The page size.
+         *         automatic_run: The automatic matcher's state.
+         */
+        ManualMatchPoolPage: {
+            automatic_run?: components["schemas"]["ManualMatchAutomaticRun"];
+            /** Items */
+            items?: components["schemas"]["ManualMatchFamilyCard"][];
+            /**
+             * Page
+             * @default 1
+             */
+            page: number;
+            /**
+             * Page Size
+             * @default 25
+             */
+            page_size: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualMatchSponsor
+         * @description One sponsor in the manual picker.
+         *
+         *     Attributes:
+         *         sponsor_id: The sponsor's key.
+         *         row_version: The sponsor's optimistic-concurrency version.
+         *         display_name: The organization name, or the first and last name.
+         *         email: The sponsor's email.
+         *         phone: The sponsor's phone.
+         *         sponsor_type: "Individual", "Organization", "Walmart", ...
+         *         num_children: How many children the sponsor committed to.
+         *         assigned_count: How many children are placed with the sponsor.
+         *         remaining: The free capacity; None when uncapped.
+         *         age_preference: The sponsor's age preference label.
+         *         gender_preference: The sponsor's gender preference label.
+         *         dropoff_location: The sponsor's drop-off location label.
+         *         pref_age_min: The lowest preferred age.
+         *         pref_age_max: The highest preferred age.
+         *         status: The sponsor's audit status.
+         */
+        ManualMatchSponsor: {
+            /** Age Preference */
+            age_preference?: string | null;
+            /**
+             * Assigned Count
+             * @default 0
+             */
+            assigned_count: number;
+            /**
+             * Display Name
+             * @default
+             */
+            display_name: string;
+            /** Dropoff Location */
+            dropoff_location?: string | null;
+            /** Email */
+            email?: string | null;
+            /** Gender Preference */
+            gender_preference?: string | null;
+            /** Num Children */
+            num_children?: number | null;
+            /** Phone */
+            phone?: string | null;
+            /** Pref Age Max */
+            pref_age_max?: number | null;
+            /** Pref Age Min */
+            pref_age_min?: number | null;
+            /** Remaining */
+            remaining?: number | null;
+            /**
+             * Row Version
+             * @default 0
+             */
+            row_version: number;
+            /** Sponsor Id */
+            sponsor_id: number;
+            /** Sponsor Type */
+            sponsor_type?: string | null;
+            /** Status */
+            status?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualMatchSponsorPage
+         * @description One page of the manual sponsor picker.
+         *
+         *     Attributes:
+         *         items: The sponsors.
+         *         total: The number of matching sponsors.
+         *         page: The 1-based page number.
+         *         page_size: The page size.
+         */
+        ManualMatchSponsorPage: {
+            /** Items */
+            items?: components["schemas"]["ManualMatchSponsor"][];
+            /**
+             * Page
+             * @default 1
+             */
+            page: number;
+            /**
+             * Page Size
+             * @default 25
+             */
+            page_size: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * ManualReleaseRequest
+         * @description Release assignments.
+         *
+         *     Attributes:
+         *         child_ids: Individual children to release.
+         *         family_ids: Families whose assigned children are all released.
+         *         expected_versions: The caller's expected row versions.
+         *         confirm: Required; releasing is destructive.
+         *         note: Free text recorded in the audit event.
+         */
+        ManualReleaseRequest: {
+            /** Child Ids */
+            child_ids?: string[];
+            /**
+             * Confirm
+             * @default false
+             */
+            confirm: boolean;
+            /** Expected Versions */
+            expected_versions?: {
+                [key: string]: number;
+            };
+            /** Family Ids */
+            family_ids?: number[];
+            /** Note */
+            note?: string | null;
+        };
+        /**
          * MeView
          * @description The authenticated identity plus its CSRF token (§8).
          */
@@ -2409,6 +3362,47 @@ export interface components {
             };
             /** Season */
             season: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * RunSettingsView
+         * @description One command's effective run settings.
+         *
+         *     Attributes:
+         *         command: The command name.
+         *         run: The command's run flags.
+         *         weights: The matcher's tier weights; only for "match".
+         *         config_path: The configuration file the flags live in.
+         *         editable: Whether the caller may change them.
+         *         saved: True when the response follows a successful write.
+         */
+        RunSettingsView: {
+            /** Command */
+            command: string;
+            /**
+             * Config Path
+             * @default
+             */
+            config_path: string;
+            /**
+             * Editable
+             * @default false
+             */
+            editable: boolean;
+            /** Run */
+            run?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Saved
+             * @default false
+             */
+            saved: boolean;
+            /** Weights */
+            weights?: {
+                [key: string]: unknown;
+            } | null;
         } & {
             [key: string]: unknown;
         };
@@ -2878,6 +3872,74 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    get_run_settings_api_v1_runs__command__settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                command: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunSettingsView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_run_settings_api_v1_runs__command__settings_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                command: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunSettingsView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -3922,6 +4984,300 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JobView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_assignments_api_v1_seasons__season__manual_match_assignments_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                sponsor_id?: number | null;
+                source?: ("auto" | "manual") | null;
+                family_id?: number | null;
+            };
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManualAssignmentListPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_assignments_api_v1_seasons__season__manual_match_assignments_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManualAssignmentResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_holds_api_v1_seasons__season__manual_match_holds_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+            };
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManualHoldListPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_hold_api_v1_seasons__season__manual_match_holds_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualHoldRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManualHoldResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_release_hold_api_v1_seasons__season__manual_match_holds_release_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualHoldReleaseRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManualHoldResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_pool_api_v1_seasons__season__manual_match_pool_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                q?: string;
+                assignment?: "unassigned" | "partial" | "split" | "assigned" | "any";
+                child_gender?: "any" | "Male" | "Female" | "Non-binary";
+                age_min?: number | null;
+                age_max?: number | null;
+                special_needs?: "any" | "yes" | "no";
+                location?: "any" | "hancock" | "calumet";
+                family_size_min?: number | null;
+                family_size_max?: number | null;
+                child_status?: "any" | "audited" | "in_progress" | "needs_clarification" | "new";
+                hold?: "any" | "held" | "not_held";
+                sponsor_id?: number | null;
+            };
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManualMatchPoolPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_release_api_v1_seasons__season__manual_match_release_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualReleaseRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManualAssignmentResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sponsors_api_v1_seasons__season__manual_match_sponsors_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                q?: string;
+                affiliation?: string | null;
+                has_capacity?: boolean | null;
+            };
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManualMatchSponsorPage"];
                 };
             };
             /** @description Validation Error */

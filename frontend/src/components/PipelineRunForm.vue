@@ -11,7 +11,7 @@ import ConfirmDialog from './ConfirmDialog.vue'
 
 const props = withDefaults(
   defineProps<{
-    command: 'acquire' | 'screen' | 'match' | 'generate' | 'stats'
+    command: 'acquire' | 'screen' | 'generate' | 'stats'
     submitLabel?: string
   }>(),
   { submitLabel: 'Enqueue run' },
@@ -26,7 +26,6 @@ const test = ref(false)
 const overwrite = ref(false)
 const skipEmail = ref(false)
 const skipAddress = ref(false)
-const skipMatch = ref(false)
 const redo = ref('')
 const sponsor = ref('')
 const maxWorkers = ref('')
@@ -40,7 +39,6 @@ const conflictJobId = ref<number | null>(null)
 const SCOPE: Record<string, string> = {
   acquire: 'Replaces the raw sponsor/family/child snapshot from Zite. Final rows are never deleted or rebuilt.',
   screen: 'Prepares raw records, reconciles final rows, runs email/address checks, and AI-screens uncompleted children.',
-  match: 'Matches audited children to sponsors, commits assignments, and writes a match report.',
   generate: 'Renders child info sheets, then builds sponsor packets from completed sheets.',
   stats: 'Builds the statistics report as HTML and PDF artifacts.',
 }
@@ -65,12 +63,6 @@ const options = computed<Record<string, unknown>>(() => {
         skip_email_check: skipEmail.value,
         skip_address_check: skipAddress.value,
         ...(textOf(redo.value).trim() ? { redo: textOf(redo.value).trim() } : {}),
-      }
-    case 'match':
-      return {
-        test: test.value,
-        overwrite: overwrite.value,
-        skip_match: skipMatch.value,
       }
     case 'generate':
       return {
@@ -209,11 +201,6 @@ async function enqueue(): Promise<void> {
       <label v-if="props.command === 'screen'" style="display: block">
         Re-screen one child (record id)
         <input v-model="redo" type="text" name="redo" />
-      </label>
-
-      <label v-if="props.command === 'match'" style="display: block">
-        <input v-model="skipMatch" type="checkbox" name="skip_match" />
-        Skip matching; reconcile existing assignments only
       </label>
 
       <label v-if="props.command === 'generate'" style="display: block">

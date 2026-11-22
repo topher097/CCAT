@@ -351,8 +351,8 @@ def test_audit_cannot_change_assignment_columns(tmp_path: Path) -> None:
     asyncio.run(main())
 
 
-def test_match_cannot_write_child(tmp_path: Path) -> None:
-    """Match writes family/sponsor assignment columns only."""
+def test_match_writes_only_child_assignment_columns(tmp_path: Path) -> None:
+    """Match writes the child's assignment columns, nothing else."""
 
     async def main() -> None:
         cfg = _prepare(tmp_path)
@@ -361,9 +361,41 @@ def test_match_cannot_write_child(tmp_path: Path) -> None:
             async with uow.store(cfg, "migration") as repo:
                 await _seed(repo)
             async with uow.store(cfg, "matcher") as repo:
+                rows = [dict(row) for row in CHILDREN]
+                rows[0]["assigned_sponsor_id"] = 7
+                rows[0]["assignment_source"] = "auto"
+                await repo.commit_finals("match", "child", rows, "matcher")
                 with pytest.raises(OwnershipError):
+                    bad = [dict(row) for row in CHILDREN]
+                    bad[0]["first_name"] = "Changed"
+                    await repo.commit_finals("match", "child", bad, "matcher")
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())
+
+
+def test_manual_match_owns_only_assignment_columns(tmp_path: Path) -> None:
+    """The manual matcher may place a child, and may touch nothing else."""
+
+    async def main() -> None:
+        cfg = _prepare(tmp_path)
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+            async with uow.store(cfg, "coordinator") as repo:
+                rows = [dict(row) for row in CHILDREN]
+                rows[0]["assigned_sponsor_id"] = 7
+                rows[0]["assignment_source"] = "manual"
+                await repo.commit_finals(
+                    "manual_match", "child", rows, "coordinator"
+                )
+                with pytest.raises(OwnershipError):
+                    bad = [dict(row) for row in CHILDREN]
+                    bad[0]["first_name"] = "Changed"
                     await repo.commit_finals(
-                        "match", "child", CHILDREN, "matcher"
+                        "manual_match", "child", bad, "coordinator"
                     )
         finally:
             await uow.engine.dispose()
@@ -1161,7 +1193,7 @@ def test_commit_match_archives_reports_and_applies(tmp_path: Path) -> None:
                         )
                     )
                 ).all()
-                assert len(snapshots) == 4
+                assert len(snapshots) == 7  # 2 families, 2 sponsors, 3 children
                 archived = next(
                     snap
                     for snap in snapshots
