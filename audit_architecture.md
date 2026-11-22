@@ -367,9 +367,11 @@ any other submission:
   `potential_duplicate` is cleared.
 - `ignore` — the member is ignored, through the ordinary audit ignore
   action (`services.db_audit.ignore_entity_db`), so the destructive
-  skeleton reset and the un-ignore reseed are unchanged. On a family
-  group this discards the **whole family**: the group's submissions share
-  one family row.
+  skeleton reset and the un-ignore reseed are unchanged. A member's
+  decision only ever touches a row that member owns **exclusively**: the
+  group's shared family row belongs to the surviving entry, so discarding
+  one registration records the decision and leaves the family row alone
+  (a family is destroyed from the family's own row page, not from here).
 
 Every decision is appended to the `duplication_audit` table (season,
 sheet, group key, member, decision, assigned id, actor, timestamp). The
@@ -409,8 +411,9 @@ stored row is finalized as it stands. The audit then, in order:
    than one surviving entry; …");
 2. closes out the other members — a released member's row status is
    overridden to `new` (it keeps its data and becomes editable again, so
-   the auditor signs it off on its own page), a discarded member stays
-   `ignored` and untouched;
+   the auditor signs it off on its own page), a discarded member's own
+   row stays `ignored` and untouched (a family group's submissions share
+   one row, so a discarded registration has no row of its own);
 3. saves the **surviving entry once**, with the carried values and the
    `audited` status in the same save (`services.db_audit.save_entity_db`),
    so the ownership matrix, the `audited_at` stamp and the status
@@ -442,8 +445,15 @@ overridden group, which the group's own `audited` flag does not record.
 A family submission says nothing about its children: the link is the
 child's `primary_email`, resolved once and then frozen, and `family_id`
 is not editable. Nothing in the data says which of two same-email
-registrations a child belongs to, so the attribution is the auditor's
-decision.
+registrations a child belongs to — except the submission times.
+
+The group page therefore attributes each child to the family entry that
+was **in force when the child was submitted**: the latest group member
+whose submission time is at or before the child's. A child that predates
+every member belongs to the first one (the group's earliest
+registration). The attribution is a hint that turns the split into a
+decision rather than an accident of the email; the auditor still assigns
+the children.
 
 When a family group is split, the group page lists the group's children
 (`GET /duplications/{id}` → `children`) and the auditor assigns each one
