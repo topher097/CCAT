@@ -1562,13 +1562,18 @@ class SeasonStoreRepository:
                 "status": obj.status,
                 "audited_at": _iso(obj.audited_at),
                 "audited_by": obj.audited_by,
+                "entry_key": obj.entry_key,
                 "reconciled_at": _iso(obj.reconciled_at),
             }
             for obj in result
         ]
 
     async def record_duplication_state(
-        self, sheet: str, group_key: str, actor: str
+        self,
+        sheet: str,
+        group_key: str,
+        actor: str,
+        entry_key: str | None = None,
     ) -> None:
         """Record a duplicate group's audited state.
 
@@ -1580,6 +1585,9 @@ class SeasonStoreRepository:
             sheet: The duplicate group's sheet label.
             group_key: The duplicate group's key.
             actor: Requesting user identity.
+            entry_key: The key of the row carrying the group's merged
+                entry; it is recorded so a later read of the group knows
+                which row the adjudication landed on.
         """
         now = datetime.now(UTC)
         async with self._transaction():
@@ -1599,6 +1607,7 @@ class SeasonStoreRepository:
                         status="audited",
                         audited_at=now,
                         audited_by=actor,
+                        entry_key=entry_key,
                         reconciled_at=now,
                     )
                 )
@@ -1606,6 +1615,8 @@ class SeasonStoreRepository:
                 row.status = "audited"
                 row.audited_at = now
                 row.audited_by = actor
+                if entry_key is not None:
+                    row.entry_key = entry_key
                 row.reconciled_at = now
             await self._session.flush()
 

@@ -2884,6 +2884,10 @@ export interface components {
          *         members: The group's submissions.
          *         survivor_count: Members left undecided (candidates to survive).
          *         children: The group's children (family groups).
+         *         current: The group's merged editable fields, folded from every
+         *             submission in the group.
+         *         current_row_key: The key of the row the merged entry is
+         *             written to.
          *         previous: The group before this one in the list's order.
          *         next: The group after this one in the list's order.
          */
@@ -2892,6 +2896,15 @@ export interface components {
             audited_at?: string | null;
             /** Children */
             children?: components["schemas"]["DuplicationChild"][];
+            /** Current */
+            current?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Current Row Key
+             * @default
+             */
+            current_row_key: string;
             /** Entity */
             entity: string;
             /** Group Key */

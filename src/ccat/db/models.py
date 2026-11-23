@@ -600,6 +600,8 @@ class DuplicationState(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     audited_at: OptionalTzDateTime = mapped_column(DateTime(timezone=True))
     audited_by: OptionalStr = mapped_column(Text)
+    #: The key of the row carrying the group's merged entry.
+    entry_key: OptionalStr = mapped_column(Text)
     #: When the affected ``final_*`` rows were last reconciled.
     reconciled_at: OptionalTzDateTime = mapped_column(DateTime(timezone=True))
 

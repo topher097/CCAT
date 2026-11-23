@@ -69,6 +69,7 @@ include = [
     "test/test_manual_match.py",
     "test/test_mail.py",
     "test/test_remediation.py",
+    "test/test_duplication_merge.py",
     "test/test_services.py",
     "test/test_sponsor_claims.py",
 ]

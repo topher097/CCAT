@@ -50,7 +50,7 @@ from ccat.services.db_assignments import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from ccat.config import Config
     from ccat.db.repositories import SeasonStoreRepository
@@ -366,6 +366,8 @@ async def group_detail(
         )
     states = await _states(repo)
     state = states.get((group.sheet, group.group_key))
+    bound = _bound_row(group, classified, finals, family_row, decisions)
+    entry_key = str((state or {}).get("entry_key") or "")
     return {
         "id": group.id,
         "sheet": group.sheet,
@@ -377,6 +379,104 @@ async def group_detail(
         "audited_at": (state or {}).get("audited_at"),
         "members": members,
         "children": _group_children(group, decisions, finals),
+        "current": _merged_current(group.entity, group.members),
+        "current_row_key": entry_key
+        or (
+            str(bound.get(ENTITY_SPECS[group.entity]["key"]))
+            if bound is not None
+            else ""
+        ),
+    }
+
+
+def _bound_row(
+    group: _Group,
+    classified: dict[str, list[dict[str, Any]]],
+    finals: dict[str, list[dict[str, Any]]],
+    family_row: dict[str, Any] | None,
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the row the group's merged entry is written to.
+
+    The surviving entry owns it; while the group is still unresolved the
+    row the screening run flagged as the survivor does.  This is the
+    same rule the detail page binds its Current column to.
+
+    Args:
+        group: The duplicate group.
+        classified: The group's members by state.
+        finals: Every final store.
+        family_row: The group's shared family row, when the group is a
+            family.
+        decisions: The member decisions.
+
+    Returns:
+        The bound row, or None when the group has none.
+    """
+    surviving = classified["surviving"]
+    candidates = (
+        surviving
+        if len(surviving) == 1
+        else [
+            member
+            for member in group.members
+            if as_bool(member.get("survivor"))
+        ]
+    )
+    for member in candidates:
+        row = _member_row(group, member, finals, family_row, decisions)
+        if row is not None:
+            return row
+    return None
+
+
+def _merge_submissions(members: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Fold a group's submissions into one row.
+
+    A field's merged value is the newest member's non-blank value; where
+    the newest member leaves the field blank, an older member's value
+    fills it.  The fold therefore runs newest first and only fills a
+    field that is still empty.
+
+    Args:
+        members: The group's members, oldest first.
+
+    Returns:
+        The merged submission record.
+    """
+    merged: dict[str, Any] = {}
+    for member in reversed(list(members)):
+        for key, value in _raw_record(member).items():
+            if value is None or value == "":
+                continue
+            if merged.get(key) is None:
+                merged[key] = value
+    return merged
+
+
+def _merged_current(
+    entity: str,
+    members: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return the merged editable fields of one group.
+
+    The fold covers the group's submissions; the result is limited to the
+    entity's editable fields, because everything else (linkage,
+    assignment, controls, and the row's own key) belongs to the row the
+    merged entry is written to and must not be merged onto it.
+
+    Args:
+        entity: The group's entity name.
+        members: The group's members, oldest first.
+
+    Returns:
+        The merged editable fields.
+    """
+    editable = set(ENTITY_SPECS[entity]["editable"])
+    return {
+        key: value
+        for key, value in _merge_submissions(members).items()
+        if key in editable
     }
 
 
@@ -518,10 +618,10 @@ async def mark_audited(
     entity = group.entity
     spec = ENTITY_SPECS[entity]
     key_column = spec["key"]
+    supplied = dict(values or {})
+    picked = supplied.pop("sponsor_id", None) if entity == "sponsor" else None
     carried = {
-        field: value
-        for field, value in (values or {}).items()
-        if field != "status"
+        field: value for field, value in supplied.items() if field != "status"
     }
     unknown = sorted(
         set(carried) - set(spec["editable"]) - {"clarification_notes"}
@@ -539,7 +639,36 @@ async def mark_audited(
             f" {surviving[0].get('zite_record_id')!r}"
         )
     surviving_key = str(surviving_row.get(key_column))
-    if carried and surviving_row.get("status") == STATUS_AUDITED:
+    target_row = surviving_row
+    recorded = await _recorded_entry_key(repo, group)
+    if recorded is not None and picked is not None and str(picked) != recorded:
+        raise AuditError(
+            f"this group's entry is already row {recorded}; its sponsor"
+            " number cannot be changed"
+        )
+    if recorded is not None:
+        target_row = _member_row_by_key(
+            group, recorded, finals, family_row, decisions
+        )
+        if target_row is None:
+            raise AuditError(
+                f"this group's recorded entry {recorded!r} has no stored row"
+            )
+    elif picked is not None:
+        target_row = _member_row_by_sponsor_id(
+            group, picked, finals, family_row, decisions
+        )
+        if target_row is None:
+            raise AuditError(
+                f"sponsor id {picked!r} is not one of this group's members"
+            )
+        if as_bool(target_row.get("ignore")):
+            raise AuditError(
+                f"sponsor id {picked!r} is ignored; an ignored row cannot"
+                " become this group's entry"
+            )
+    target_key = str(target_row.get(key_column))
+    if carried and target_row.get("status") == STATUS_AUDITED:
         raise RowAuditedError(
             "the surviving entry is already audited; its values are final"
         )
@@ -551,32 +680,41 @@ async def mark_audited(
             row = _member_row(group, member, finals, family_row, decisions)
             if row is not None:
                 rows.setdefault(str(row.get(key_column)), (row, state))
-    rows[surviving_key] = (surviving_row, "surviving")
+    rows[target_key] = (target_row, "surviving")
+    if surviving_key != target_key:
+        # The auditor moved the merged entry onto another member's row;
+        # the entry it left behind awaits its own audit.
+        rows[surviving_key] = (surviving_row, "released")
     for key, (row, state) in rows.items():
-        if key == surviving_key or as_bool(row.get("ignore")):
+        if key == target_key or as_bool(row.get("ignore")):
             continue
         if state == "released":
             await _override_status(
                 repo, entity, row[key_column], STATUS_NEW, actor
             )
-    if not as_bool(surviving_row.get("ignore")):
+    if not as_bool(target_row.get("ignore")):
         await db_audit.save_entity_db(
             repo,
             cfg,
             entity,
-            surviving_row[key_column],
+            target_row[key_column],
             SavePatch(**carried, status=STATUS_AUDITED),
             actor,
             expected_version=(
                 expected_version
                 if expected_version is not None
-                else surviving_row.get("_row_version")
+                else target_row.get("_row_version")
             ),
         )
     await _refresh_angel_columns(
         repo, actor, [_as_int(row.get("family_id")) for row, _ in rows.values()]
     )
-    await repo.record_duplication_state(group.sheet, group.group_key, actor)
+    await repo.record_duplication_state(
+        group.sheet,
+        group.group_key,
+        actor,
+        entry_key=str(target_row.get(key_column)),
+    )
     detail = await group_detail(repo, wanted_id)
     assert detail is not None
     return detail
@@ -1266,6 +1404,86 @@ def _member_row(
         ),
         None,
     )
+
+
+async def _recorded_entry_key(
+    repo: SeasonStoreRepository,
+    group: _Group,
+) -> str | None:
+    """Return the row key the group's adjudication landed on.
+
+    The group's state row records it, so a later read of the group binds
+    to the row the auditor chose rather than to the surviving member.
+
+    Args:
+        repo: The season-bound repository.
+        group: The duplicate group.
+
+    Returns:
+        The recorded entry key, or None when the group has no audited
+        entry yet.
+    """
+    states = await _states(repo)
+    state = states.get((group.sheet, group.group_key))
+    if state is None:
+        return None
+    key = str(state.get("entry_key") or "")
+    return key or None
+
+
+def _member_row_by_key(
+    group: _Group,
+    key: str,
+    finals: dict[str, list[dict[str, Any]]],
+    family_row: dict[str, Any] | None,
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the group member's row that carries one row key.
+
+    Args:
+        group: The duplicate group.
+        key: The row key.
+        finals: Every final store.
+        family_row: The group's shared family row, when the group is a
+            family.
+        decisions: The member decisions.
+
+    Returns:
+        The member's row, or None when no member carries that key.
+    """
+    key_column = ENTITY_SPECS[group.entity]["key"]
+    for member in group.members:
+        row = _member_row(group, member, finals, family_row, decisions)
+        if row is not None and str(row.get(key_column)) == str(key):
+            return row
+    return None
+
+
+def _member_row_by_sponsor_id(
+    group: _Group,
+    sponsor_id: Any,
+    finals: dict[str, list[dict[str, Any]]],
+    family_row: dict[str, Any] | None,
+    decisions: dict[tuple[str, str, str], dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the group member's row that owns one sponsor id.
+
+    Args:
+        group: The duplicate group.
+        sponsor_id: The sponsor id the auditor chose.
+        finals: Every final store.
+        family_row: The group's shared family row, when the group is a
+            family.
+        decisions: The member decisions.
+
+    Returns:
+        The member's row, or None when no member owns that sponsor id.
+    """
+    for member in group.members:
+        row = _member_row(group, member, finals, family_row, decisions)
+        if row is not None and str(row.get("sponsor_id")) == str(sponsor_id):
+            return row
+    return None
 
 
 def _group_family_row(
