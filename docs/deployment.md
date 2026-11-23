@@ -341,7 +341,40 @@ workbook, which is only a snapshot. See `cutover.md` §7.
   conversion failures, worker restarts.
 - `ccat.log` on the `ccat-logs` volume mirrors stderr for pipeline detail.
 
-## 9. Single-host SQLite constraints
+## 9. The artifacts volume must be writable by the runtime user
+
+The runtime user is uid 10001. `/artifacts`, `/data` and `/logs` are
+named volumes seeded from the image, so a fresh volume already belongs to
+that user.
+
+A volume that was populated by a container running as another user (an
+older image without the non-root `USER`, or a manual `docker exec -u
+root`) keeps directories the runtime user cannot write. The symptom is
+a job that fails mid-run with a permission error on a path under
+`/artifacts` — for example building a packet for one sponsor:
+
+```
+PermissionError: [Errno 13] Permission denied:
+'/artifacts/sponsor_packets/3/sponsor_packet_3.manual.html'
+```
+
+`/readyz` only probes the artifact **root**, so it stays green while an
+older subdirectory is still unwritable. Fix the ownership:
+
+```sh
+docker compose --profile prod stop api worker
+docker compose --profile prod run --rm --no-deps --user root --entrypoint sh api \
+  -c 'chown -R 10001:10001 /artifacts /logs'
+docker compose --profile prod up -d api worker
+curl -fsS https://$CCAT_DOMAIN/api/v1/readyz
+```
+
+Nothing in the volumes is lost by the `chown`; it only restores the
+ownership the image sets. If a packet directory cannot be written, the
+packet build names the directory in its error instead of failing with a
+bare `PermissionError`.
+
+## 10. Single-host SQLite constraints
 
 - **One writer.** Keep exactly one `worker` and one API process; do not add
   uvicorn `--workers` or scale replicas. WAL allows concurrent readers, not
@@ -353,7 +386,7 @@ workbook, which is only a snapshot. See `cutover.md` §7.
 - Scale-out to PostgreSQL is a planned portability follow-up (decision D11),
   not a configuration switch.
 
-## 10. Security checklist (plan §8)
+## 11. Security checklist (plan §8)
 
 - [ ] TLS terminates at Caddy; HSTS/security headers on (in `Caddyfile`).
 - [ ] Session cookie is `HttpOnly`, `SameSite`, `Secure` outside dev auth
@@ -383,7 +416,7 @@ workbook, which is only a snapshot. See `cutover.md` §7.
 - [ ] API/worker/opencode ports unpublished; only Caddy binds host ports.
 - [ ] Logs contain no child/family payloads, emails, addresses or AI prompts.
 
-## 11. LibreOffice dependency
+## 12. LibreOffice dependency
 
 `soffice` renders `.ott` info sheets through py3o; Python wheels alone cannot
 convert documents. The runtime installs `libreoffice-writer` plus
@@ -395,7 +428,7 @@ layout stable). Symptoms of a broken runtime: `InfoSheetError`, empty PDFs, or
 docker compose --profile prod run --rm --entrypoint soffice worker --version
 ```
 
-## 12. Known deviations / follow-ups
+## 13. Known deviations / follow-ups
 
 - `Caddyfile.dev` is an extra dev-only file: Caddy cannot switch from
   `file_server` to a Vite proxy by env var alone.
