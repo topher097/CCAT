@@ -13,7 +13,7 @@ import asyncio
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import polars as pl
 import pytest
@@ -988,13 +988,12 @@ def test_cli_db_import_and_export_dispatch(
         "report_path": None,
         "force": False,
     }
+    unknown_flags: dict[Literal["from", "dry_run"], object] = {
+        "from": "wb.xlsx",
+        "dry_run": True,
+    }
     with pytest.raises(SystemExit, match="unknown flags"):
-        ccat._db_import_cmd(
-            **{
-                "from": "wb.xlsx",
-                "dry_run": True,
-            }
-        )
+        ccat._db_import_cmd(**unknown_flags)
     with pytest.raises(SystemExit, match="unknown flags"):
         ccat._workbook_export_cmd(output="o.xlsx", extra=1)
     with pytest.raises(SystemExit, match="requires --from"):

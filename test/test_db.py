@@ -59,6 +59,8 @@ EXPECTED_TABLES = frozenset(
         "clarification_families",
         "clarification_drafts",
         "family_holds",
+        "sponsor_drafts",
+        "sponsor_send_attempts",
     }
 )
 

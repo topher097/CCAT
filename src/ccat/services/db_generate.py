@@ -37,12 +37,15 @@ templates.  Prompts/files never leave the configured artifact root.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import shutil
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -524,6 +527,62 @@ def _validate_sheets_exist(
         )
 
 
+def _sponsors_missing_sheets(
+    root: Path,
+    cfg: "Config",
+    child_frame: pl.DataFrame,
+    family_frame: pl.DataFrame,
+    sponsor_id: int | None = None,
+) -> "list[dict[str, Any]]":
+    """Find the sponsors whose children are still missing a sheet.
+
+    A packets-only run skips those sponsors instead of failing the whole
+    job: the coordinator asked for packets, and one child whose sheet
+    failed must not stop the other sponsors.
+
+    Args:
+        root: The artifact root.
+        cfg: Pipeline configuration.
+        child_frame: Eligible child frame.
+        family_frame: Eligible family frame.
+        sponsor_id: Restrict to one sponsor.
+
+    Returns:
+        One entry per blocked sponsor: its id and the missing angel ids.
+    """
+    if child_frame.is_empty():
+        return []
+    location_by_family: dict[Any, Any] = {
+        row.get("family_id"): row.get("gift_pickup_location")
+        for row in family_frame.to_dicts()
+    }
+    missing_by_sponsor: dict[int, list[str]] = {}
+    for row in child_frame.to_dicts():
+        owner = child_sponsor(row)
+        if owner is None or not row.get("angel_id"):
+            continue
+        if sponsor_id is not None and owner != sponsor_id:
+            continue
+        sheet = _sheet_path(
+            root,
+            cfg,
+            str(row["angel_id"]),
+            canonical_location(
+                location_by_family.get(row.get("family_id")),
+                cfg.location_groups,
+            )
+            or "unknown",
+        )
+        if not sheet.is_file():
+            missing_by_sponsor.setdefault(int(owner), []).append(
+                str(row["angel_id"])
+            )
+    return [
+        {"sponsor_id": owner, "angel_ids": sorted(angel_ids)}
+        for owner, angel_ids in sorted(missing_by_sponsor.items())
+    ]
+
+
 def _sponsors_with_angels(
     cfg: "Config",
     sponsor_frame: pl.DataFrame,
@@ -598,6 +657,7 @@ def _sponsors_with_angels(
         angels = [
             {
                 "angel_id": child["angel_id"],
+                "child_id": child.get("zite_record_id"),
                 "family_id": child.get("family_id"),
                 "gender": child.get("gender"),
                 "age": child.get("age_at_xmas"),
@@ -669,9 +729,116 @@ def _merge_sheets_pdf(
     pdf_path = packet_dir / (
         f"Sponsor {sponsor_id} - Child Information {cfg.season}.pdf"
     )
-    with pdf_path.open("wb") as output:
+    temporary = pdf_path.with_name(pdf_path.name + ".tmp")
+    with temporary.open("wb") as output:
         writer.write(output)
+    os.replace(temporary, pdf_path)
     return pdf_path, missing
+
+
+def _sha256_file(path: Path) -> str:
+    """Hash one file's bytes.
+
+    Args:
+        path: The file to hash.
+
+    Returns:
+        The hex sha256 digest.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_atomic(path: Path, payload: bytes) -> None:
+    """Write a file through a temporary name, then rename it into place.
+
+    A reader never sees a half-written file, and a crash leaves the
+    previous file intact.
+
+    Args:
+        path: The destination.
+        payload: The bytes to write.
+    """
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(payload)
+    os.replace(temporary, path)
+
+
+def _copy_atomic(source: Path, destination: Path) -> None:
+    """Copy a file through a temporary name, then rename it into place.
+
+    Args:
+        source: The file to copy.
+        destination: The destination path.
+    """
+    temporary = destination.with_name(destination.name + ".tmp")
+    shutil.copy2(source, temporary)
+    os.replace(temporary, destination)
+
+
+def _packet_manifest(
+    cfg: "Config",
+    packet: "dict[str, Any]",
+    subject: str,
+    items: "list[dict[str, Any]]",
+) -> dict[str, Any]:
+    """Describe one packet build.
+
+    The manifest is what makes the email and its attachments agree: it
+    names the children the packet was built from, the files it contains
+    with their hashes, and a fingerprint over both.  The dispatch page
+    renders the draft from it and refuses to send when the current
+    assignment or the files no longer match.
+
+    Args:
+        cfg: Pipeline configuration.
+        packet: The packet payload.
+        subject: The subject the email carries.
+        items: The packet's files with their roles and hashes.
+
+    Returns:
+        The manifest payload.
+    """
+    children = [
+        {"child_id": angel.get("child_id"), "angel_id": angel.get("angel_id")}
+        for angel in packet["angels"]
+    ]
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "sponsor_id": packet["sponsor_id"],
+                "children": children,
+                "items": {item["role"]: item["sha256"] for item in items},
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "build_id": uuid.uuid4().hex,
+        "sponsor_id": packet["sponsor_id"],
+        "season": cfg.season,
+        "subject": subject,
+        "sponsor": {
+            "first_name": packet.get("first_name") or "",
+            "email": packet.get("email"),
+        },
+        "children": children,
+        "angels": [
+            {
+                "angel_id": angel.get("angel_id"),
+                "child_id": angel.get("child_id"),
+                "gender": angel.get("gender"),
+                "age": angel.get("age"),
+                "dropoff": angel.get("dropoff"),
+            }
+            for angel in packet["angels"]
+        ],
+        "items": items,
+        "fingerprint": fingerprint,
+    }
 
 
 def _build_packets(
@@ -679,14 +846,17 @@ def _build_packets(
     cfg: "Config",
     packets: "list[dict[str, Any]]",
     overwrite: bool,
-) -> "tuple[list[tuple[Path, str]], int]":
+) -> "tuple[list[tuple[Path, str, dict[str, Any]]], int]":
     """Write each sponsor's packet files under the artifact root (§13b).
 
-    Skip predicate is the legacy one (HTML + combined PDF exist; the
-    instructions copy is unchecked).  ``overwrite`` preserves manual
-    email edits by copying the existing HTML to ``<stem>.manual.html``
-    first (D20 feasible retention) and registering it as a
-    ``sponsor_packet_manual`` artifact.
+    Every packet gets a ``manifest.json`` naming its children and its
+    files with their hashes, so the email draft and the attached PDFs
+    always describe the same children.  The skip predicate requires that
+    manifest: a packet built without one is rebuilt.
+
+    ``overwrite`` preserves manual email edits by copying the existing
+    HTML to ``<stem>.manual.html`` first (D20 feasible retention) and
+    registering it as a ``sponsor_packet_manual`` artifact.
 
     Args:
         root: The artifact root.
@@ -695,7 +865,7 @@ def _build_packets(
         overwrite: Regenerate packet files that already exist.
 
     Returns:
-        A tuple of (files to register as ``(path, kind)``, count of
+        A tuple of (files to register as ``(path, kind, meta)``, count of
         sponsors skipped because their packet already existed).
     """
     spec = cfg.sponsor_packets
@@ -715,7 +885,7 @@ def _build_packets(
             " written without the instruction copy",
             instructions,
         )
-    files: list[tuple[Path, str]] = []
+    files: list[tuple[Path, str, dict[str, Any]]] = []
     skipped = 0
     for packet in packets:
         packet_dir = root / "sponsor_packets" / str(packet["sponsor_id"])
@@ -727,7 +897,13 @@ def _build_packets(
             f" {cfg.season}.pdf"
         )
         sheets_pdf_path = packet_dir / sheets_pdf_name
-        if not overwrite and html_path.exists() and sheets_pdf_path.exists():
+        manifest_path = packet_dir / "manifest.json"
+        complete = (
+            html_path.exists()
+            and sheets_pdf_path.exists()
+            and manifest_path.exists()
+        )
+        if not overwrite and complete:
             logger.info(
                 "packet for sponsor %s exists; skipping",
                 packet["sponsor_id"],
@@ -735,15 +911,25 @@ def _build_packets(
             skipped += 1
             continue
         packet_dir.mkdir(parents=True, exist_ok=True)
-        if overwrite and html_path.exists():
+        if html_path.exists():
             manual = packet_dir / f"{html_path.stem}.manual.html"
             shutil.copy2(html_path, manual)
-            files.append((manual, "sponsor_packet_manual"))
+            files.append(
+                (
+                    manual,
+                    "sponsor_packet_manual",
+                    {
+                        "sponsor_id": packet["sponsor_id"],
+                        "role": "email_html_manual",
+                    },
+                )
+            )
         subject = environment.from_string(_SUBJECT_TEMPLATE).render(
             season=cfg.season,
             angel_count=len(packet["angels"]),
         )
-        html_path.write_text(
+        _write_atomic(
+            html_path,
             template.render(
                 season=cfg.season,
                 sponsor=packet,
@@ -753,31 +939,93 @@ def _build_packets(
                 instructions_filename=instructions.name,
                 child_information_filename=sheets_pdf_name,
                 bcc_emails=spec.bcc_emails,
-            ),
-            encoding="utf-8",
+                manual=True,
+                note="",
+            ).encode("utf-8"),
         )
-        files.append((html_path, "sponsor_packet"))
         logger.info(
             "wrote email draft %s for sponsor %s (%d angel(s))",
             html_path,
             packet["sponsor_id"],
             len(packet["angels"]),
         )
+        items: list[dict[str, Any]] = [
+            {
+                "role": "email_html",
+                "filename": html_path.name,
+                "sha256": _sha256_file(html_path),
+                "size_bytes": html_path.stat().st_size,
+            }
+        ]
         if instructions.is_file():
             copy = packet_dir / instructions.name
-            shutil.copy2(instructions, copy)
-            files.append((copy, "sponsor_instructions"))
+            _copy_atomic(instructions, copy)
+            items.append(
+                {
+                    "role": "instructions_pdf",
+                    "filename": copy.name,
+                    "sha256": _sha256_file(copy),
+                    "size_bytes": copy.stat().st_size,
+                }
+            )
             logger.info("copied sponsor instructions into %s", packet_dir.name)
         pdf_path, missing = _merge_sheets_pdf(
             root, cfg, packet_dir, packet["sponsor_id"], packet["angels"]
         )
-        files.append((pdf_path, "sponsor_packet"))
+        items.append(
+            {
+                "role": "packet_pdf",
+                "filename": pdf_path.name,
+                "sha256": _sha256_file(pdf_path),
+                "size_bytes": pdf_path.stat().st_size,
+                "child_ids": [
+                    angel.get("child_id") for angel in packet["angels"]
+                ],
+                "angel_ids": [
+                    angel.get("angel_id") for angel in packet["angels"]
+                ],
+            }
+        )
         if missing:
             logger.warning(
                 "child information PDF %s written without sheet(s) for %s",
                 pdf_path,
                 missing,
             )
+        manifest = _packet_manifest(cfg, packet, subject, items)
+        _write_atomic(
+            manifest_path,
+            json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"),
+        )
+        build_id = str(manifest["build_id"])
+        for item in items:
+            path = packet_dir / str(item["filename"])
+            files.append(
+                (
+                    path,
+                    "sponsor_packet"
+                    if item["role"] != "instructions_pdf"
+                    else "sponsor_instructions",
+                    {
+                        "sponsor_id": packet["sponsor_id"],
+                        "role": item["role"],
+                        "build_id": build_id,
+                        "sha256": item["sha256"],
+                    },
+                )
+            )
+        files.append(
+            (
+                manifest_path,
+                "sponsor_packet",
+                {
+                    "sponsor_id": packet["sponsor_id"],
+                    "role": "manifest",
+                    "build_id": build_id,
+                    "sha256": _sha256_file(manifest_path),
+                },
+            )
+        )
     return files, skipped
 
 
@@ -839,7 +1087,8 @@ async def generate(
         cfg: Pipeline configuration.
         actor: Requesting user/job identity.
         options: ``test`` / ``overwrite`` / ``sponsor`` /
-            ``max_workers``.
+            ``max_workers`` / ``only`` ("sheets", "packets", "both") /
+            ``child`` (one child's record id).
         progress: Progress reporter ``(phase, completed, failed,
             total)``.
         cancel: Cooperative cancel check; raises
@@ -862,6 +1111,21 @@ async def generate(
     overwrite = bool(options.get("overwrite"))
     sponsor_raw = options.get("sponsor")
     sponsor = int(sponsor_raw) if sponsor_raw is not None else None
+    only = str(options.get("only") or "both").strip().lower()
+    if only not in ("sheets", "packets", "both"):
+        raise InfoSheetError(
+            f"only must be sheets, packets, or both, got {only!r}"
+        )
+    child_raw = options.get("child")
+    child = str(child_raw).strip() if child_raw is not None else ""
+    if child and only == "packets":
+        raise InfoSheetError(
+            'a child scope generates info sheets only; use only="sheets"'
+        )
+    if child and sponsor is not None:
+        raise InfoSheetError(
+            "a child scope cannot be combined with a sponsor scope"
+        )
     spec = cfg.info_sheet
     workers = (
         spec.max_workers
@@ -889,9 +1153,33 @@ async def generate(
         enriched = await asyncio.to_thread(
             _enrich, child_rows, family_rows, sponsor_rows, cfg
         )
-        pending, _skipped_unsponsored = _pending_rows(
-            enriched, overwrite=overwrite
-        )
+        if child:
+            scoped = enriched.filter(pl.col("zite_record_id") == child)
+            if scoped.is_empty():
+                by_angel = enriched.filter(pl.col("angel_id") == child)
+                if by_angel.height > 1:
+                    raise InfoSheetError(
+                        f"angel id {child!r} matches {by_angel.height} children;"
+                        " use the child's record id instead"
+                    )
+                scoped = by_angel
+            if scoped.is_empty():
+                raise InfoSheetError(f"no eligible child matches {child!r}")
+            # The scope regenerates its sheet even when the marker is set.
+            pending, _skipped_unsponsored = _pending_rows(
+                scoped, overwrite=True
+            )
+            if pending.is_empty():
+                raise InfoSheetError(
+                    f"child {child!r} cannot get an info sheet: it needs an"
+                    " audited status and an assigned sponsor"
+                )
+        elif only == "packets":
+            pending = enriched.head(0)
+        else:
+            pending, _skipped_unsponsored = _pending_rows(
+                enriched, overwrite=overwrite
+            )
         pending = _one_row_per_angel(pending)
         if sponsor is not None:
             pending = pending.filter(pl.col("assigned_sponsor_id") == sponsor)
@@ -1021,18 +1309,27 @@ async def generate(
 
         packets_built = 0
         packets_skipped = 0
+        packets_blocked: list[dict[str, Any]] = []
         if test:
             logger.info("test mode: skipping sponsor packet generation")
+        elif only == "sheets":
+            logger.info("sheets-only run: skipping sponsor packet generation")
         else:
             progress("packets")
             root = artifact_root(cfg)
             child_frame = _eligible_frame("child", child_rows)
             family_frame = _eligible_frame("family", family_rows)
             sponsor_frame = _eligible_frame("sponsor", sponsor_rows)
-            # D18: exact legacy validation scope, run before building.
-            _validate_sheets_exist(
-                root, cfg, child_frame, family_frame, sponsor_id=sponsor
-            )
+            if only == "packets":
+                # A packets-only run skips the sponsors it cannot build.
+                packets_blocked = _sponsors_missing_sheets(
+                    root, cfg, child_frame, family_frame, sponsor
+                )
+            else:
+                # D18: exact legacy validation scope, run before building.
+                _validate_sheets_exist(
+                    root, cfg, child_frame, family_frame, sponsor_id=sponsor
+                )
             packets = _sponsors_with_angels(
                 cfg,
                 sponsor_frame,
@@ -1040,13 +1337,30 @@ async def generate(
                 family_frame,
                 sponsor_id=sponsor,
             )
+            if packets_blocked:
+                blocked_ids = {
+                    int(item["sponsor_id"]) for item in packets_blocked
+                }
+                packets = [
+                    packet
+                    for packet in packets
+                    if int(packet["sponsor_id"]) not in blocked_ids
+                ]
+                for item in packets_blocked:
+                    logger.warning(
+                        "skipping sponsor %s: no info sheet for angel(s) %s",
+                        item["sponsor_id"],
+                        item["angel_ids"],
+                    )
             files, packets_skipped = await asyncio.to_thread(
                 _build_packets, root, cfg, packets, overwrite
             )
             packets_built = len(packets) - packets_skipped
             cancel()
-            for path, kind in files:
-                await register_file(repo, kind, path, actor, meta={}, root=root)
+            for path, kind, meta in files:
+                await register_file(
+                    repo, kind, path, actor, meta=meta, root=root
+                )
             progress("packets", completed=packets_built, total=len(packets))
 
     logger.info(
@@ -1058,6 +1372,7 @@ async def generate(
         sheets_skipped=skipped_stems,
         packets_built=packets_built,
         packets_skipped=packets_skipped,
+        packets_blocked=packets_blocked,
         info_sheet_dir=str(artifact_root(cfg) / "child_sheets"),
         packets_dir=str(artifact_root(cfg) / "sponsor_packets"),
     )

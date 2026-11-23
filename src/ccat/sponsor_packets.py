@@ -392,6 +392,8 @@ def build_packets(
                 instructions_filename=instructions.name,
                 child_information_filename=sheets_pdf_name,
                 bcc_emails=spec.bcc_emails,
+                manual=True,
+                note="",
             ),
             encoding="utf-8",
         )

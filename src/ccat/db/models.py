@@ -998,3 +998,100 @@ class ClarificationDraft(Base):
     generated_by: OptionalStr = mapped_column(Text)
     edited_by: OptionalStr = mapped_column(Text)
     edited_at: OptionalTzDateTime = mapped_column(DateTime(timezone=True))
+
+
+class SponsorDraft(Base):
+    """The current editable sponsor packet email (dispatch page).
+
+    One row per ``(season_id, sponsor_id)``: the subject, the generated
+    body, the coordinator's plain-text note, the recipient, the BCC list
+    and the attachments the body was rendered against.  ``version``
+    carries optimistic concurrency for the popup's If-Match updates.
+
+    The row holds no delivery state.  A send attempt owns that, so there
+    is one source of truth for "did it go out".
+    """
+
+    __tablename__ = "sponsor_drafts"
+    __table_args__ = (
+        Index("ix_sponsor_drafts_season_sponsor", "season_id", "sponsor_id"),
+    )
+
+    season_id: Mapped[int] = mapped_column(
+        ForeignKey("seasons.id"), primary_key=True
+    )
+    sponsor_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    subject: OptionalStr = mapped_column(Text)
+    body_html: OptionalStr = mapped_column(Text)
+    note: OptionalStr = mapped_column(Text)
+    to_email: OptionalStr = mapped_column(Text)
+    #: JSON list of archive addresses copied from the config at draft time.
+    bcc_emails: OptionalJson = mapped_column(JSON)
+    #: JSON list of {artifact_id, role, filename, content_type,
+    #: size_bytes, sha256}.
+    attachments: OptionalJson = mapped_column(JSON)
+    #: The packet build this draft was rendered from.
+    build_id: OptionalStr = mapped_column(Text)
+    created_by: OptionalStr = mapped_column(Text)
+    created_at: OptionalTzDateTime = mapped_column(DateTime(timezone=True))
+    edited_by: OptionalStr = mapped_column(Text)
+    edited_at: OptionalTzDateTime = mapped_column(DateTime(timezone=True))
+
+
+class SponsorSendAttempt(Base):
+    """One attempt to mail a sponsor packet email (dispatch page).
+
+    The state machine is ``sending`` -> ``sent`` | ``failed`` |
+    ``unknown``.  ``failed`` means the provider refused the message and
+    a retry is safe; ``unknown`` means the provider's answer does not
+    say whether it was accepted, and it is never retried automatically.
+
+    The content snapshot (subject, body, recipients, attachment hashes)
+    is written before the send and never rewritten, so the record of
+    what left the building survives later edits to the draft.
+    """
+
+    __tablename__ = "sponsor_send_attempts"
+    __table_args__ = (
+        Index(
+            "ix_sponsor_send_attempts_season_sponsor",
+            "season_id",
+            "sponsor_id",
+        ),
+        Index(
+            "uq_sponsor_send_attempts_active",
+            "season_id",
+            "sponsor_id",
+            unique=True,
+            sqlite_where=text("state = 'sending'"),
+            postgresql_where=text("state = 'sending'"),
+        ),
+    )
+
+    #: The attempt id (a uuid) doubles as the row's primary key.
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    season_id: Mapped[int] = mapped_column(
+        ForeignKey("seasons.id"), nullable=False
+    )
+    sponsor_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    draft_version: OptionalInt = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'sending'")
+    )
+    #: The RFC 5322 Message-ID, generated before the send.
+    message_id: OptionalStr = mapped_column(Text)
+    #: The provider's own id, known only after an accepted send.
+    provider_message_id: OptionalStr = mapped_column(Text)
+    subject: OptionalStr = mapped_column(Text)
+    body_html: OptionalStr = mapped_column(Text)
+    to_email: OptionalStr = mapped_column(Text)
+    bcc_emails: OptionalJson = mapped_column(JSON)
+    attachments: OptionalJson = mapped_column(JSON)
+    actor: OptionalStr = mapped_column(Text)
+    user_id: OptionalInt = mapped_column(Integer)
+    started_at: OptionalTzDateTime = mapped_column(DateTime(timezone=True))
+    finished_at: OptionalTzDateTime = mapped_column(DateTime(timezone=True))
+    error: OptionalStr = mapped_column(Text)

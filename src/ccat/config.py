@@ -448,6 +448,38 @@ class SponsorPacketSpec(BaseModel):
     bcc_emails: list[str] = []
 
 
+class DispatchSpec(BaseModel):
+    """Sponsor packet email dispatch settings (dispatch page).
+
+    Attributes:
+        enabled: Whether the page may send.  Off by default, so a
+            deployment without an authorized mail account starts fine and
+            the page says the mail is not configured.
+        sender_email: The From address.  It must be the authorized
+            account or a verified send-as alias.
+        sender_name: The From display name sponsors see.
+        reply_to: The Reply-To address, when it differs from From.
+        client_file: The OAuth client secret file.  The existing Drive
+            client is reused; only the token is separate.
+        token_file: The Gmail token file, carrying the ``gmail.send``
+            scope.
+        timeout_seconds: Per-request timeout for the mail provider.
+        max_attachment_bytes: The largest total attachment size one
+            message may carry.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    sender_email: str = ""
+    sender_name: str = "The Copper Country Angel Tree Team"
+    reply_to: str = ""
+    client_file: str = "ccat_google_credentials.json"
+    token_file: str = "ccat_google_gmail_token.json"
+    timeout_seconds: float = 30.0
+    max_attachment_bytes: int = 25_000_000
+
+
 class StorageSpec(BaseModel):
     """Active season-storage selection (refactor decision D12).
 
@@ -595,6 +627,7 @@ class Config(BaseModel):
     info_sheet: InfoSheetSpec
     report: ReportSpec = ReportSpec()
     sponsor_packets: SponsorPacketSpec = SponsorPacketSpec()
+    dispatch: DispatchSpec = DispatchSpec()
     generate: GenerateSpec = GenerateSpec()
     storage: StorageSpec = StorageSpec()
     api: ApiSpec = ApiSpec()

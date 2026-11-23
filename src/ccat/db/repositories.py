@@ -103,6 +103,8 @@ from ccat.db.models import (
     ScreeningRun,
     Season,
     SecurityAuditEvent,
+    SponsorDraft,
+    SponsorSendAttempt,
 )
 from ccat.domain import AGE_PREF_BOUNDS, compute_age_at_xmas
 
@@ -140,6 +142,7 @@ WRITABLE_ENTITIES: dict[str, frozenset[str]] = {
     "match": frozenset({"child", "family", "sponsor"}),
     "manual_match": frozenset({"child", "family", "sponsor"}),
     "generate": frozenset({"child"}),
+    "dispatch": frozenset({"sponsor"}),
     "migrate": frozenset({"child", "family", "sponsor"}),
     "duplication": frozenset({"child", "family", "sponsor"}),
 }
@@ -191,6 +194,9 @@ ALLOWED_CHANGES: dict[str, dict[str, frozenset[str] | None]] = {
         ),
     },
     "generate": {"child": frozenset(CHILD_MODULE_COLUMNS)},
+    # The dispatch page stamps a sponsor once its packet went out.  It
+    # writes that stamp and nothing else.
+    "dispatch": {"sponsor": frozenset(SPONSOR_DISPATCH_COLUMNS)},
     "acquire": {},
     # The duplication audit resolves a detected duplicate group: it
     # gives a pending duplicate child its own angel letter (or keeps
@@ -737,6 +743,37 @@ class SeasonStoreRepository:
             "status": str(job.status),
             "started_at": _iso(job.started_at),
         }
+
+    async def active_pipeline_jobs(self) -> list[dict[str, Any]]:
+        """Return the season's active pipeline-class jobs.
+
+        The dispatch page refuses to send while one of them runs: a
+        match run can move a sponsor's children under the send, and a
+        generate run can replace the attachments.
+
+        Returns:
+            One dict per active job, oldest first.
+        """
+        from ccat.jobs.registry import ACTIVE_STATUSES, PIPELINE_CLASS
+
+        jobs = await self._session.scalars(
+            select(Job)
+            .where(
+                Job.season_id == self._season_id,
+                Job.job_type.in_(PIPELINE_CLASS),
+                Job.status.in_(ACTIVE_STATUSES),
+            )
+            .order_by(Job.id)
+        )
+        return [
+            {
+                "job_id": int(job.id),
+                "job_type": str(job.job_type),
+                "status": str(job.status),
+                "started_at": _iso(job.started_at),
+            }
+            for job in jobs
+        ]
 
     async def family_hold(self, family_id: int) -> dict[str, Any] | None:
         """Return the active hold for one family, if any.
@@ -2350,6 +2387,366 @@ class SeasonStoreRepository:
         ) is not None:
             names.append("match_report")
         return names
+
+    # ------------------------------------------------------------------
+    # Dispatch: sponsor packet drafts and send attempts.
+
+    async def sponsor_draft(self, sponsor_id: int) -> dict[str, Any] | None:
+        """Read one sponsor's current packet email draft.
+
+        Args:
+            sponsor_id: The sponsor's key.
+
+        Returns:
+            The draft dict, or None when the sponsor has no draft.
+        """
+        draft = await self._session.scalar(
+            select(SponsorDraft).where(
+                SponsorDraft.season_id == self._season_id,
+                SponsorDraft.sponsor_id == sponsor_id,
+            )
+        )
+        return _sponsor_draft_dict(draft) if draft is not None else None
+
+    async def upsert_sponsor_draft(
+        self,
+        sponsor_id: int,
+        *,
+        subject: str,
+        body_html: str,
+        note: str | None,
+        to_email: str,
+        bcc_emails: list[str],
+        attachments: list[dict[str, Any]],
+        build_id: str,
+        actor: str,
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Create or replace one sponsor's packet email draft.
+
+        Args:
+            sponsor_id: The sponsor's key.
+            subject: The email subject.
+            body_html: The rendered body.
+            note: The coordinator's plain-text addition.
+            to_email: The recipient the draft was drawn for.
+            bcc_emails: The archive addresses.
+            attachments: The files the body names, with their hashes.
+            build_id: The packet build the body was rendered from.
+            actor: Attribution identity.
+            expected_version: When given, the draft's current version;
+                a mismatch raises :class:`StaleRowVersionError`.
+
+        Returns:
+            The stored draft dict.
+
+        Raises:
+            StaleRowVersionError: When the submitted version is stale.
+        """
+        async with self._transaction():
+            draft = await self._session.scalar(
+                select(SponsorDraft).where(
+                    SponsorDraft.season_id == self._season_id,
+                    SponsorDraft.sponsor_id == sponsor_id,
+                )
+            )
+            now = datetime.now(UTC)
+            if draft is None:
+                if expected_version is not None:
+                    raise StaleRowVersionError("sponsor", sponsor_id, 0)
+                draft = SponsorDraft(
+                    season_id=self._season_id,
+                    sponsor_id=sponsor_id,
+                    version=1,
+                    created_by=actor,
+                    created_at=now,
+                )
+                self._session.add(draft)
+            else:
+                if (
+                    expected_version is not None
+                    and draft.version != expected_version
+                ):
+                    raise StaleRowVersionError(
+                        "sponsor", sponsor_id, draft.version
+                    )
+                draft.version += 1
+            draft.subject = subject
+            draft.body_html = body_html
+            draft.note = note
+            draft.to_email = to_email
+            draft.bcc_emails = list(bcc_emails)
+            draft.attachments = [dict(item) for item in attachments]
+            draft.build_id = build_id
+            draft.edited_by = actor
+            draft.edited_at = now
+            await self._session.flush()
+        return _sponsor_draft_dict(draft)
+
+    async def sponsor_send_attempts(
+        self, sponsor_id: int, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Read one sponsor's send attempts, newest first.
+
+        Args:
+            sponsor_id: The sponsor's key.
+            limit: The maximum number of attempts to return.
+
+        Returns:
+            The attempt dicts.
+        """
+        rows = await self._session.scalars(
+            select(SponsorSendAttempt)
+            .where(
+                SponsorSendAttempt.season_id == self._season_id,
+                SponsorSendAttempt.sponsor_id == sponsor_id,
+            )
+            .order_by(SponsorSendAttempt.started_at.desc())
+            .limit(limit)
+        )
+        return [_attempt_dict(row) for row in rows]
+
+    async def commit_dispatch_attempt(
+        self,
+        sponsor_id: int,
+        *,
+        subject: str,
+        body_html: str,
+        note: str | None,
+        expected_version: int,
+        attempt_id: str,
+        message_id: str,
+        to_email: str,
+        bcc_emails: list[str],
+        attachments: list[dict[str, Any]],
+        actor: str,
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Reserve the right to send: update the draft and open the attempt.
+
+        Both writes land in one transaction, so an attempt row exists
+        only for the request that won the draft's version check.
+
+        Args:
+            sponsor_id: The sponsor's key.
+            subject: The subject being sent.
+            body_html: The body being sent.
+            note: The coordinator's note.
+            expected_version: The draft version the caller read.
+            attempt_id: The new attempt's id.
+            message_id: The RFC 5322 Message-ID generated before the send.
+            to_email: The recipient.
+            bcc_emails: The archive addresses.
+            attachments: The files being attached, with their hashes.
+            actor: Attribution identity.
+            user_id: The acting user's id.
+
+        Returns:
+            The stored attempt dict.
+
+        Raises:
+            StaleRowVersionError: When the draft version is stale.
+        """
+        async with self._transaction():
+            draft = await self._session.scalar(
+                select(SponsorDraft).where(
+                    SponsorDraft.season_id == self._season_id,
+                    SponsorDraft.sponsor_id == sponsor_id,
+                )
+            )
+            if draft is None:
+                raise StaleRowVersionError("sponsor", sponsor_id, 0)
+            if draft.version != expected_version:
+                raise StaleRowVersionError("sponsor", sponsor_id, draft.version)
+            now = datetime.now(UTC)
+            draft.subject = subject
+            draft.body_html = body_html
+            draft.note = note
+            draft.edited_by = actor
+            draft.edited_at = now
+            draft.version += 1
+            attempt = SponsorSendAttempt(
+                id=attempt_id,
+                season_id=self._season_id,
+                sponsor_id=sponsor_id,
+                draft_version=draft.version,
+                state="sending",
+                message_id=message_id,
+                subject=subject,
+                body_html=body_html,
+                to_email=to_email,
+                bcc_emails=list(bcc_emails),
+                attachments=[dict(item) for item in attachments],
+                actor=actor,
+                user_id=user_id,
+                started_at=now,
+            )
+            self._session.add(attempt)
+            await self._session.flush()
+        return _attempt_dict(attempt)
+
+    async def commit_dispatch_result(
+        self,
+        attempt_id: str,
+        *,
+        state: str,
+        provider_message_id: str | None = None,
+        error: str | None = None,
+        sponsor_rows: list[dict[str, Any]] | None = None,
+        actor: str = "system",
+        expected_versions: Mapping[str, int] | None = None,
+        audit_events: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Close one send attempt, optionally stamping the sponsor.
+
+        The attempt's terminal state, the sponsor's dispatch stamp and the
+        security audit rows land in one transaction, so a crash can never
+        leave a sponsor stamped without a matching attempt.
+
+        Args:
+            attempt_id: The attempt to close.
+            state: "sent", "failed", or "unknown".
+            provider_message_id: The provider's id, when known.
+            error: A short, sanitized error description.
+            sponsor_rows: The complete final sponsor store, stamped, when
+                the attempt succeeded.
+            actor: Attribution identity.
+            expected_versions: Prefixed key -> expected row version.
+            audit_events: Security audit rows to insert.
+
+        Raises:
+            DbStoreError: When the attempt is unknown.
+            OwnershipError: When the stamp touches a column the
+                dispatch module may not write.
+            StaleRowVersionError: When a submitted row version is stale.
+        """
+        async with self._transaction():
+            attempt = await self._session.scalar(
+                select(SponsorSendAttempt).where(
+                    SponsorSendAttempt.id == attempt_id
+                )
+            )
+            if attempt is None:
+                raise DbStoreError(f"unknown send attempt {attempt_id!r}")
+            attempt.state = state
+            attempt.provider_message_id = provider_message_id
+            attempt.error = error
+            attempt.finished_at = datetime.now(UTC)
+            if sponsor_rows is not None:
+                await self._write_finals(
+                    "dispatch",
+                    "sponsor",
+                    sponsor_rows,
+                    actor,
+                    _prefixed(expected_versions or {}, "sponsor"),
+                )
+            for event in audit_events or []:
+                self._session.add(SecurityAuditEvent(**event))
+
+    async def fail_stale_attempts(
+        self, older_than: datetime, actor: str = "system"
+    ) -> list[str]:
+        """Close attempts that never reported an outcome.
+
+        An attempt left in "sending" means the process died or the
+        provider never answered.  Its outcome is unknown, not failed, so
+        it is never retried automatically.
+
+        Args:
+            older_than: Attempts started before this instant are stale.
+            actor: Attribution identity.
+
+        Returns:
+            The ids of the attempts that were closed.
+        """
+        closed: list[str] = []
+        async with self._transaction():
+            rows = await self._session.scalars(
+                select(SponsorSendAttempt).where(
+                    SponsorSendAttempt.season_id == self._season_id,
+                    SponsorSendAttempt.state == "sending",
+                    SponsorSendAttempt.started_at.is_not(None),
+                    SponsorSendAttempt.started_at < older_than,
+                )
+            )
+            now = datetime.now(UTC)
+            for row in rows:
+                row.state = "unknown"
+                row.error = "the send did not report an outcome"
+                row.finished_at = now
+                closed.append(row.id)
+        return closed
+
+    async def dispatch_attempt(self, attempt_id: str) -> dict[str, Any] | None:
+        """Read one send attempt.
+
+        Args:
+            attempt_id: The attempt's id.
+
+        Returns:
+            The attempt dict, or None when it does not exist.
+        """
+        row = await self._session.scalar(
+            select(SponsorSendAttempt).where(
+                SponsorSendAttempt.id == attempt_id
+            )
+        )
+        return _attempt_dict(row) if row is not None else None
+
+
+def _sponsor_draft_dict(draft: SponsorDraft) -> dict[str, Any]:
+    """Render one sponsor draft row as a dict.
+
+    Args:
+        draft: The ORM row.
+
+    Returns:
+        The draft dict.
+    """
+    return {
+        "sponsor_id": draft.sponsor_id,
+        "version": draft.version,
+        "subject": draft.subject,
+        "body_html": draft.body_html,
+        "note": draft.note,
+        "to_email": draft.to_email,
+        "bcc_emails": list(draft.bcc_emails or []),
+        "attachments": list(draft.attachments or []),
+        "build_id": draft.build_id,
+        "created_by": draft.created_by,
+        "created_at": _iso(draft.created_at),
+        "edited_by": draft.edited_by,
+        "edited_at": _iso(draft.edited_at),
+    }
+
+
+def _attempt_dict(attempt: SponsorSendAttempt) -> dict[str, Any]:
+    """Render one send attempt row as a dict.
+
+    Args:
+        attempt: The ORM row.
+
+    Returns:
+        The attempt dict.
+    """
+    return {
+        "id": attempt.id,
+        "sponsor_id": attempt.sponsor_id,
+        "draft_version": attempt.draft_version,
+        "state": attempt.state,
+        "message_id": attempt.message_id,
+        "provider_message_id": attempt.provider_message_id,
+        "subject": attempt.subject,
+        "body_html": attempt.body_html,
+        "to_email": attempt.to_email,
+        "bcc_emails": list(attempt.bcc_emails or []),
+        "attachments": list(attempt.attachments or []),
+        "actor": attempt.actor,
+        "user_id": attempt.user_id,
+        "started_at": _iso(attempt.started_at),
+        "finished_at": _iso(attempt.finished_at),
+        "error": attempt.error,
+    }
 
 
 __all__ = [

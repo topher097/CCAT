@@ -60,16 +60,18 @@ include = [
     "test/test_db_console.py",
     "test/test_db_generate.py",
     "test/test_db_import.py",
+    "test/test_db_dispatch.py",
     "test/test_db_pipeline.py",
     "test/test_db_repo.py",
     "test/test_db_stats.py",
     "test/test_duplications.py",
     "test/test_jobs.py",
     "test/test_manual_match.py",
+    "test/test_mail.py",
     "test/test_remediation.py",
     "test/test_services.py",
 ]
-rules = { import-not-found = "ignore" }
+rules = { unresolved-import = "ignore" }
 
 [tool.pytest.ini_options]
 # Every pytest run is parallel: pytest-xdist spreads tests over worker

@@ -1084,7 +1084,279 @@ class RunSettingsView(StrictModel):
     saved: bool = False
 
 
+class DispatchAttachment(StrictModel):
+    """One file attached to a sponsor packet email.
+
+    Attributes:
+        artifact_id: The artifact row, when the file is registered.
+        role: What the file is ("packet_pdf", "instructions_pdf").
+        filename: The name the recipient sees.
+        content_type: The MIME type.
+        size_bytes: The file's size.
+        sha256: The hash of the file's bytes.
+    """
+
+    artifact_id: int | None = None
+    role: str
+    filename: str
+    content_type: str = "application/pdf"
+    size_bytes: int = 0
+    sha256: str = ""
+
+
+class DispatchRow(StrictModel):
+    """One sponsor's row in the dispatch work list.
+
+    Attributes:
+        sponsor_id: The sponsor's key.
+        display_name: The sponsor's name.
+        first_name: The sponsor's first name.
+        last_name: The sponsor's last name.
+        organization_name: The sponsor's organization.
+        sponsor_type: The sponsor's affiliation.
+        email: The sponsor's address.
+        physical_packet: Whether the sponsor receives a physical packet.
+        num_children: How many children the sponsor asked for.
+        assigned_count: How many children are placed with the sponsor.
+        assigned_angel_ids: The placed children's angel letters.
+        sheets_ready_count: How many of them have an info sheet.
+        sheets_total: How many of them there are.
+        missing_sheet_angel_ids: The ones without a sheet.
+        packet_status: "ready" or "missing".
+        packet_pdf_artifact_id: The combined child information PDF.
+        packet_created_at: When the packet was built.
+        instruction_pdf_artifact_id: The sponsor instruction PDF.
+        attachments: The files the email will carry.
+        email_status: The email state ("not_drafted", "draft_ready",
+            "draft_edited", "sending", "sent", "failed", "unknown").
+        email_sent_at: When the email was accepted.
+        email_error: The last failure's reason.
+        draft_version: The draft's version, when it has one.
+        draft_subject: The draft's subject.
+        packets_dispatched: Whether the sponsor's packets went out.
+        packets_dispatched_at: When they went out.
+        sponsor_row_version: The sponsor row's version.
+        duplicate_recipient_sponsor_ids: Other sponsors with the same
+            address.
+        blockers: Why the sponsor cannot be sent yet.
+    """
+
+    sponsor_id: int
+    display_name: str = ""
+    first_name: str | None = None
+    last_name: str | None = None
+    organization_name: str | None = None
+    sponsor_type: str | None = None
+    email: str | None = None
+    physical_packet: bool = False
+    num_children: int | None = None
+    assigned_count: int = 0
+    assigned_angel_ids: list[str] = []
+    sheets_ready_count: int = 0
+    sheets_total: int = 0
+    missing_sheet_angel_ids: list[str] = []
+    packet_status: str = "missing"
+    packet_pdf_artifact_id: int | None = None
+    packet_created_at: str | None = None
+    instruction_pdf_artifact_id: int | None = None
+    attachments: list[DispatchAttachment] = []
+    email_status: str = "not_drafted"
+    email_sent_at: str | None = None
+    email_error: str | None = None
+    draft_version: int | None = None
+    draft_subject: str | None = None
+    packets_dispatched: bool = False
+    packets_dispatched_at: str | None = None
+    sponsor_row_version: int = 0
+    duplicate_recipient_sponsor_ids: list[int] = []
+    blockers: list[str] = []
+
+
+class DispatchTotals(StrictModel):
+    """The work list's counters.
+
+    Attributes:
+        sponsors: Sponsors with children.
+        assigned_children: Children placed with them.
+        sheets_ready: Children with an info sheet.
+        sheets_missing: Children without one.
+        packets_ready: Sponsors with a usable packet.
+        packets_missing: Sponsors without one.
+        dispatched: Sponsors whose packets went out.
+    """
+
+    sponsors: int = 0
+    assigned_children: int = 0
+    sheets_ready: int = 0
+    sheets_missing: int = 0
+    packets_ready: int = 0
+    packets_missing: int = 0
+    dispatched: int = 0
+
+
+class DispatchListView(StrictModel):
+    """The dispatch work list.
+
+    Attributes:
+        season: The season name.
+        mail_configured: Whether the mail account is usable.
+        can_send: Whether the caller may send.
+        totals: The page counters.
+        rows: One row per sponsor with children.
+    """
+
+    season: str
+    mail_configured: bool = False
+    can_send: bool = False
+    totals: DispatchTotals = DispatchTotals()
+    rows: list[DispatchRow] = []
+
+
+class DispatchChild(StrictModel):
+    """One assigned child's sheet state.
+
+    Attributes:
+        zite_record_id: The child's key.
+        angel_id: The child's angel letter.
+        family_id: The child's family.
+        sponsor_id: The sponsor the child is placed with.
+        generated_info_sheet: Whether the sheet exists.
+        sheet_artifact_id: The sheet artifact.
+    """
+
+    zite_record_id: str
+    angel_id: str | None = None
+    family_id: int | None = None
+    sponsor_id: int | None = None
+    generated_info_sheet: bool = False
+    sheet_artifact_id: int | None = None
+
+
+class DispatchChildListView(StrictModel):
+    """The assigned children and their sheet state.
+
+    Attributes:
+        rows: One row per assigned child.
+    """
+
+    rows: list[DispatchChild] = []
+
+
+class DispatchDraftView(StrictModel):
+    """One sponsor's email draft.
+
+    Attributes:
+        sponsor_id: The sponsor's key.
+        version: The draft's version, for If-Match updates.
+        subject: The subject.
+        body_html: The rendered body.
+        note: The coordinator's plain-text addition.
+        to_email: The recipient.
+        from_email: The address the mail goes out as.
+        bcc_emails: The archive addresses.
+        attachments: The files the email will carry.
+        build_id: The packet build the body came from.
+        email_status: The email state.
+        email_error: The last failure's reason.
+        blockers: Why the sponsor cannot be sent yet.
+    """
+
+    sponsor_id: int
+    version: int = 0
+    subject: str = ""
+    body_html: str = ""
+    note: str = ""
+    to_email: str = ""
+    from_email: str = ""
+    bcc_emails: list[str] = []
+    attachments: list[DispatchAttachment] = []
+    build_id: str | None = None
+    email_status: str = "not_drafted"
+    email_error: str | None = None
+    blockers: list[str] = []
+
+
+class DispatchDraftRequest(StrictModel):
+    """Change one draft.
+
+    Attributes:
+        subject: The new subject.
+        note: The new plain-text note.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: str | None = None
+    note: str | None = None
+
+
+class DispatchDraftBatchRequest(StrictModel):
+    """Draft one or more sponsors' emails.
+
+    Attributes:
+        sponsor_ids: The sponsors to draft; every ready sponsor when
+            empty.
+        all: Draft every ready sponsor.
+        overwrite: Re-render a draft that already exists.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sponsor_ids: list[int] = []
+    all: bool = False
+    overwrite: bool = False
+
+
+class DispatchSendRequest(StrictModel):
+    """Send one sponsor's packet email.
+
+    Attributes:
+        version: The draft version the popup was opened with.
+        subject: The subject being sent.
+        note: The note being sent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int
+    subject: str | None = None
+    note: str | None = None
+
+
+class DispatchSendResult(StrictModel):
+    """The outcome of one send attempt.
+
+    Attributes:
+        sponsor_id: The sponsor's key.
+        state: "sent", "failed", or "unknown".
+        attempt_id: The attempt's id.
+        message_id: The RFC 5322 Message-ID.
+        draft_version: The draft's version after the attempt.
+        sent_at: When the message was accepted.
+        error: The failure's reason.
+    """
+
+    sponsor_id: int
+    state: str
+    attempt_id: str = ""
+    message_id: str = ""
+    draft_version: int = 0
+    sent_at: str | None = None
+    error: str | None = None
+
+
 __all__ = [
+    "DispatchAttachment",
+    "DispatchChild",
+    "DispatchChildListView",
+    "DispatchDraftBatchRequest",
+    "DispatchDraftRequest",
+    "DispatchDraftView",
+    "DispatchListView",
+    "DispatchRow",
+    "DispatchSendRequest",
+    "DispatchSendResult",
+    "DispatchTotals",
     "ArtifactView",
     "ClarifyDraftView",
     "ClarifyFamilyView",

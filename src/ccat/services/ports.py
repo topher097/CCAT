@@ -32,7 +32,7 @@ optimistic concurrency, ``commit_match`` takes ``overwrite`` /
 ``register_artifact``/clarification/artifact accessors.
 """
 
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 
 class SeasonStore(Protocol):
@@ -190,4 +190,90 @@ class SeasonStore(Protocol):
         ...
 
 
-__all__ = ["SeasonStore"]
+class MailError(Exception):
+    """The mail account itself is not usable.
+
+    A transport raises it when it cannot even attempt a delivery (no
+    authorized account, a token that will not refresh).  Nothing was
+    sent, so the attempt is a definite non-delivery rather than an
+    unknown outcome.
+    """
+
+
+class Attachment(NamedTuple):
+    """One file attached to an outgoing message.
+
+    Attributes:
+        filename: The name the recipient sees.
+        content_type: The MIME type.
+        payload: The file's bytes.
+        sha256: The hash of those bytes, recorded with the attempt.
+    """
+
+    filename: str
+    content_type: str
+    payload: bytes
+    sha256: str
+
+
+class SendRequest(NamedTuple):
+    """One outgoing message, ready to hand to a transport.
+
+    Attributes:
+        sender: The From address.
+        sender_name: The From display name.
+        reply_to: The Reply-To address, when set.
+        to: The recipient address.
+        bcc: The archive addresses.
+        subject: The subject line.
+        html_body: The HTML body.
+        message_id: The RFC 5322 Message-ID, generated before the send.
+        attachments: The files to attach.
+    """
+
+    sender: str
+    sender_name: str
+    reply_to: str
+    to: str
+    bcc: tuple[str, ...]
+    subject: str
+    html_body: str
+    message_id: str
+    attachments: tuple[Attachment, ...]
+
+
+class SendOutcome(NamedTuple):
+    """What the provider said about one message.
+
+    ``state`` is "sent" (accepted), "rejected" (refused, so a retry is
+    safe) or "ambiguous" (the answer does not say whether it was
+    accepted, so it must not be retried automatically).
+
+    Attributes:
+        state: The outcome state.
+        provider_message_id: The provider's own id, when it gave one.
+        error: A short, sanitized reason for a non-sent outcome.
+    """
+
+    state: str
+    provider_message_id: str
+    error: str
+
+
+class MailTransport(Protocol):
+    """Delivery of one message to one recipient.
+
+    The dispatch service depends on this protocol, not on a provider,
+    so the send path can be exercised without a network.
+    """
+
+    def send(self, request: SendRequest) -> SendOutcome:
+        """Deliver one message.
+
+        Args:
+            request: The message to deliver.
+
+        Returns:
+            The provider's outcome.
+        """
+        ...

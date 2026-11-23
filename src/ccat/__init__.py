@@ -490,6 +490,33 @@ def _worker_cmd(config: str = DEFAULT_CONFIG) -> None:
     _run()
 
 
+def _mail_authorize_cmd(config: str = DEFAULT_CONFIG) -> None:
+    """Authorize the Gmail account that sends sponsor packet email.
+
+    Runs the one-time OAuth consent for the ``gmail.send`` scope and
+    writes the token next to the configured path.  The existing Drive
+    token is untouched.
+
+    Args:
+        config: Path to the JSON configuration file.
+    """
+    from ccat.mail import MailError
+    from ccat.mail import authorize as authorize_mail
+
+    try:
+        cfg = load_config(config)
+    except ConfigError as error:
+        raise SystemExit(f"ccat mail-authorize failed: {error}") from error
+    try:
+        account = authorize_mail(
+            Path(cfg.dispatch.client_file), Path(cfg.dispatch.token_file)
+        )
+    except MailError as error:
+        raise SystemExit(f"ccat mail-authorize failed: {error}") from error
+    logger.info("authorized the mail account %s", account or "(unknown)")
+    print(f"authorized {account or 'the mail account'}")
+
+
 def main() -> None:
     """Entry point for the ``ccat`` CLI."""
     fire.Fire(
@@ -507,6 +534,7 @@ def main() -> None:
             "serve": _serve_cmd,
             "worker": _worker_cmd,
             "db-upgrade": _db_upgrade_cmd,
+            "mail-authorize": _mail_authorize_cmd,
         }
     )
 
