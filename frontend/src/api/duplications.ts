@@ -22,6 +22,10 @@ export type DuplicationDetail = Schemas['DuplicationDetail'] & {
   kind: DuplicationKind
   survivor_count: number
   children: DuplicationChild[]
+  /** The group's merged editable fields: newest non-blank value wins. */
+  current: Record<string, unknown>
+  /** The row key the merged entry is written to. */
+  current_row_key: string
 }
 export type DuplicationChild = {
   zite_record_id: string

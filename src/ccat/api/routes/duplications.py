@@ -120,6 +120,8 @@ def _detail_dto(
         children=[
             DuplicationChild(**child) for child in detail.get("children") or []
         ],
+        current=dict(detail.get("current") or {}),
+        current_row_key=str(detail.get("current_row_key") or ""),
         previous=NeighbourView(**previous) if previous else None,
         next=NeighbourView(**next_row) if next_row else None,
     )

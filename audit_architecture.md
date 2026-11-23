@@ -526,7 +526,46 @@ id, and the lower sponsor id keeps it until the auditor acts.
 - an ignored child's `angel_id` is never handed to another child;
 - a family's angel letters do not skip; they read A, B, C.
 
-#### 10.5.5 Navigation
+#### 10.5.5 The merged "Current (editable)" column
+
+The Current column holds one **merged entry** for the whole group, not
+one member's row. The server folds the group's submissions newest
+first: a field's value is the newest member's non-blank value, and
+where the newest member leaves the field blank an older member's value
+fills it. Only the entity's editable fields are folded — linkage,
+assignment, controls and the row's own key belong to the row the merged
+entry is written to, and a merge must not move them.
+
+The fold reads the members' **raw submissions** (the `duplicate_log`
+record), because that is the only per-member data a family group has:
+its members share one row.
+
+The group detail carries the merged fields as `current` and the key of
+the row they are written to as `current_row_key`. The auditor's edits
+are saved with the whole editable column, so what the column shows is
+what is written.
+
+For a **sponsor group** the merged entry's final sponsor number is the
+auditor's choice. The Current column offers a select over the group's
+member sponsor numbers; the chosen number names the member's row the
+merged entry is written onto, and the audited entry keeps that number.
+The pick is a selector, not a written value: the server strips it
+before saving, so no row's `sponsor_id` changes.
+
+- The members marked `ignore` keep their ignored rows, untouched.
+- The member the pick left behind is closed out with `status = new`,
+  like a released member: it awaits its own audit.
+- A pick naming an ignored member's row is refused — an ignored row is
+  an identity skeleton and cannot become the group's entry.
+- A pick naming a number the group does not hold is refused.
+
+The store is what bounds this. `final_sponsor`'s primary key is
+`(season_id, sponsor_id)`, `commit_finals` refuses to drop a stored key
+(`EntityRemovalError`), and no path in the system deletes a final row.
+A sponsor number therefore cannot be moved from one row to another; the
+pick chooses which existing row carries the merged entry.
+
+#### 10.5.6 Navigation
 
 The audit lists keep their filters in the query string, so a detail
 link carries them and the back button restores the place in the table
@@ -541,8 +580,16 @@ adjacent row of the table the user is looking at.
 `test/test_duplications.py` characterizes the service (list, detail, the
 shared letter, the not-duplicate and ignore decisions, the audit trail,
 marking a group audited) and the screening integration;
+`test/test_sponsor_claims.py` characterizes the Assigned Angel ID
+contest (detection, the group kind, the kind filter, the resolution)
+and the id invariants;
+`test/test_duplication_merge.py` characterizes the merged Current
+column (the fold, the detail's merged fields) and the sponsor number
+pick (the row it writes onto, the entry it closes out, and the two
+refusals);
 `test/test_api.py` adds the HTTP contract for the routes;
 `frontend/test/duplications.test.ts` covers the list, the decision
-table, the pending decisions and the ignore confirmation;
+table, the pending decisions, the ignore confirmation, the merged
+column and the sponsor number pick;
 `frontend/test/audit-nav.test.ts` covers the back button and the
 neighbour links.

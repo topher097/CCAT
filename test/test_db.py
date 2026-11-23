@@ -351,6 +351,39 @@ def test_run_migrations_accepts_async_url(tmp_path: Path) -> None:
     assert EXPECTED_TABLES <= _table_names(sync_url_from(async_url))
 
 
+def test_migration_tolerates_an_already_migrated_column(
+    tmp_path: Path,
+) -> None:
+    """A revision re-taken on a migrated database does not fail.
+
+    The deployment runs one branch's migrations against a shared volume,
+    so a database can already carry a column when the revision that adds
+    it is taken again.
+    """
+    url = f"sqlite:///{tmp_path / 'ccat.sqlite3'}"
+    run_migrations(url)
+    # The database keeps the column while its version is stamped back to
+    # the revision before it, the way a shared deployment volume ends up.
+    command.stamp(_alembic_config(url), "20261122_0009")
+    run_migrations(url)
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    text("PRAGMA table_info(duplication_state)")
+                )
+            }
+            version = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar()
+    finally:
+        engine.dispose()
+    assert "entry_key" in columns
+    assert version == "20261123_0010"
+
+
 def test_async_engine_pragmas(tmp_path: Path) -> None:
     """Async runtime connections get the SQLite PRAGMAs (§4.4).
 

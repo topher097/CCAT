@@ -18,7 +18,7 @@ import { useAuditNav } from '../composables/useAuditNav'
 import { useSessionStore } from '../stores/session'
 import { useDirtyGuard } from '../composables/useDirtyGuard'
 import { ENTITY_FIELDS, formatTime } from '../utils/format'
-import { normalizeValue, toAge } from '../utils/diff'
+import { differs, normalizeValue, toAge } from '../utils/diff'
 import AuditBackLink from '../components/AuditBackLink.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -35,6 +35,8 @@ const pending = ref<Map<string, DuplicationDecision>>(new Map())
  * while the column is clean, and stays fixed while the column holds edits.
  */
 const boundKey = ref<string | null>(null)
+/** Whether the column stays on boundKey: an edit or a sponsor pick holds it. */
+const pinned = ref(false)
 /** Per-child family choice for a split family group. */
 const childrenDraft = reactive<Record<string, number | null>>({})
 const loading = ref(false)
@@ -106,27 +108,52 @@ const preferredMember = computed<DuplicationMember | null>(
 )
 /** The member the Current column is actually bound to. */
 const boundMember = computed<DuplicationMember | null>(() => {
-  if (touched.value.size > 0 && boundKey.value) {
-    return (
-      members.value.find((member) => member.row_key === boundKey.value) ?? null
-    )
+  if (pinned.value && boundKey.value) {
+    const held = members.value.find((member) => member.row_key === boundKey.value)
+    if (held) return held
   }
   return preferredMember.value
 })
+const isSponsorGroup = computed(() => entity.value === 'sponsor')
+/** A member's sponsor number: its own row's sponsor_id, else its row key. */
+function sponsorNumberOf(member: DuplicationMember): number | null {
+  const id = Number(member.screened?.sponsor_id ?? member.row_key)
+  return Number.isNaN(id) ? null : id
+}
+/** A member whose row is ignored cannot become the group's entry. */
+function isIgnored(member: DuplicationMember): boolean {
+  return decisionOf(member) === 'ignore' || member.row_status === 'ignored'
+}
+const hasIgnoredMember = computed(() => members.value.some(isIgnored))
+const boundSponsorNumber = computed<number | null>(() =>
+  boundMember.value ? sponsorNumberOf(boundMember.value) : null,
+)
 /** The column is locked to a different row than the current surviving entry. */
 const bindingLocked = computed(
   () =>
     boundMember.value !== null &&
     boundMember.value.row_key !== preferredMember.value?.row_key,
 )
-const currentRow = computed<Record<string, unknown> | null>(
-  () => (boundMember.value?.screened ?? null) as Record<string, unknown> | null,
-)
+/** The bound row's stored values, with the group's merged editable fields over them. */
+const currentRow = computed<Record<string, unknown> | null>(() => {
+  if (!boundMember.value) return null
+  return {
+    ...(boundMember.value.screened ?? {}),
+    ...(detail.value?.current ?? {}),
+  }
+})
 const currentKey = computed<string>(() => boundMember.value?.row_key ?? '')
 const currentReadonly = computed(
   () => boundMember.value?.row_status === 'audited',
 )
 const isDirty = computed(() => touched.value.size > 0 || pending.value.size > 0)
+/** The row can take a column write: it has a version and is not audited. */
+const columnWritable = computed(
+  () =>
+    boundMember.value?.row_version !== null &&
+    boundMember.value?.row_version !== undefined &&
+    !currentReadonly.value,
+)
 const blockerMessage = computed(() => {
   const count = undecidedMembers.value.length
   if (count === 0)
@@ -156,7 +183,8 @@ const auditConfirmMessage = computed(() => {
 })
 const currentBindingText = computed(() => {
   if (!boundMember.value) return ''
-  if (bindingLocked.value) return ''
+  if (bindingLocked.value)
+    return `Current column: the merged entry is written to ${boundMember.value.zite_record_id}, not the surviving entry.`
   if (
     undecidedMembers.value.length === 1 &&
     boundMember.value.row_key === survivingEntry.value?.row_key
@@ -183,6 +211,18 @@ const rawFields = computed<string[]>(() => {
   }
   return fields
 })
+/** The editable cells of the Current column: every one is written on save. */
+const editableColumnFields = computed<string[]>(() =>
+  rawFields.value.filter((field) => editableFields.value.has(field)),
+)
+/** The column's merged values differ from the bound row's stored values. */
+const mergeDiffers = computed(
+  () =>
+    columnWritable.value &&
+    editableColumnFields.value.some((field) =>
+      differs(currentRow.value?.[field], boundMember.value?.screened?.[field]),
+    ),
+)
 
 const entityHint = computed(() => {
   // A contest's explainer block says what each decision does.
@@ -281,27 +321,38 @@ function neighbourTo(key: string): string {
   return carriedQuery.value ? `${path}?${carriedQuery.value}` : path
 }
 
-/** The current value differs from the group's raw consensus. */
+/** The auditor changed the field: the column differs from every submission. */
 function currentDiffers(field: string): boolean {
   const row = currentRow.value
   if (!row) return false
   if (conflicts(field)) return false
-  const raw = members.value
-    .map((member) => member.raw?.[field])
-    .filter((value) => value !== null && value !== undefined && value !== '')
-  if (raw.length === 0) return normalizeValue(row[field]) !== ''
-  return normalizeValue(row[field]) !== String(raw[0])
+  // An unsaved edit counts: the auditor's draft is the value the column shows.
+  const shown = touched.value.has(field) ? draft[field] : row[field]
+  const current = normalizeValue(shown)
+  return members.value.every(
+    (member) => normalizeValue(member.raw?.[field]) !== current,
+  )
+}
+
+/** Bind the column to the row the server writes the merged entry to. */
+function rebind(): void {
+  const key = detail.value?.current_row_key ?? null
+  boundKey.value = key
+  pinned.value = !!key && key !== preferredMember.value?.row_key
+}
+
+/** Seed the editable cells from the merged row; the pin is left alone. */
+function seedDraft(): void {
+  for (const key of Object.keys(draft)) delete draft[key]
+  touched.value = new Set()
+  for (const field of editableColumnFields.value) {
+    draft[field] = currentRow.value?.[field] ?? ''
+  }
 }
 
 function resetDraft(): void {
-  for (const key of Object.keys(draft)) delete draft[key]
-  touched.value = new Set()
-  boundKey.value = preferredMember.value?.row_key ?? null
-  const row = boundMember.value?.screened ?? null
-  if (!row) return
-  for (const field of rawFields.value) {
-    if (isEditable(field)) draft[field] = row[field] ?? ''
-  }
+  rebind()
+  seedDraft()
 }
 
 function resetChildrenDraft(): void {
@@ -313,7 +364,9 @@ function resetChildrenDraft(): void {
 
 function setField(field: string, value: unknown): void {
   if (currentReadonly.value) return
-  if (!boundKey.value) boundKey.value = boundMember.value?.row_key ?? null
+  // An edit holds the column on the row it is typed into.
+  boundKey.value = boundMember.value?.row_key ?? null
+  pinned.value = true
   draft[field] = value
   const next = new Set(touched.value)
   next.add(field)
@@ -321,10 +374,22 @@ function setField(field: string, value: unknown): void {
   notice.value = null
 }
 
+/** Pick which sponsor number the merged entry keeps; only when no edits are held. */
+function pickSponsor(rowKey: string): void {
+  const member = members.value.find((candidate) => candidate.row_key === rowKey)
+  if (!member || isIgnored(member) || touched.value.size > 0) return
+  boundKey.value = rowKey
+  pinned.value = true
+  notice.value = null
+}
+
+/** The whole editable column: touched cells take the draft, the rest the merged value. */
 function payload(): Record<string, unknown> {
   const body: Record<string, unknown> = {}
-  for (const field of touched.value) {
-    const value = draft[field]
+  for (const field of editableColumnFields.value) {
+    const value = touched.value.has(field)
+      ? draft[field]
+      : currentRow.value?.[field]
     body[field] = NUMERIC_FIELDS.has(field)
       ? toAge(value)
       : normalizeValue(value)
@@ -445,7 +510,7 @@ async function markAudited(): Promise<void> {
     auditConfirm.value = true
     return
   }
-  await performAudit()
+  await performAudit(mergeDiffers.value ? payload() : undefined)
 }
 
 /** Post every pending member decision and update the local detail. */
@@ -468,7 +533,7 @@ async function postPendingDecisions(): Promise<void> {
   pending.value = new Map()
 }
 
-/** Mark the group audited with an optional values payload. */
+/** Mark the group audited with an optional values payload; a sponsor pick rides along. */
 async function performAudit(values?: Record<string, unknown>): Promise<void> {
   if (!detail.value || saving.value) return
   saving.value = true
@@ -478,9 +543,11 @@ async function performAudit(values?: Record<string, unknown>): Promise<void> {
   try {
     const bound = boundMember.value
     const version = bound?.row_version
+    const sent: Record<string, unknown> = { ...(values ?? {}) }
+    if (isSponsorGroup.value && boundSponsorNumber.value !== null)
+      sent.sponsor_id = boundSponsorNumber.value
     const body: Record<string, unknown> = {}
-    if (values !== undefined && Object.keys(values).length > 0)
-      body.values = values
+    if (Object.keys(sent).length > 0) body.values = sent
     if (version !== null && version !== undefined)
       body.expected_version = version
     detail.value = await auditDuplication(
@@ -506,7 +573,8 @@ async function save(): Promise<void> {
   const member = boundMember.value
   const version = member?.row_version
   if (!member || version === null || version === undefined) return
-  if (touched.value.size === 0 && pending.value.size === 0) return
+  const writesColumn = touched.value.size > 0 || mergeDiffers.value
+  if (!writesColumn && pending.value.size === 0) return
   saving.value = true
   submitError.value = null
   stale.value = false
@@ -527,8 +595,8 @@ async function save(): Promise<void> {
         filters.value,
       )
     }
-    // The edited current values, with the version the decisions left behind.
-    if (touched.value.size > 0) {
+    // The whole column, with the version the decisions left behind.
+    if (writesColumn) {
       const current = boundMember.value
       const currentVersion = current?.row_version
       if (current && currentVersion !== null && currentVersion !== undefined) {
@@ -539,14 +607,20 @@ async function save(): Promise<void> {
           payload() as EntityPatch,
           currentVersion,
         )
-        current.screened = updated.row as Record<string, unknown>
+        const saved = updated.row as Record<string, unknown>
+        current.screened = saved
         current.row_version = updated.row_version
+        // The saved row now is the merged entry until the next reload.
+        if (detail.value)
+          detail.value.current = Object.fromEntries(
+            editableColumnFields.value.map((field) => [field, saved[field]]),
+          )
       }
     }
     const decided = pending.value.size
-    const edited = touched.value.size
+    const edited = writesColumn ? editableColumnFields.value.length : 0
     pending.value = new Map()
-    resetDraft()
+    seedDraft()
     notice.value = `Saved ${decided} decision(s) and ${edited} field(s).`
   } catch (failure) {
     stale.value = failure instanceof ApiError && failure.status === 412
@@ -561,8 +635,7 @@ async function confirmAuditSave(): Promise<void> {
   auditConfirm.value = false
   await postPendingDecisions()
   if (submitError.value) return
-  const values = payload()
-  await performAudit(values)
+  await performAudit(columnWritable.value ? payload() : undefined)
 }
 
 /** Drop local edits and member decisions, then audit the stored values. */
@@ -570,7 +643,7 @@ async function confirmAuditDiscard(): Promise<void> {
   auditConfirm.value = false
   await postPendingDecisions()
   if (submitError.value) return
-  resetDraft()
+  seedDraft()
   await performAudit()
 }
 
@@ -686,8 +759,8 @@ onMounted(() => {
       </div>
       <p class="muted">
         {{ members.length }} submission(s). The columns are the raw
-        submissions; the last column is the group's current screened row
-        and can be edited.
+        submissions; the last column is the group's merged entry and can be
+        edited.
       </p>
 
       <p
@@ -795,11 +868,15 @@ onMounted(() => {
               </th>
               <th>
                 <div>Current (editable)</div>
+                <div class="muted" data-testid="current-explainer">
+                  The group's merged entry: the newest submission's values, with
+                  older submissions filling the blanks.
+                </div>
                 <div v-if="boundMember" data-testid="current-binding">
                   {{ currentBindingText }}
                 </div>
                 <div
-                  v-if="bindingLocked"
+                  v-if="bindingLocked && touched.size > 0"
                   class="muted"
                   data-testid="binding-locked"
                 >
@@ -816,6 +893,55 @@ onMounted(() => {
             </tr>
           </thead>
           <tbody>
+            <tr v-if="isSponsorGroup" data-field="sponsor_id">
+              <td>Sponsor number</td>
+              <td
+                v-for="member in members"
+                :key="member.zite_record_id"
+                :data-member="member.zite_record_id"
+              >
+                {{ sponsorNumberOf(member) ?? '—' }}
+              </td>
+              <td>
+                <select
+                  :value="boundMember?.row_key ?? ''"
+                  aria-label="Sponsor number"
+                  data-testid="sponsor-pick"
+                  :disabled="saving || currentReadonly || touched.size > 0"
+                  @change="
+                    pickSponsor(($event.target as HTMLSelectElement).value)
+                  "
+                >
+                  <option
+                    v-for="member in members"
+                    :key="member.zite_record_id"
+                    :value="member.row_key"
+                    :disabled="isIgnored(member)"
+                    :title="
+                      isIgnored(member)
+                        ? 'ignored — un-ignore that row on its own row first'
+                        : undefined
+                    "
+                  >
+                    {{ sponsorNumberOf(member) ?? '—'
+                    }}{{ isIgnored(member) ? ' (ignored)' : '' }}
+                  </option>
+                </select>
+                <p class="muted" style="margin: 0.25rem 0 0">
+                  The merged entry is written onto that sponsor's row, so the
+                  entry keeps that sponsor number.
+                </p>
+                <p
+                  v-if="hasIgnoredMember"
+                  class="muted"
+                  style="margin: 0.25rem 0 0"
+                  data-testid="sponsor-ignored-hint"
+                >
+                  An ignored submission cannot be picked: ignored — un-ignore that
+                  row on its own row first.
+                </p>
+              </td>
+            </tr>
             <tr
               v-for="field in rawFields"
               :key="field"
@@ -960,7 +1086,7 @@ onMounted(() => {
         <button
           type="button"
           class="primary"
-          :disabled="saving || !isDirty"
+          :disabled="saving || (!isDirty && !mergeDiffers)"
           data-testid="save"
           @click="save"
         >

@@ -635,8 +635,9 @@ describe('duplication detail', () => {
       confirm: true,
       expected_version: 3,
     })
+    // The whole editable column is sent, the untouched cells with their merged value.
     expect(bodyOf(posts[1] as unknown[])).toEqual({
-      values: { first_name: 'Annie' },
+      values: { first_name: 'Annie', dob: null },
       expected_version: 3,
     })
   })
@@ -854,7 +855,10 @@ describe('duplication detail', () => {
       confirm: true,
       expected_version: 3,
     })
-    expect(bodyOf(posts[1] as unknown[])).toEqual({ expected_version: 3 })
+    expect(bodyOf(posts[1] as unknown[])).toEqual({
+      values: { first_name: 'Ann', dob: null },
+      expected_version: 3,
+    })
     expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
       'marked audited',
     )
@@ -934,7 +938,10 @@ describe('duplication detail', () => {
       (call) => (call[1] as RequestInit).method === 'PATCH',
     )
     expect(String(patch![0])).toBe('/api/v1/seasons/2026/children/r1')
-    expect(bodyOf(patch as unknown[])).toEqual({ first_name: 'Annie' })
+    expect(bodyOf(patch as unknown[])).toEqual({
+      first_name: 'Annie',
+      dob: null,
+    })
     const headers = (patch![1] as RequestInit).headers as Record<string, string>
     expect(headers['If-Match']).toBe('3')
     expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
@@ -1423,5 +1430,302 @@ describe('duplication kind', () => {
       'Assigned Angel ID: 12A',
       'Assigned Angel ID: 12A',
     ])
+  })
+})
+
+/** A saved entity response, as the entity PATCH returns it. */
+function entityResponse(entity: string, row: Record<string, unknown>) {
+  return jsonResponse(200, {
+    entity,
+    key: String(row.zite_record_id),
+    row,
+    baseline: {},
+    submissions: [],
+    status: 'new',
+    row_version: 4,
+    last_updated_by: 'cmendres',
+    last_updated_at: '2026-11-20T10:00:00Z',
+    audited_at: null,
+    diagnostics: {},
+  })
+}
+
+describe('duplication merged current column', () => {
+  it('shows the merged values: the newest value wins and an older value fills a blank', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail(
+                [
+                  member({
+                    zite_record_id: 'r1',
+                    survivor: true,
+                    raw: { first_name: 'Ann', dob: '' },
+                    screened: { zite_record_id: 'r1', first_name: 'Old', dob: null, status: 'new' },
+                  }),
+                  member({
+                    zite_record_id: 'r2',
+                    survivor: false,
+                    raw: { first_name: 'Ann', dob: '2019-02-02' },
+                    screened: null,
+                    row_version: null,
+                  }),
+                ],
+                { current: { first_name: 'Ann', dob: '2019-02-02' }, current_row_key: 'r1' },
+              ),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    // The merged first name overrides the stored one; the stored dob is blank, so the older value fills it.
+    expect(
+      (wrapper.get('input[name="first_name"]').element as HTMLInputElement).value,
+    ).toBe('Ann')
+    expect(
+      (wrapper.get('input[name="dob"]').element as HTMLInputElement).value,
+    ).toBe('2019-02-02')
+    expect(wrapper.get('[data-testid="current-explainer"]').text()).toContain(
+      'newest submission',
+    )
+  })
+
+  const sponsorMembers = (decisionOfS2: Record<string, unknown> = {}) => [
+    member({
+      zite_record_id: 's1',
+      row_key: '10',
+      survivor: true,
+      raw: { first_name: 'Ann' },
+      screened: { zite_record_id: 's1', sponsor_id: 10, first_name: 'Ann', status: 'new' },
+      row_version: 3,
+    }),
+    member({
+      zite_record_id: 's2',
+      row_key: '11',
+      survivor: false,
+      raw: { first_name: 'Anne' },
+      screened: { zite_record_id: 's2', sponsor_id: 11, first_name: 'Anne', status: 'new' },
+      row_version: 4,
+      ...decisionOfS2,
+    }),
+  ]
+  const sponsorDetail = (
+    members: unknown[],
+    overrides: Record<string, unknown> = {},
+  ) =>
+    detail(members, {
+      entity: 'sponsor',
+      current_row_key: '10',
+      current: { first_name: 'Ann' },
+      ...overrides,
+    })
+
+  it('renders a sponsor number row with a select over the group numbers', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(200, sponsorDetail(sponsorMembers()))
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const row = wrapper.get('[data-field="sponsor_id"]')
+    expect(row.get('td').text()).toBe('Sponsor number')
+    expect(row.findAll('td[data-member]').map((cell) => cell.text())).toEqual([
+      '10',
+      '11',
+    ])
+    const select = wrapper.get('[data-testid="sponsor-pick"]')
+    expect(select.attributes('aria-label')).toBe('Sponsor number')
+    expect(
+      select.findAll('option').map((option) => option.element.value),
+    ).toEqual(['10', '11'])
+    expect((select.element as HTMLSelectElement).value).toBe('10')
+  })
+
+  it('rebinds the column to the picked member row', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(200, sponsorDetail(sponsorMembers()))
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+    // Both members are undecided, so the screen's flagged survivor is provisional.
+    expect(wrapper.get('[data-testid="current-binding"]').text()).toBe(
+      'Current column: provisional — the submission the screening run kept, s1.',
+    )
+
+    await wrapper.get('[data-testid="sponsor-pick"]').setValue('11')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="current-binding"]').text()).toBe(
+      'Current column: the merged entry is written to s2, not the surviving entry.',
+    )
+    expect(
+      (wrapper.get('[data-testid="sponsor-pick"]').element as HTMLSelectElement).value,
+    ).toBe('11')
+  })
+
+  it('sends the picked sponsor number with the save and the audit, but not with the entity patch', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (init.method === 'PATCH' && url.endsWith('/sponsors/11'))
+          return entityResponse('sponsor', { zite_record_id: 's2', sponsor_id: 11, first_name: 'Annie', status: 'new' })
+        if (init.method === 'POST' && url.endsWith('/audit'))
+          return jsonResponse(200, sponsorDetail(sponsorMembers({ decision: 'not_duplicate', state: 'released' }), { status: 'audited' }))
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(200, sponsorDetail(sponsorMembers({ decision: 'not_duplicate', state: 'released' })))
+        return undefined
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    // s2 is decided, so s1 is the one undecided entry; pick s2's number and edit the column.
+    await wrapper.get('[data-testid="sponsor-pick"]').setValue('11')
+    await wrapper.get('input[name="first_name"]').setValue('Annie')
+    await wrapper.get('[data-testid="save"]').trigger('click')
+    await flushPromises()
+
+    const patch = fetchMock.mock.calls.find(
+      (call) => (call[1] as RequestInit).method === 'PATCH',
+    )
+    expect(String(patch![0])).toBe('/api/v1/seasons/2026/sponsors/11')
+    expect(bodyOf(patch as unknown[])).toEqual({ first_name: 'Annie' })
+    expect(bodyOf(patch as unknown[])).not.toHaveProperty('sponsor_id')
+
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+    const audit = fetchMock.mock.calls.find(
+      (call) =>
+        (call[1] as RequestInit).method === 'POST' &&
+        String(call[0]).endsWith('/audit'),
+    )
+    expect(bodyOf(audit as unknown[]).values).toHaveProperty('sponsor_id', 11)
+    expect(bodyOf(audit as unknown[]).expected_version).toBe(4)
+  })
+
+  it('disables an ignored member’s number and says why', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              sponsorDetail(sponsorMembers({ decision: 'ignore', state: 'discarded' })),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const options = wrapper.findAll('[data-testid="sponsor-pick"] option')
+    expect(options[0]!.attributes('disabled')).toBeUndefined()
+    expect(options[1]!.attributes('disabled')).toBeDefined()
+    expect(options[1]!.attributes('title')).toBe(
+      'ignored — un-ignore that row on its own row first',
+    )
+    expect(wrapper.get('[data-testid="sponsor-ignored-hint"]').text()).toContain(
+      'un-ignore that row on its own row first',
+    )
+  })
+
+  it('marks a field the auditor changed as differs, and leaves untouched fields unmarked', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail(
+                [
+                  member({
+                    zite_record_id: 'r1',
+                    survivor: true,
+                    raw: { first_name: 'Ann', dob: '2018-01-01' },
+                    screened: { zite_record_id: 'r1', first_name: 'Ann', dob: '2018-01-01', status: 'new' },
+                  }),
+                  member({
+                    zite_record_id: 'r2',
+                    survivor: false,
+                    raw: { first_name: 'Ann', dob: '' },
+                    screened: null,
+                    row_version: null,
+                  }),
+                ],
+                { current: { first_name: 'Ann', dob: '2018-01-01' }, current_row_key: 'r1' },
+              ),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-field="first_name"] [data-testid="diff-marker"]').exists()).toBe(false)
+    await wrapper.get('input[name="first_name"]').setValue('Annie')
+    expect(wrapper.find('[data-field="first_name"] [data-testid="diff-marker"]').exists()).toBe(true)
+    expect(wrapper.find('[data-field="dob"] [data-testid="diff-marker"]').exists()).toBe(false)
+  })
+
+  it('enables Save current values when the merged values differ from the stored row, with no edit', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (init.method === 'PATCH' && url.includes('/children/r1'))
+          return entityResponse('child', { zite_record_id: 'r1', first_name: 'Anne', dob: '2018-01-01', status: 'new' })
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(
+            200,
+            detail(
+              [
+                member({
+                  zite_record_id: 'r1',
+                  survivor: true,
+                  raw: { first_name: 'Anne', dob: '2018-01-01' },
+                  screened: { zite_record_id: 'r1', first_name: 'Ann', dob: '2018-01-01', status: 'new' },
+                }),
+              ],
+              { current: { first_name: 'Anne' }, current_row_key: 'r1' },
+            ),
+          )
+        return undefined
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const save = wrapper.get('[data-testid="save"]')
+    expect(save.attributes('disabled')).toBeUndefined()
+    await save.trigger('click')
+    await flushPromises()
+
+    const patch = fetchMock.mock.calls.find(
+      (call) => (call[1] as RequestInit).method === 'PATCH',
+    )
+    expect(bodyOf(patch as unknown[])).toEqual({ first_name: 'Anne', dob: '2018-01-01' })
   })
 })
