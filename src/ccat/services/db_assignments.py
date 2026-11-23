@@ -29,8 +29,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ccat.audit.store import as_bool
-from ccat.domain import angel_sort_key
+from ccat.audit.store import (
+    ANGEL_CLAIM_NOTE,
+    STATUS_NEEDS_CLARIFICATION,
+    STATUS_NEW,
+    as_bool,
+)
+from ccat.domain import angel_sort_key, parse_prior_assigned
+from ccat.preparation import append_note
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -44,6 +50,69 @@ STATE_UNASSIGNED = "unassigned"
 STATE_PARTIAL = "partial"
 STATE_SPLIT = "split"
 STATE_ASSIGNED = "assigned"
+
+
+def apply_angel_claims(
+    sponsors: list[dict[str, Any]], children: list[dict[str, Any]]
+) -> list[str]:
+    """Honour the sponsors' Assigned Angel ID claims.
+
+    A sponsor's ``prior_assigned_angel_ids`` names the children it
+    claims.  A claim on a child that exists and that no other sponsor
+    claims is placed on that child, so the claim is visible before the
+    matcher runs.  A claim another sponsor also makes is a contest the
+    Duplications section settles, so nothing is placed: the child waits
+    for the audit.  A claim that names no child cannot be honoured at
+    all, so the sponsor gets a clarification note and the audit stage
+    fixes it.
+
+    A child that is already placed keeps its placement: the claim is a
+    first placement, not a move, and the matcher re-applies every claim
+    afterwards.
+
+    Args:
+        sponsors: The final sponsor rows, updated in place.
+        children: The final child rows, updated in place.
+
+    Returns:
+        The angel ids that were claimed but name no child.
+    """
+    claims: dict[str, list[dict[str, Any]]] = {}
+    for sponsor in sponsors:
+        if as_bool(sponsor.get("ignore")):
+            continue
+        raw = sponsor.get("prior_assigned_angel_ids")
+        if not raw:
+            continue
+        for angel_id in parse_prior_assigned(str(raw)):
+            claims.setdefault(angel_id, []).append(sponsor)
+    children_by_angel = {
+        str(child["angel_id"]): child
+        for child in children
+        if child.get("angel_id") and not as_bool(child.get("ignore"))
+    }
+    unusable: list[str] = []
+    for angel_id, claimants in claims.items():
+        if len(claimants) > 1:
+            # A contest: the Duplications section decides who keeps the
+            # child, so nothing is placed here.
+            continue
+        sponsor = claimants[0]
+        child = children_by_angel.get(angel_id)
+        if child is None:
+            unusable.append(angel_id)
+            sponsor["clarification_notes"] = append_note(
+                sponsor.get("clarification_notes"),
+                ANGEL_CLAIM_NOTE.format(angel_id=angel_id),
+            )
+            if sponsor.get("status") == STATUS_NEW:
+                sponsor["status"] = STATUS_NEEDS_CLARIFICATION
+            continue
+        if child_sponsor(child) is not None:
+            continue
+        child["assigned_sponsor_id"] = sponsor.get("sponsor_id")
+        child["assignment_source"] = SOURCE_AUTO
+    return sorted(unusable)
 
 
 def child_sponsor(child: dict[str, Any]) -> int | None:

@@ -886,6 +886,11 @@ def dense_final_row(
             "clarification_notes",
             "audited_at",
             "potential_duplicate",
+            # The child's own assignment columns are module-owned (§6.1):
+            # the matcher and the manual matcher placed them, and a
+            # re-screen must not undo that.
+            "assigned_sponsor_id",
+            "assignment_source",
         ):
             row[column] = existing.get(column)
     overwrite_new = (

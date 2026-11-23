@@ -56,11 +56,10 @@ export const ENTITY_FIELDS: Record<'sponsor' | 'family' | 'child', FieldSpec[]> 
     { field: 'physical_packet', label: 'Physical packet', kind: 'boolean' },
     {
       field: 'prior_assigned_angel_ids',
-      label: 'Prior angel ids',
+      label: 'Assigned angel ID',
       kind: 'textarea',
-      // Manual matching places families by hand; the free-text field
-      // cannot express a partial placement, so the editor hides it.
-      hidden: true,
+      // The coordinator corrects a claim the screening run flagged as unusable
+      // (it names no child); this field is where that correction is made.
     },
   ],
   family: [

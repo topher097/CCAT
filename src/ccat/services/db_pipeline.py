@@ -79,6 +79,9 @@ from ccat.services.audit import entity_count_changes
 from ccat.services.db_assignments import (
     STATE_SPLIT,
     STATE_UNASSIGNED,
+    apply_angel_claims,
+    apply_family_summary,
+    apply_sponsor_summary,
     assignment_state,
     group_children_by_family,
 )
@@ -163,6 +166,30 @@ def _unversioned(
     return [
         {k: v for k, v in row.items() if not k.startswith("_")} for row in rows
     ]
+
+
+def _apply_angel_claims(
+    reconciled: "dict[str, list[dict[str, Any]]]",
+) -> None:
+    """Place the sponsors' Assigned Angel ID claims on the children.
+
+    A sponsor's claim is honoured when the data is loaded, so the audit
+    stage sees the child already placed.  A claim another sponsor also
+    makes waits for the Duplications section, and a claim that names no
+    child leaves a clarification note on the sponsor.
+
+    Args:
+        reconciled: The reconciled final stores, updated in place.
+    """
+    unusable = apply_angel_claims(reconciled["sponsor"], reconciled["child"])
+    for angel_id in unusable:
+        logger.warning(
+            "assigned angel id %s names no child; the sponsor needs a"
+            " clarification",
+            angel_id,
+        )
+    apply_family_summary(reconciled["family"], reconciled["child"])
+    apply_sponsor_summary(reconciled["sponsor"], reconciled["child"])
 
 
 def validate_screen_options(
@@ -533,7 +560,7 @@ async def screen(
     async with _store(cfg, actor) as repo:
         reconciled: dict[str, list[dict[str, Any]]] = {}
         for entity in _ENTITIES:
-            rows = _reconcile_rows(
+            reconciled[entity] = _reconcile_rows(
                 entity,
                 before[entity],
                 _prepared_groups(preparation, entity),
@@ -541,10 +568,11 @@ async def screen(
                 cfg,
                 True,
             )
+        _apply_angel_claims(reconciled)
+        for entity in _ENTITIES:
             await repo.commit_finals(
-                "screen", entity, _unversioned(rows), actor
+                "screen", entity, _unversioned(reconciled[entity]), actor
             )
-            reconciled[entity] = rows
         await repo.replace_screen_diagnostics(
             preparation.duplicate_log, preparation.dob_log, actor
         )

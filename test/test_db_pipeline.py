@@ -558,6 +558,67 @@ _DEFAULT_RAW = {
 }
 
 
+def test_screen_db_places_the_assigned_angel_id_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sponsor's claim lands on the child when the data is loaded."""
+    cfg = _prepare(tmp_path)
+    _use_fake_ai(monkeypatch, {"c1": "null"})
+    raw = {
+        "sponsor": [
+            raw_sponsor(
+                "rec_s1",
+                email="walmart@example.com",
+                prior_assigned_angel_ids="1A",
+            ),
+            raw_sponsor(
+                "rec_s2",
+                email="stranger@example.com",
+                prior_assigned_angel_ids="99Z",
+            ),
+        ],
+        "family": [raw_family("fam@example.com")],
+        "child": [raw_child("c1")],
+    }
+
+    async def main() -> None:
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed_stores(repo, raw=raw)
+            options = {
+                "skip_email_check": True,
+                "skip_address_check": True,
+            }
+            await db_pipeline.screen(
+                cfg, "topher", options, lambda *a, **k: None, lambda: None
+            )
+            async with uow.store(cfg, "topher") as repo:
+                children = _by_key(
+                    await repo.final_rows("child"), "zite_record_id"
+                )
+                sponsors = _by_key(
+                    await repo.final_rows("sponsor"), "zite_record_id"
+                )
+            # The claim names the child's angel id, so the child is placed.
+            assert children["c1"]["angel_id"] == "1A"
+            assert (
+                children["c1"]["assigned_sponsor_id"]
+                == (sponsors["rec_s1"]["sponsor_id"])
+            )
+            assert children["c1"]["assignment_source"] == "auto"
+            assert sponsors["rec_s1"]["assigned_angel_ids"] == "1A"
+            # The other claim names no child, so it needs the audit.
+            assert sponsors["rec_s2"]["clarification_notes"] == (
+                "Assigned angel ID 99Z names no child"
+            )
+            assert sponsors["rec_s2"]["status"] == "needs_clarification"
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())
+
+
 def test_screen_db_first_run_appends_finals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

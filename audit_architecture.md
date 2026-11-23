@@ -526,7 +526,35 @@ id, and the lower sponsor id keeps it until the auditor acts.
 - an ignored child's `angel_id` is never handed to another child;
 - a family's angel letters do not skip; they read A, B, C.
 
-#### 10.5.5 The merged "Current (editable)" column
+#### 10.5.5 Assigned Angel ID claims
+
+A sponsor's `prior_assigned_angel_ids` (the Zite "Assigned Angel ID
+Code") names the children it claims. The screening run honours the
+claim when the data is loaded, so the audit stage sees the child already
+placed:
+
+- a claim on a child that exists and that no other sponsor claims is
+  placed on that child (`assigned_sponsor_id`, `assignment_source =
+  "auto"`); a child that is already placed keeps its placement — the
+  claim is a first placement, not a move, and the matcher re-applies
+  every claim afterwards;
+- a claim another sponsor also makes is a **contest**: nothing is
+  placed, and the Duplications section (§10.5.4) settles who keeps the
+  child;
+- a claim that names no child cannot be honoured, so the sponsor gets
+  the `ANGEL_CLAIM_NOTE` clarification note and its status becomes
+  `needs_clarification`. The auditor fixes it on the sponsor's own row,
+  where the claim field is editable.
+
+A claim another sponsor also makes is not noted: the Duplications
+section owns it.
+
+The screen's AI step rebuilds each child row from the prepared row and
+the model's corrections. It preserves the child's own assignment
+columns — they are module-owned (§6.1), so the matcher and the manual
+matcher own them and a re-screen must not undo them.
+
+#### 10.5.6 The merged "Current (editable)" column
 
 The Current column holds one **merged entry** for the whole group, not
 one member's row. The server folds the group's submissions newest
@@ -565,7 +593,7 @@ The store is what bounds this. `final_sponsor`'s primary key is
 A sponsor number therefore cannot be moved from one row to another; the
 pick chooses which existing row carries the merged entry.
 
-#### 10.5.6 Navigation
+#### 10.5.7 Navigation
 
 The audit lists keep their filters in the query string, so a detail
 link carries them and the back button restores the place in the table
@@ -587,6 +615,9 @@ and the id invariants;
 column (the fold, the detail's merged fields) and the sponsor number
 pick (the row it writes onto, the entry it closes out, and the two
 refusals);
+`test/test_angel_claims.py` characterizes the Assigned Angel ID claim
+rule (the claim placed when the data is loaded, the contested claim, the
+clarification note for a claim that names no child);
 `test/test_api.py` adds the HTTP contract for the routes;
 `frontend/test/duplications.test.ts` covers the list, the decision
 table, the pending decisions, the ignore confirmation, the merged

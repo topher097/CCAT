@@ -86,6 +86,10 @@ OPTIONAL_FINAL_COLUMNS: dict[str, tuple[str, ...]] = {
 #: Pre-filled clarification note for orphaned children (§8.7).
 ORPHAN_NOTE = "No matching family registration for this child's primary email"
 
+#: Pre-filled clarification note for a sponsor whose Assigned Angel ID
+#: names no child: the claim cannot be honoured, so the audit fixes it.
+ANGEL_CLAIM_NOTE = "Assigned angel ID {angel_id} names no child"
+
 #: Prefix of the sibling-DOB-conflict note merged into
 #: ``potential_anomoly`` (moved from the old audit server).
 DOB_CONFLICT_PREFIX = "Sibling DOB conflict"

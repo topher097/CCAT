@@ -822,6 +822,53 @@ describe('ignore / unignore', () => {
   })
 })
 
+describe('sponsor assigned angel ID', () => {
+  it('offers the assigned angel ID and round-trips a corrected claim', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (!url.includes('/sponsors/10')) return undefined
+        if (init.method === 'PATCH') {
+          return jsonResponse(
+            200,
+            sponsorDetail({
+              row: { ...SPONSOR_ROW, prior_assigned_angel_ids: '12A, 12B' },
+              baseline: { prior_assigned_angel_ids: '12A' },
+              row_version: 4,
+            }),
+          )
+        }
+        return jsonResponse(
+          200,
+          sponsorDetail({
+            row: { ...SPONSOR_ROW, prior_assigned_angel_ids: '12A' },
+            baseline: { prior_assigned_angel_ids: '12A' },
+          }),
+        )
+      },
+    ])
+    const wrapper = await mountEditor('sponsor', '10')
+    await flushPromises()
+
+    expect(wrapper.get('[data-field="prior_assigned_angel_ids"]').text()).toContain(
+      'Assigned angel ID',
+    )
+    const field = wrapper.get('textarea[name="prior_assigned_angel_ids"]')
+    expect((field.element as HTMLTextAreaElement).value).toBe('12A')
+
+    await field.setValue('12A, 12B')
+    await wrapper.get('[data-testid="save"]').trigger('click')
+    await flushPromises()
+
+    expect(bodyOf(patchCall(fetchMock)!)).toEqual({
+      prior_assigned_angel_ids: '12A, 12B',
+    })
+    expect(
+      (wrapper.get('textarea[name="prior_assigned_angel_ids"]').element as HTMLTextAreaElement)
+        .value,
+    ).toBe('12A, 12B')
+  })
+})
+
 describe('sponsor boolean fields', () => {
   it('renders elevated budget and physical packet and patches them as booleans', async () => {
     const fetchMock = mockRoutes([
