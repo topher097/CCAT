@@ -130,12 +130,17 @@ decision before public deployment.
   assignment is one transaction over the season's entire final store, plus
   one write lock. That is the same cost the audit save already pays; it is
   the trigger to move to PostgreSQL when a season's entity count grows.
-- **A coordinator can change the default run flags of the matching and
-  generation commands.** The write surface is one command's run flags
-  (`matchmaking.run`, `generate.run`); the weights, the Zite endpoints,
+- **A coordinator can change the default run flags of the generation command.**
+  The write surface is one command's run flags (`matchmaking.run`,
+  `generate.run`); the weights, the Zite endpoints,
   the paths and the database URL stay admin-only. The change is recorded in
   the security audit log with the before and after values, and it persists
   in the configuration file, so it affects every later operator's run.
+- **The matching command's run flags are admin-only.** The match page runs
+  the automatic matcher from a single button with no menu, so `matchmaking.run`
+  (`test`, `skip_match`) is read from the configuration file and shown beside
+  the button; only an admin changes it (Settings). The generation command
+  keeps its run menu, so `generate.run` is still coordinator-editable.
 - **The configuration file race.** The admin's whole-tree
   `PUT /api/v1/config` and the coordinator's scoped
   `PATCH /runs/{command}/settings` both read-merge-write the file without a
@@ -150,7 +155,7 @@ decision before public deployment.
   editor.** `prior_assigned_angel_ids` still works exactly as before — the
   automatic matcher still reconciles it and still treats it as a manual
   assignment — but the free-text field cannot express a partial placement,
-  so the editor hides it and points at the manual matching page.
+  so the editor hides it and points at the match page.
 
 ## PostgreSQL trigger criteria
 

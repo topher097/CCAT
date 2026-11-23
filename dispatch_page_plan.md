@@ -1209,7 +1209,7 @@ Four regions, top to bottom:
 Deliberately **not** on this page: the live SSE event tail and the
 cancel button (they stay on `/jobs/:id`); editing a sponsor's email or a
 child's wish list (that stays on the audit pages, reachable with the `↗`
-button); assigning or releasing children (that stays on `/match/manual`);
+button); assigning or releasing children (that stays on `/match`);
 the flat table of every artifact from every run (the downloads the
 coordinator needs are per sponsor and per child, in context); a "send
 all" button; and the `test` / `max_workers` debug flags.
@@ -1217,7 +1217,7 @@ all" button; and the `test` / `max_workers` debug flags.
 ### 6.3 The work list
 
 A `table.data`, not `SponsorCardList.vue` (that component is a card
-picker for `/match/manual`; the dispatch page needs tabular alignment).
+picker for `/match`; the dispatch page needs tabular alignment).
 The helper logic — name, organization, remaining slots, the dispatch
 block reason — is shared, but it has to be **extracted**: those helpers
 are local to `SponsorCardList.vue`'s `<script setup>` and are not
@@ -1479,7 +1479,7 @@ Layout, top to bottom:
 | Some of the sponsor's children have no sheet | In the combined run and in the per-sponsor run, the packet build fails validation for that sponsor (`SponsorPacketError`), so no packet is produced and the row shows `missing_sheets` with the count. In a **packets-only** run the sponsor is skipped instead, and the job reports it in `packets_blocked` (D14). |
 | A sheet is missing but the packet exists from an earlier run | The packet PDF has fewer pages than angels. The row shows the mismatch (`sheets_generated` vs `assigned_count`) and the coordinator regenerates before sending. |
 | Child has no `family_id` | Orphaned; excluded from generation and from packets (unchanged behavior). |
-| Child has no assigned sponsor | A sheet exists to go into a sponsor's packet, so a child without an assigned sponsor cannot get one. "Generate child sheet" reports that the child has no sponsor yet, and the page links to `/match/manual`. The eligibility rule is unchanged, not relaxed for this page. |
+| Child has no assigned sponsor | A sheet exists to go into a sponsor's packet, so a child without an assigned sponsor cannot get one. "Generate child sheet" reports that the child has no sponsor yet, and the page links to `/match`. The eligibility rule is unchanged, not relaxed for this page. |
 | `angel_id` with a path separator | Hard error at generation time, unchanged. The new `child` job option validates the id format before it reaches the renderer. |
 | The packet was regenerated after the draft was written | The draft stores the attachment `sha256` values it was rendered from. A mismatch raises the blocker `packet_changed` and the coordinator re-drafts. |
 | The packet was built before the manifest existed | It has no manifest, so it cannot be drafted from one. The sponsor carries the blocker `manifest_missing` and the next packet build rewrites it. |

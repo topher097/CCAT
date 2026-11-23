@@ -20,7 +20,6 @@ import DuplicationDetailView from '../views/DuplicationDetailView.vue'
 
 import PipelineCommandView from '../views/PipelineCommandView.vue'
 import MatchView from '../views/MatchView.vue'
-import ManualMatchView from '../views/ManualMatchView.vue'
 import DispatchView from '../views/DispatchView.vue'
 import StatsView from '../views/StatsView.vue'
 import ClarifyListView from '../views/ClarifyListView.vue'
@@ -137,13 +136,13 @@ export const routes: RouteRecordRaw[] = [
     path: '/match',
     name: 'match',
     component: MatchView,
-    meta: { title: 'Match' },
+    meta: { title: 'Match', wide: true },
   },
   {
+    // The manual matching page became the match page; the old address
+    // still works and keeps its filters.
     path: '/match/manual',
-    name: 'match-manual',
-    component: ManualMatchView,
-    meta: { title: 'Manual matching', wide: true },
+    redirect: (to) => ({ path: '/match', query: to.query }),
   },
   {
     path: '/dispatch',

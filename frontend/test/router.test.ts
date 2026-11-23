@@ -92,6 +92,14 @@ describe('router map', () => {
     )
   })
 
+  it('redirects the old manual matching address to the match page', async () => {
+    authenticated()
+    const router = createAppRouter()
+    await router.push('/match/manual?sponsor_id=42')
+    expect(router.currentRoute.value.path).toBe('/match')
+    expect(router.currentRoute.value.query.sponsor_id).toBe('42')
+  })
+
   it('redirects unauthenticated users to /login with a redirect', async () => {
     unauthenticated()
     const router = createAppRouter()

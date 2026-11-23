@@ -540,7 +540,7 @@ onMounted(() => void load())
         data-testid="manual-matching-pointer"
       >
         Place families by hand in
-        <RouterLink to="/match/manual">Manual matching</RouterLink>.
+        <RouterLink to="/match">Match</RouterLink>.
       </p>
 
       <h2>Baseline vs current</h2>
