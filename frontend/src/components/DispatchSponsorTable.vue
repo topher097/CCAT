@@ -4,7 +4,8 @@
 import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import type { DispatchRow } from '../api/dispatch'
+import { artifactDownloadUrl } from '../api/commands'
+import { sheetsZipUrl, type DispatchChild, type DispatchRow } from '../api/dispatch'
 import { formatTime } from '../utils/format'
 import {
   dispatchBlock,
@@ -16,6 +17,8 @@ import {
 const props = withDefaults(
   defineProps<{
     rows: DispatchRow[]
+    season: string
+    children: DispatchChild[]
     canSend: boolean
     mailConfigured?: boolean
   }>(),
@@ -157,6 +160,22 @@ function compare(a: DispatchRow, b: DispatchRow): number {
 }
 
 const visible = computed(() => props.rows.filter(matches).sort(compare))
+const childrenBySponsor = computed(() => {
+  const grouped = new Map<number, DispatchChild[]>()
+  for (const child of props.children) {
+    if (child.sponsor_id === null || child.sponsor_id === undefined) continue
+    const children = grouped.get(child.sponsor_id) ?? []
+    children.push(child)
+    grouped.set(child.sponsor_id, children)
+  }
+  return grouped
+})
+
+function childSheets(sponsorId: number): DispatchChild[] {
+  return (childrenBySponsor.value.get(sponsorId) ?? []).filter(
+    (child) => child.sheet_artifact_id !== null && child.sheet_artifact_id !== undefined,
+  )
+}
 
 function toggleChip(chip: ChipKey): void {
   chips.value = chips.value.includes(chip)
@@ -267,9 +286,19 @@ function emailClass(row: DispatchRow): string {
       <span class="muted" role="status" data-testid="dispatch-count">
         Showing {{ visible.length }} of {{ props.rows.length }} sponsors
       </span>
-      <button type="button" data-testid="clear-filters" @click="clearFilters">
-        Clear filters
-      </button>
+      <div class="status-line">
+        <a
+          v-if="props.rows.some((row) => row.sheets_ready_count > 0)"
+          :href="sheetsZipUrl(props.season)"
+          download
+          data-testid="download-all-sheets-zip"
+        >
+          Download all sheets (.zip)
+        </a>
+        <button type="button" data-testid="clear-filters" @click="clearFilters">
+          Clear filters
+        </button>
+      </div>
     </div>
 
     <p v-if="visible.length === 0" class="muted" data-testid="dispatch-no-match">
@@ -325,6 +354,18 @@ function emailClass(row: DispatchRow): string {
             <div v-if="row.missing_sheet_angel_ids.length" class="muted">
               Missing: {{ row.missing_sheet_angel_ids.join(', ') }}
             </div>
+            <div v-if="childSheets(row.sponsor_id).length" class="child-sheet-links">
+              <a
+                v-for="child in childSheets(row.sponsor_id)"
+                :key="child.zite_record_id"
+                :href="artifactDownloadUrl(child.sheet_artifact_id!)"
+                download
+                class="muted"
+                data-testid="download-sheet"
+              >
+                {{ child.angel_id }}
+              </a>
+            </div>
           </td>
           <td>
             <span
@@ -371,6 +412,24 @@ function emailClass(row: DispatchRow): string {
               >
                 Regenerate
               </button>
+              <a
+                v-if="row.sheets_ready_count > 0"
+                :href="sheetsZipUrl(props.season, row.sponsor_id)"
+                download
+                class="muted"
+                data-testid="download-sheets-zip"
+              >
+                Download sheets (.zip)
+              </a>
+              <a
+                v-if="row.packet_pdf_artifact_id != null"
+                :href="artifactDownloadUrl(row.packet_pdf_artifact_id)"
+                download
+                class="muted"
+                data-testid="download-packet-pdf"
+              >
+                Download packet (PDF)
+              </a>
               <button
                 v-if="row.email_status === 'sent'"
                 type="button"
@@ -411,6 +470,13 @@ function emailClass(row: DispatchRow): string {
   flex-direction: column;
   align-items: flex-start;
   gap: 0.35rem;
+}
+
+.child-sheet-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.25rem;
 }
 
 .blockers {

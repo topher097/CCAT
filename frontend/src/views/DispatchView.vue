@@ -8,8 +8,10 @@ import {
   draftDispatchEmails,
   getDispatchDraft,
   listDispatch,
+  listDispatchChildren,
   patchDispatchDraft,
   sendDispatchEmail,
+  type DispatchChild,
   type DispatchDraft,
   type DispatchDraftRequest,
   type DispatchListView,
@@ -36,6 +38,7 @@ const session = useSessionStore()
 const router = useRouter()
 const seasonName = computed(() => session.season?.name ?? '')
 const data = ref<DispatchListView | null>(null)
+const children = ref<DispatchChild[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const notice = ref<string | null>(null)
@@ -84,6 +87,15 @@ async function load(): Promise<void> {
   }
 }
 
+async function loadChildren(): Promise<void> {
+  if (!seasonName.value) return
+  try {
+    children.value = (await listDispatchChildren(seasonName.value)).rows
+  } catch {
+    children.value = []
+  }
+}
+
 async function pollJobs(): Promise<void> {
   if (pollTimer !== undefined) window.clearTimeout(pollTimer)
   pollTimer = undefined
@@ -105,6 +117,7 @@ async function pollJobs(): Promise<void> {
 
 function refresh(): void {
   void load()
+  void loadChildren()
   void pollJobs()
 }
 
@@ -367,6 +380,8 @@ onUnmounted(() => {
       <DispatchSponsorTable
         v-else
         :rows="data.rows"
+        :season="seasonName"
+        :children="children"
         :can-send="canSend"
         :mail-configured="data.mail_configured"
         style="margin-top: 1rem"

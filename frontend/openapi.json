@@ -6202,6 +6202,63 @@
         ]
       }
     },
+    "/api/v1/seasons/{season}/dispatch/sheets.zip": {
+      "get": {
+        "description": "Download child information sheets as a ZIP archive.\n\nThe archive holds the same child PII as a single ``child_sheet``\nartifact download, so the download is recorded in the security-audit\nevents (\u00a78).\n\nArgs:\n    season: The season in the route.\n    request: The current request.\n    sponsor_id: Optional sponsor to scope the archive to.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The ZIP archive response.\n\nRaises:\n    ApiError: The mapped refusal when no sheets are available.",
+        "operationId": "get_sheets_zip_api_v1_seasons__season__dispatch_sheets_zip_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sponsor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sponsor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Sheets Zip",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
     "/api/v1/seasons/{season}/dispatch/sponsors/{sponsor_id}/draft": {
       "get": {
         "description": "Read one sponsor's email draft.\n\nArgs:\n    sponsor_id: The sponsor's key.\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The draft.\n\nRaises:\n    ApiError: 404 when the sponsor has no draft.",

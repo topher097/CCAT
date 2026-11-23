@@ -4,6 +4,7 @@ import { api } from './client'
 import type { Schemas } from './client'
 
 export type DispatchAttachment = Schemas['DispatchAttachment']
+export type DispatchChild = Schemas['DispatchChild']
 export type DispatchChildListView = Schemas['DispatchChildListView']
 export type DispatchDraft = Schemas['DispatchDraftView']
 export type DispatchDraftBatchRequest = Schemas['DispatchDraftBatchRequest']
@@ -16,6 +17,13 @@ export type DispatchTotals = Schemas['DispatchTotals']
 
 function path(season: string): string {
   return `/api/v1/seasons/${encodeURIComponent(season)}/dispatch`
+}
+
+export function sheetsZipUrl(season: string, sponsorId?: number): string {
+  const base = `/api/v1/seasons/${encodeURIComponent(season)}/dispatch/sheets.zip`
+  return sponsorId === undefined
+    ? base
+    : `${base}?sponsor=${encodeURIComponent(String(sponsorId))}`
 }
 
 function draftPath(season: string, sponsorId: number): string {

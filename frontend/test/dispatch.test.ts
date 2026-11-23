@@ -3,6 +3,7 @@ import { flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import type {
+  DispatchChildListView,
   DispatchDraft,
   DispatchListView,
   DispatchRow,
@@ -89,6 +90,21 @@ function listView(rows: DispatchRow[] = [sponsor()]): DispatchListView {
   }
 }
 
+function childrenView(): DispatchChildListView {
+  return {
+    rows: [
+      {
+        zite_record_id: 'child-1',
+        angel_id: '1A',
+        family_id: 1,
+        sponsor_id: 7,
+        generated_info_sheet: true,
+        sheet_artifact_id: 88,
+      },
+    ],
+  }
+}
+
 function draft(overrides: Partial<DispatchDraft> = {}): DispatchDraft {
   return {
     sponsor_id: 7,
@@ -132,8 +148,15 @@ function sendResult(state: 'sent' | 'failed' | 'unknown') {
 function baseRoutes(
   list: DispatchListView = listView(),
   loadedDraft: DispatchDraft = draft(),
+  children: DispatchChildListView | null = childrenView(),
 ) {
   return [
+    (url: string, init: RequestInit) =>
+      children &&
+      url.endsWith('/seasons/2026/dispatch/children') &&
+      (init.method ?? 'GET') === 'GET'
+        ? jsonResponse(200, children)
+        : undefined,
     (url: string, init: RequestInit) =>
       url.endsWith('/seasons/2026/dispatch') && (init.method ?? 'GET') === 'GET'
         ? jsonResponse(200, list)
@@ -266,6 +289,46 @@ describe('dispatch work list and generation', () => {
       job_type: 'generate',
       options: { child: 'child-42', only: 'sheets', overwrite: false },
     })
+  })
+})
+
+describe('dispatch downloads', () => {
+  it('offers sponsor and page ZIPs, child sheets, and packet PDF downloads', async () => {
+    const { wrapper } = await mountDispatch()
+
+    expect(wrapper.get('[data-testid="download-sheets-zip"]').attributes('href')).toBe(
+      '/api/v1/seasons/2026/dispatch/sheets.zip?sponsor=7',
+    )
+    expect(
+      wrapper.get('[data-testid="download-all-sheets-zip"]').attributes('href'),
+    ).toBe('/api/v1/seasons/2026/dispatch/sheets.zip')
+    expect(wrapper.get('[data-testid="download-sheet"]').attributes('href')).toBe(
+      '/api/v1/artifacts/88/download',
+    )
+    expect(
+      wrapper.get('[data-testid="download-packet-pdf"]').attributes('href'),
+    ).toBe('/api/v1/artifacts/90/download')
+  })
+
+  it('hides sponsor ZIP and packet links when unavailable', async () => {
+    const row = sponsor({
+      sheets_ready_count: 0,
+      sheets_total: 1,
+      missing_sheet_angel_ids: ['1A'],
+      packet_pdf_artifact_id: null,
+    })
+    const { wrapper } = await mountDispatch(true, listView([row]))
+
+    expect(wrapper.find('[data-testid="download-sheets-zip"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="download-all-sheets-zip"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="download-packet-pdf"]').exists()).toBe(false)
+  })
+
+  it('keeps dispatch available when child sheets request returns 404', async () => {
+    const { wrapper } = await mountDispatch(true, listView(), baseRoutes(listView(), draft(), null))
+
+    expect(wrapper.find('[data-testid="dispatch-table"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="download-sheet"]').exists()).toBe(false)
   })
 })
 
