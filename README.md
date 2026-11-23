@@ -12,7 +12,7 @@ refactor that introduced the current stack is described in
 Vue 3 + TypeScript SPA (frontend/)
           |  same-origin HTTPS
           v
-FastAPI application (src/ccat/api/)  ── auth/RBAC, REST DTOs, OpenAPI
+FastAPI application (src/ccat/api/)  ── auth/RBAC, REST DTOs, OpenAPI, Gmail dispatch
           |
 application services (src/ccat/services/)
           |
@@ -30,7 +30,8 @@ durable job worker (src/ccat/jobs/) ── Zite, ZeroBounce, Nominatim, OpenCode
 - **Storage** is season-scoped in SQLite: `raw_*` acquisition snapshots,
   complete `final_*` stores (ignored, orphaned, duplicate, raw-missing and
   pending entities all remain stored), diagnostics/logs, match runs, jobs,
-  artifacts, clarification state, users and sessions.
+  artifacts, clarification state, sponsor dispatch drafts/send attempts, users
+  and sessions.
 - **Raw is source; final is truth; logs are history.**
 - The workbook stays as an import/export format only:
   `ccat db-import` migrates it into SQLite (validated, hash-guarded,
@@ -53,10 +54,12 @@ cd frontend && npm install && npm run dev   # Vite on :5173, proxies /api
 ## Commands
 
 The live pipeline runs as jobs behind `ccat serve` and `ccat worker`. The
+`acquire`, `screen`, `match`, `generate`, `stats` and `clarify-export`
 commands below are the legacy workbook-era CLI: they read and write the
 deprecated `excel_file` workbook and refuse to run when that path is not
 configured. The database equivalents are the `acquire`, `screen`, `match`,
-`generate`, `stats` and `clarify_generate` jobs.
+`generate`, `stats` and `clarify_generate` jobs. The remaining commands
+operate on the database or the deployment.
 
 ```sh
 ccat acquire       [--config PATH]  # fetch Zite tables verbatim -> raw_*
@@ -81,6 +84,7 @@ ccat workbook-export --output PATH [--db URL] [--report PATH] [--force]
 ccat db-upgrade    [--config PATH]     # controlled Alembic upgrade to head
 ccat serve         [--config PATH]     # FastAPI server (replaces both UIs)
 ccat worker        [--config PATH]     # durable job worker loop
+ccat mail-authorize [--config PATH]    # one-time Gmail consent; needs a browser
 ```
 
 `--test` means the first unit of work: first family for screening, first
@@ -117,6 +121,10 @@ responses remain stored.
   run button with a pop-up menu on `/match`, its run flags live in the
   configuration file (`matchmaking.run`, `generate.run`), and a manual
   placement is protected from an automatic run.
+- **Dispatch** (`/dispatch`) combines sheet/packet generation with the sponsor
+  email work list; `/generate` redirects there. Coordinators and admins can
+  draft and edit the manifest-based packet emails. Only an admin can send one
+  through Gmail, and a successful send marks the sponsor as dispatched.
 - `ccat worker` runs the durable job worker. Jobs are queued in the
   database, leased with heartbeats, cancelled cooperatively, and report
   typed, retryable errors.

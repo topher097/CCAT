@@ -10,8 +10,10 @@ decision before public deployment.
 - No sponsor or family self-service accounts. All web accounts are staff
   accounts (decision D1). A sponsor portal needs row-level permissions and
   a different privacy design.
-- No automatic email sending. Clarification drafts are generated and edited,
-  never sent (the pre-existing behavior is preserved deliberately).
+- No clarification-email sending. Clarification drafts are generated and
+  edited, never sent; that pre-existing decision is unchanged. Sponsor packet
+  email is the deliberate exception: the dispatch page composes it and an
+  admin sends it through Gmail.
 - No dual writing of Excel and SQLite in production. The workbook is an
   import/export format only.
 - No PostgreSQL deployment. The schema and repositories are written to be
@@ -46,12 +48,21 @@ decision before public deployment.
    contact columns, but free-text notes can still carry identifiers.
 3. **Retention and safeguarding** for raw acquisition history, security
    activity diffs, full ZeroBounce/Nominatim payloads, match archives,
-   generated packets and logs, plus backup hosting and encryption.
+   generated packets and logs, plus backup hosting and encryption. Dispatch
+   adds stored draft bodies, coordinator notes and send-attempt snapshots;
+   these personal-data copies need a defined retention period.
 4. **Report timezone.** `report.timezone` defaults to `local` (the previous
    behavior). Production should pin it explicitly.
 5. **Clarification contact timestamps.** Legacy naive-local timestamps were
    converted assuming `America/Detroit`; confirm against the source
    system's timezone.
+6. **Gmail OAuth consent and app status.** An operator must authorize the
+   sending account with the `gmail.send` scope. An OAuth app left in Google's
+   "Testing" publishing status receives seven-day refresh tokens; production
+   needs a published/verified app rather than repeated weekly consent.
+7. **Sending identity.** `dispatch.sender_email` must be the authorized Gmail
+   account or a verified send-as alias that the account may use. The display
+   name and reply-to address also need owner approval before sending.
 
 ## Technical limitations
 

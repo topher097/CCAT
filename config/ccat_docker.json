@@ -602,6 +602,16 @@
       "rhoda.clark@usc.salvationarmy.org"
     ]
   },
+  "dispatch": {
+    "enabled": false,
+    "sender_email": "",
+    "sender_name": "The Copper Country Angel Tree Team",
+    "reply_to": "",
+    "client_file": "/app/config-seed/ccat_google_credentials.json",
+    "token_file": "/app/config/ccat_google_gmail_token.json",
+    "timeout_seconds": 30.0,
+    "max_attachment_bytes": 25000000
+  },
   "log_file": "/logs/ccat.log",
   "match_report_csv": "/artifacts/match_reports/ccat_2026_match_report.csv",
   "storage": {

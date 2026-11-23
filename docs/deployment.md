@@ -38,7 +38,10 @@ Runtime paths (all config paths are absolute — no CWD dependence):
 | `/artifacts` | volume `ccat-artifacts` (PDFs, packets, reports, exports) | yes |
 | `/logs` | volume `ccat-logs` (`ccat.log`) | yes |
 | `/app/config/ccat_docker.json` | volume `ccat-config` (live config) | yes |
+| `/app/config/ccat_google_gmail_token.json` | volume `ccat-config` (live, refreshed Gmail token) | yes |
 | `/app/config-seed/ccat_docker.json` | bind mount of the repo file, read-only | no |
+| `/app/config-seed/ccat_google_credentials.json` | bind mount of the OAuth client, read-only | no |
+| `/app/config-seed/ccat_google_gmail_token.json` | bind mount of the initial Gmail token, read-only | no |
 | `/app/data` | bind mount, read-only | no |
 
 > **Settings tab:** the admin Settings tab rewrites the live configuration
@@ -195,6 +198,64 @@ v2** server as a service; the app reaches it at `http://opencode:4097`
   `401` means the server is up and asking for the password; `200` means it is
   up without auth.
 
+### Sponsor packet email (Gmail)
+
+Sending stays off until `dispatch.enabled` is true and
+`dispatch.sender_email` is set. The sender must be the authorized Gmail
+account or a verified send-as alias. The existing Drive OAuth **client** is
+reused, but Gmail has a separate token with only the `gmail.send` scope; the
+Drive token is not read or changed.
+
+Compose mounts these host files read-only (the paths shown are the defaults;
+`CCAT_GOOGLE_CLIENT_FILE` and `CCAT_GMAIL_TOKEN_FILE` override them):
+
+- `./ccat_google_credentials.json` at
+  `/app/config-seed/ccat_google_credentials.json`;
+- `./ccat_google_gmail_token.json` at
+  `/app/config-seed/ccat_google_gmail_token.json`.
+
+Authorize and install the token before enabling dispatch:
+
+1. On a machine with a browser, the project virtualenv and the OAuth client
+   file, run:
+
+   ```sh
+   ccat mail-authorize --config config/ccat_2026.json
+   chmod 600 ccat_google_gmail_token.json
+   ```
+
+   The command opens the one-time Google consent and writes the token beside
+   the client file. Do not run this consent command on the headless container
+   host; it needs the browser callback.
+2. Copy the read-only seed into the live `ccat-config` volume. This one-shot
+   command does not start dependencies; root reads the host's mode-600 seed,
+   then gives the live copy to the runtime user (uid 10001):
+
+   ```sh
+   docker compose --profile prod run --rm --no-deps --user root --entrypoint sh api \
+     -c 'cp /app/config-seed/ccat_google_gmail_token.json /app/config/ccat_google_gmail_token.json && chown 10001:10001 /app/config/ccat_google_gmail_token.json && chmod 600 /app/config/ccat_google_gmail_token.json'
+   ```
+
+   For the dev profile, use `--profile dev` and `api-dev` instead.
+3. Set `dispatch.sender_email`, the optional `reply_to`, and
+   `dispatch.enabled: true` in the live configuration (or in the repo seed
+   before it is applied).
+
+The runtime uses `/app/config/ccat_google_gmail_token.json`, not the seed. It
+refreshes expired access tokens and atomically replaces that live file, so
+the refreshed credential survives container recreation. Do not point
+`dispatch.token_file` at either read-only mount: a single-file bind mount also
+rejects the atomic rename with `EBUSY`. The seed can become stale after a
+refresh; the live token is authoritative.
+
+If Google revokes the refresh token or it expires, the send is recorded as
+`failed`; the app cannot repair consent during a request. Re-run
+`ccat mail-authorize` on the browser machine, reinstall the token with the
+command above, and retry the failed send. Google's "Testing" publishing
+status issues seven-day refresh tokens, so production needs a published and
+verified OAuth app. An `unknown` send is different: reconcile it in Gmail
+before any retry because the provider may already have accepted it.
+
 ## 5. Migrations (controlled release step)
 
 Schema migrations are **not** run by the API/worker replicas. Compose runs a
@@ -313,6 +374,9 @@ workbook, which is only a snapshot. See `cutover.md` §7.
 - [ ] The host `~/.local/share/opencode/auth.json` is a secret: it is mounted
       read-only into the opencode service and copied there; never commit it.
       Set `OPENCODE_SERVER_PASSWORD` unless the compose network is private.
+- [ ] The Gmail OAuth client and both token copies are access-controlled and
+      never committed. The live token on `ccat-config` is a long-lived
+      credential; include it in credential backup/rotation decisions.
 - [ ] Rotate provider/session secrets on staff changes; restart api/worker.
 - [ ] Backups encrypted and access-controlled; retention schedule agreed
       (decision D9, `[human]`).

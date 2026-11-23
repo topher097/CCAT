@@ -39,6 +39,10 @@ x-app-volumes: &app-volumes
   # The repo file is the seed; the entrypoint applies it when it is newer
   # than the live copy.
   - ./config/ccat_docker.json:/app/config-seed/ccat_docker.json:ro
+  # Gmail OAuth inputs stay read-only. The token is copied into the writable
+  # ccat-config volume before sending; refresh uses an atomic rename there.
+  - ${CCAT_GOOGLE_CLIENT_FILE:-./ccat_google_credentials.json}:/app/config-seed/ccat_google_credentials.json:ro
+  - ${CCAT_GMAIL_TOKEN_FILE:-./ccat_google_gmail_token.json}:/app/config-seed/ccat_google_gmail_token.json:ro
   - ./data:/app/data:ro
 
 x-logging: &logging
@@ -223,6 +227,8 @@ services:
       # (the admin Settings tab saves here), seeded from the repo file.
       - ccat-config:/app/config
       - ./config/ccat_docker.json:/app/config-seed/ccat_docker.json:ro
+      - ${CCAT_GOOGLE_CLIENT_FILE:-./ccat_google_credentials.json}:/app/config-seed/ccat_google_credentials.json:ro
+      - ${CCAT_GMAIL_TOKEN_FILE:-./ccat_google_gmail_token.json}:/app/config-seed/ccat_google_gmail_token.json:ro
       - ./data:/app/data:ro
       - ./src:/app/src:ro
     depends_on:

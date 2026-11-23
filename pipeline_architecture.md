@@ -37,6 +37,8 @@ giving program. The pipeline has independently runnable modules:
 5. **Generation and Packets** — render child information PDFs, set child
    generation markers after real PDF completion, and assemble sponsor packet
    directories.
+6. **Dispatch** — review the sponsor work list, compose packet email from the
+   packet manifest, and let an admin send it through Gmail.
 
 All pipeline state lives in SQLite. All configuration lives in one
 JSON file. Raw is source; final is truth; logs are process history.
@@ -68,7 +70,12 @@ JSON file. Raw is source; final is truth; logs are process history.
                                         |
                                         v
                   (5b) Sponsor packets > output/sponsor_packets/<sponsor_id>/
-                                         (email.html draft + combined packet PDF)
+                                         (email.html + combined packet PDF + manifest.json)
+                                         |
+                                         v
+                  (5c) Dispatch --------> sponsor_drafts / sponsor_send_attempts
+                                         + Gmail send (admin only)
+                                         + packets_dispatched_at in final_sponsor
 ```
 
 Modules run individually via CLI (`ccat acquire`, `ccat screen`,
@@ -77,7 +84,8 @@ taking an optional `--config` path (default `config/ccat_2026.json`).
 Interactive audit and clarification editing run through `ccat serve` and its
 Vue views; the legacy `ccat audit` and `ccat clarify` commands are removed.
 Packets run as the second phase of `ccat generate`; there is no standalone
-`sponsor_packets` command.
+`sponsor_packets` command. Dispatch runs interactively in the Vue SPA at
+`/dispatch`; `/generate` redirects there.
 
 Supported migration commands are `ccat audit-migrate` (old v1 directly to
 persistent finals) and `ccat consolidate-migrate` (full v2 `adj_*` to a
@@ -325,14 +333,26 @@ Structure:
 
   // Sponsor packets (module 5b). One <sponsor_id>/ directory per
   // assigned sponsor under output_dir, holding the rendered email
-  // draft HTML and the combined child information PDF (angel sheets
-  // only) plus a copy of the instructions PDF (instructions file first,
-  // then each angel's child information sheet).
+  // HTML, the combined child information PDF (angel sheets only), a
+  // copy of the instructions PDF, and (in the database path) manifest.json.
   "sponsor_packets": {
     "email_template_html_file": "data/sponsor_packet_email_2026.html",
     "instructions_file": "data/Sponsor Instruction 2026.pdf",
     "output_dir": "./output/sponsor_packets",
     "filename_prefix": "sponsor_packet"
+  },
+
+  // Sponsor packet dispatch (module 5c). The OAuth client is the existing
+  // Drive Desktop-app client; the Gmail token is separate and gmail.send-only.
+  "dispatch": {
+    "enabled": false,
+    "sender_email": "",
+    "sender_name": "The Copper Country Angel Tree Team",
+    "reply_to": "",
+    "client_file": "ccat_google_credentials.json",
+    "token_file": "ccat_google_gmail_token.json",
+    "timeout_seconds": 30.0,
+    "max_attachment_bytes": 25000000
   },
 
   // Logging / reports. match_report is also exported as CSV for the
@@ -961,6 +981,16 @@ so it survives the ODT -> PDF conversion unchanged.
   `--overwrite`), and the packet phase builds only that sponsor's packet
   (its sheets must all exist; an unknown or angel-less sponsor id is a
   typed `SponsorPacketError`).
+- The database `generate` job's `only` option selects `sheets`, `packets`, or
+  `both` (the default). A sheets-only run skips packets. A packets-only run
+  skips each sponsor whose children still lack sheets and reports the sponsor
+  id and missing angel ids in `packets_blocked`; it does not fail the other
+  sponsors.
+- The job's `child` option scopes sheet generation to one child's
+  `zite_record_id` (a unique `angel_id` is accepted as a fallback) and
+  regenerates that sheet even when its marker is set. It cannot be combined
+  with a sponsor scope or `only="packets"`; the dispatch page submits it with
+  `only="sheets"`.
 - Pending rows need a non-null `zite_record_id` and a safe `angel_id`
   filename (no separators); missing family/sponsor rows or duplicate
   `family_id`/`sponsor_id`s in `final_family`/`final_sponsor` are hard
@@ -971,24 +1001,27 @@ so it survives the ODT -> PDF conversion unchanged.
 
 ## 13b. Sponsor Packet Phase
 
-Entry point: `src/ccat/sponsor_packets.py`, invoked as the packet phase of
-`ccat generate` (`--overwrite` and `--sponsor ID` apply); there is no
-standalone `ccat sponsor_packets` command.
+The database entry point is `src/ccat/services/db_generate.py`; the legacy
+workbook path uses `src/ccat/sponsor_packets.py`. Packet generation is the
+second phase of `ccat generate` (`--overwrite` and `--sponsor ID` apply);
+there is no standalone `ccat sponsor_packets` command.
 
-For every output-eligible `final_sponsor` row with assigned angels
-(`assigned_angel_ids` non-empty), builds one packet directory:
-`output/sponsor_packets/<sponsor_id>/` containing:
+Each output-eligible sponsor with at least one eligible assigned child gets
+one packet directory. The workbook path writes
+`sponsor_packets.output_dir/<sponsor_id>/`; the database path writes
+`<artifact_root>/sponsor_packets/<sponsor_id>/`. A directory contains:
 
-- `sponsor_packet_<sponsor_id>.html` — the email draft, rendered from
+- `sponsor_packet_<sponsor_id>.html` — the email HTML, rendered from
   the Jinja2 template `sponsor_packets.email_template_html_file`
   (default `data/sponsor_packet_email_2026.html`) with: a subject
   line, a personalized greeting ("Dear {first_name},"), and a table
   of the sponsor's assigned angels — angel ID, gender, age at
   Christmas, and per-angel drop-off location (the angel's family
-  `gift_pickup_location`).  All styling is inline CSS so the draft
-  survives copy-paste into an email client (manual sending; the
-  subject, To (sponsor email), and BCC lines are shown in a header
-  box above the body).
+  `gift_pickup_location`). All styling is inline CSS. In the database
+  flow the dispatch page renders the message it sends from the manifest;
+  the packet HTML remains the manual rendering. The template's subject,
+  To and BCC copy-paste box is conditional on `manual=true`, so it appears
+  in that packet HTML but not in the app-composed message.
 - `Sponsor <sponsor_id> - Child Information <season>.pdf` — the
   sponsor's angel child information sheets combined into one PDF
   (`output/child_info_sheets/<location>/AT<season>_<angel_id>.pdf`,
@@ -998,17 +1031,27 @@ For every output-eligible `final_sponsor` row with assigned angels
 - a copy of the sponsor instruction file
   (`sponsor_packets.instructions_file`, default `data/Sponsor
   Instruction 2026.pdf`), copied as-is into the directory.
+- `manifest.json` (database generation path) — the packet build's id,
+  sponsor, child ids and display rows, subject, and each packet file's role,
+  filename, size and SHA-256 hash. A fingerprint covers the assignment and
+  file hashes. Dispatch renders from this manifest and checks it again before
+  sending, so the body and attachments describe the same packet build. The
+  legacy workbook packet builder does not write a manifest.
 
-The email draft names both PDF attachments (`instructions_filename`
-and `child_information_filename` template variables) so the body
-always matches the files in the directory.
+The email names the PDF attachments (`instructions_filename` and
+`child_information_filename` template variables). Dispatch attaches the
+manifest's non-HTML files itself; no copy-paste or manual attachment step is
+part of the app send.
 
 Run semantics:
 
-- Reruns skip sponsors whose packet files already exist;
-  `--overwrite` regenerates (manual email edits are lost only then).
-  `ccat generate --sponsor <id>` (module 5, §13.4) builds only that
-  sponsor's packet.
+- Reruns skip sponsors whose packet files already exist; the database path
+  also requires `manifest.json`, so an older packet without one is rebuilt.
+  `--overwrite` regenerates. The database path first preserves the previous
+  HTML as `<stem>.manual.html`; an existing dispatch draft remains tied to its
+  old build, so the work list reports `packet_changed` until the draft is
+  rendered again. `ccat generate --sponsor <id>` (module 5, §13.4) builds only
+  that sponsor's packet.
 - Sponsors without assigned angels produce no directory; unknown angel
   ids in `assigned_angel_ids` are dropped with a warning.
 - Angels whose child information sheet PDF has not been generated yet
@@ -1024,8 +1067,69 @@ Run semantics:
   eligible families count.
 - Missing template file, missing eligible `final_sponsor`/`final_child`, or
   no sponsor with assigned angels is a typed `SponsorPacketError`.
-- Finals are read-only; module writes only files under
-  `sponsor_packets.output_dir`.
+- Final entity rows are read-only during the packet build; the database path
+  also registers the packet files and manifest as artifacts.
+
+## 13c. Dispatch Phase
+
+The `/dispatch` page owns the sponsor packet work list, email drafts and the
+actual send. Its six routes live under
+`/api/v1/seasons/{season}/dispatch`. Reading the work list, assigned-child
+sheet state and a draft is open to every authenticated role. Drafting and
+editing require coordinator or admin; sending requires admin.
+
+The work list has one row per eligible sponsor with at least one eligible
+assigned child. It combines the requested and assigned counts, generated and
+missing sheets, packet and attachment state, draft and latest-attempt state,
+the dispatch timestamp, duplicate recipient addresses and the blockers that
+prevent sending. A separate child list exposes each assigned child's sheet
+state. The page also starts the database `generate` job; sending itself is one
+API request per sponsor, not a durable job.
+
+Drafting renders the Jinja2 template from `manifest.json`, never from a fresh
+assignment projection. `sponsor_drafts` holds one current row per season and
+sponsor: subject, rendered HTML, an optional plain-text note, recipient and
+BCC snapshots, attachment metadata, the manifest build id and an optimistic
+version. Drafting never sends and never stamps the sponsor. Subject/note saves
+require the draft's `If-Match` version; a send carries the version it reviewed
+and fails when another window changed it.
+
+Before calling the provider, a send checks that the manifest still matches
+the current assignment, that no pipeline job is active, and that every named
+attachment still has the recorded bytes. It also requires a recipient and
+subject and enforces `dispatch.max_attachment_bytes` over the combined
+attachments. The provider call happens outside the database transaction.
+
+Every send appends a `sponsor_send_attempts` row in `sending` state before the
+provider call. Its subject, body, recipients, attachment hashes, actor and
+message id are a content snapshot; they are not rewritten by later draft
+edits. The attempt closes with one of three outcomes, and a security audit
+event records the attempt:
+
+- `sent`: Gmail accepted the message. The provider id and finish time are
+  stored, and `final_sponsor.packets_dispatched_at` is stamped in the same
+  result transaction.
+- `failed`: the provider refused the message, or the mail account could not
+  even attempt it. It was not accepted, so a manual retry is safe; the page
+  offers that retry.
+- `unknown`: a timeout, dropped connection or ambiguous provider answer does
+  not establish whether Gmail accepted it. It is never retried automatically,
+  and the page hides the retry action pending human reconciliation.
+
+The dispatch timestamp records that the packet went out. The existing manual
+matcher refuses assignment/release changes for a dispatched sponsor, but the
+timestamp is not a general assignment lock: the automatic matcher and audit
+paths do not consult it. Packet generation alone never sets it.
+
+`src/ccat/mail.py` is the Gmail transport. `ccat mail-authorize` performs the
+operator's browser consent with the `gmail.send` scope, reusing the Drive
+OAuth client but writing the separate token named by `dispatch.token_file`.
+The transport refreshes that token when needed. It builds an HTML message
+from the reviewed subject/body, configured sender name/email and optional
+reply-to, the draft's recipient/BCC snapshots, and the manifest's non-HTML
+attachments. `dispatch.timeout_seconds` bounds the provider request. Sending
+is disabled unless `dispatch.enabled` is true and `dispatch.sender_email` is
+set; clarification email has no send path.
 
 ## 14. Statistics and Clarification
 
@@ -1227,7 +1331,7 @@ active entry points after cutover.
 | `ccat acquire` | job `acquire` (DB mode) / legacy CLI (workbook mode) |
 | `ccat screen` | job `screen` |
 | `ccat match` | job `match` |
-| `ccat generate` | job `generate` (sheets then packets) |
+| `ccat generate` | job `generate` (sheets then packets; `only="sheets"|"packets"|"both"`; `child=<zite_record_id>` for one sheet) |
 | `ccat stats` | job `stats` |
 | `ccat clarify --generate` | job `clarify_generate` |
 | `ccat clarify-export` | job `clarify_export` |
@@ -1243,7 +1347,9 @@ exclusion for pipeline-class work, heartbeats with lease recovery
 (`recovery_required`, never a blind repeat), throttled progress, and
 cooperative cancellation. Completed AI corrections and PDFs stay committed;
 pending rows keep `screened=false` / `generated_info_sheet=false` and are
-picked up by the next run.
+picked up by the next run. A dispatch send is not queued: its API request owns
+one attempt and may write only `packets_dispatched_at` on the final sponsor,
+while generation remains job work.
 
 ### A.4 Deliberate divergences from the prose above
 
