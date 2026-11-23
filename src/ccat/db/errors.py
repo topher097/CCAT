@@ -13,6 +13,15 @@ class DbStoreError(Exception):
     """Base class for every season-store persistence failure."""
 
 
+class MigrationStateError(DbStoreError):
+    """The database is at a revision this build does not contain.
+
+    Raised when the stored schema and the build's migration history are
+    out of step: the database was migrated by another build, and Alembic
+    cannot even start because it cannot resolve the stored revision.
+    """
+
+
 class StaleRowVersionError(DbStoreError):
     """A submitted row version no longer matches the stored row.
 

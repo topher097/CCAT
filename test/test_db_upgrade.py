@@ -63,6 +63,32 @@ def test_db_upgrade_creates_missing_parent_directory(tmp_path: Path) -> None:
     assert (tmp_path / "nested" / "dir" / "ccat.sqlite3").exists()
 
 
+def test_db_upgrade_names_a_revision_the_build_does_not_have(
+    tmp_path: Path,
+) -> None:
+    """A database at an unknown revision is diagnosed, not left to Alembic.
+
+    The deployment runs one branch's migrations against a shared volume,
+    so the stored revision can belong to a build that is not deployed.
+    """
+    from ccat.db.errors import MigrationStateError
+    from ccat.db.engine import run_migrations
+
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+    connection = sqlite3.connect(tmp_path / "ccat.sqlite3")
+    connection.execute(
+        "UPDATE alembic_version SET version_num = '20990101_9999'"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(MigrationStateError) as failure:
+        run_migrations(cfg.storage.database_url)
+    assert "out of step" in str(failure.value)
+    assert "20990101_9999" in str(failure.value)
+
+
 def test_db_upgrade_retires_cmendres400_account(tmp_path: Path) -> None:
     """The retired dev account and the audit rows it owns are removed."""
     from alembic import command
