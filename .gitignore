@@ -57,3 +57,6 @@ frontend/.npmrc
 
 # Output file dir
 output/**
+
+# Local database backups (children's data; never commit).
+backups/
