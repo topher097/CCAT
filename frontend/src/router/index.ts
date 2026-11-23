@@ -21,7 +21,7 @@ import DuplicationDetailView from '../views/DuplicationDetailView.vue'
 import PipelineCommandView from '../views/PipelineCommandView.vue'
 import MatchView from '../views/MatchView.vue'
 import ManualMatchView from '../views/ManualMatchView.vue'
-import GenerateView from '../views/GenerateView.vue'
+import DispatchView from '../views/DispatchView.vue'
 import StatsView from '../views/StatsView.vue'
 import ClarifyListView from '../views/ClarifyListView.vue'
 import ClarifyDetailView from '../views/ClarifyDetailView.vue'
@@ -146,11 +146,12 @@ export const routes: RouteRecordRaw[] = [
     meta: { title: 'Manual matching', wide: true },
   },
   {
-    path: '/generate',
-    name: 'generate',
-    component: GenerateView,
-    meta: { title: 'Generate' },
+    path: '/dispatch',
+    name: 'dispatch',
+    component: DispatchView,
+    meta: { title: 'Dispatch' },
   },
+  { path: '/generate', redirect: '/dispatch' },
   {
     path: '/stats',
     name: 'stats',

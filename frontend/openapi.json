@@ -440,6 +440,720 @@
         "title": "DbTableView",
         "type": "object"
       },
+      "DispatchAttachment": {
+        "additionalProperties": true,
+        "description": "One file attached to a sponsor packet email.\n\nAttributes:\n    artifact_id: The artifact row, when the file is registered.\n    role: What the file is (\"packet_pdf\", \"instructions_pdf\").\n    filename: The name the recipient sees.\n    content_type: The MIME type.\n    size_bytes: The file's size.\n    sha256: The hash of the file's bytes.",
+        "properties": {
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Id"
+          },
+          "content_type": {
+            "default": "application/pdf",
+            "title": "Content Type",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "sha256": {
+            "default": "",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "default": 0,
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "role",
+          "filename"
+        ],
+        "title": "DispatchAttachment",
+        "type": "object"
+      },
+      "DispatchChild": {
+        "additionalProperties": true,
+        "description": "One assigned child's sheet state.\n\nAttributes:\n    zite_record_id: The child's key.\n    angel_id: The child's angel letter.\n    family_id: The child's family.\n    sponsor_id: The sponsor the child is placed with.\n    generated_info_sheet: Whether the sheet exists.\n    sheet_artifact_id: The sheet artifact.",
+        "properties": {
+          "angel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Angel Id"
+          },
+          "family_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family Id"
+          },
+          "generated_info_sheet": {
+            "default": false,
+            "title": "Generated Info Sheet",
+            "type": "boolean"
+          },
+          "sheet_artifact_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sheet Artifact Id"
+          },
+          "sponsor_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sponsor Id"
+          },
+          "zite_record_id": {
+            "title": "Zite Record Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "zite_record_id"
+        ],
+        "title": "DispatchChild",
+        "type": "object"
+      },
+      "DispatchChildListView": {
+        "additionalProperties": true,
+        "description": "The assigned children and their sheet state.\n\nAttributes:\n    rows: One row per assigned child.",
+        "properties": {
+          "rows": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DispatchChild"
+            },
+            "title": "Rows",
+            "type": "array"
+          }
+        },
+        "title": "DispatchChildListView",
+        "type": "object"
+      },
+      "DispatchDraftBatchRequest": {
+        "additionalProperties": false,
+        "description": "Draft one or more sponsors' emails.\n\nAttributes:\n    sponsor_ids: The sponsors to draft; every ready sponsor when\n        empty.\n    all: Draft every ready sponsor.\n    overwrite: Re-render a draft that already exists.",
+        "properties": {
+          "all": {
+            "default": false,
+            "title": "All",
+            "type": "boolean"
+          },
+          "overwrite": {
+            "default": false,
+            "title": "Overwrite",
+            "type": "boolean"
+          },
+          "sponsor_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Sponsor Ids",
+            "type": "array"
+          }
+        },
+        "title": "DispatchDraftBatchRequest",
+        "type": "object"
+      },
+      "DispatchDraftRequest": {
+        "additionalProperties": false,
+        "description": "Change one draft.\n\nAttributes:\n    subject: The new subject.\n    note: The new plain-text note.",
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          }
+        },
+        "title": "DispatchDraftRequest",
+        "type": "object"
+      },
+      "DispatchDraftView": {
+        "additionalProperties": true,
+        "description": "One sponsor's email draft.\n\nAttributes:\n    sponsor_id: The sponsor's key.\n    version: The draft's version, for If-Match updates.\n    subject: The subject.\n    body_html: The rendered body.\n    note: The coordinator's plain-text addition.\n    to_email: The recipient.\n    from_email: The address the mail goes out as.\n    bcc_emails: The archive addresses.\n    attachments: The files the email will carry.\n    build_id: The packet build the body came from.\n    email_status: The email state.\n    email_error: The last failure's reason.\n    blockers: Why the sponsor cannot be sent yet.",
+        "properties": {
+          "attachments": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DispatchAttachment"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
+          "bcc_emails": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Bcc Emails",
+            "type": "array"
+          },
+          "blockers": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "body_html": {
+            "default": "",
+            "title": "Body Html",
+            "type": "string"
+          },
+          "build_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Build Id"
+          },
+          "email_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email Error"
+          },
+          "email_status": {
+            "default": "not_drafted",
+            "title": "Email Status",
+            "type": "string"
+          },
+          "from_email": {
+            "default": "",
+            "title": "From Email",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "sponsor_id": {
+            "title": "Sponsor Id",
+            "type": "integer"
+          },
+          "subject": {
+            "default": "",
+            "title": "Subject",
+            "type": "string"
+          },
+          "to_email": {
+            "default": "",
+            "title": "To Email",
+            "type": "string"
+          },
+          "version": {
+            "default": 0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sponsor_id"
+        ],
+        "title": "DispatchDraftView",
+        "type": "object"
+      },
+      "DispatchListView": {
+        "additionalProperties": true,
+        "description": "The dispatch work list.\n\nAttributes:\n    season: The season name.\n    mail_configured: Whether the mail account is usable.\n    can_send: Whether the caller may send.\n    totals: The page counters.\n    rows: One row per sponsor with children.",
+        "properties": {
+          "can_send": {
+            "default": false,
+            "title": "Can Send",
+            "type": "boolean"
+          },
+          "mail_configured": {
+            "default": false,
+            "title": "Mail Configured",
+            "type": "boolean"
+          },
+          "rows": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DispatchRow"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "season": {
+            "title": "Season",
+            "type": "string"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/DispatchTotals",
+            "default": {
+              "assigned_children": 0,
+              "dispatched": 0,
+              "packets_missing": 0,
+              "packets_ready": 0,
+              "sheets_missing": 0,
+              "sheets_ready": 0,
+              "sponsors": 0
+            }
+          }
+        },
+        "required": [
+          "season"
+        ],
+        "title": "DispatchListView",
+        "type": "object"
+      },
+      "DispatchRow": {
+        "additionalProperties": true,
+        "description": "One sponsor's row in the dispatch work list.\n\nAttributes:\n    sponsor_id: The sponsor's key.\n    display_name: The sponsor's name.\n    first_name: The sponsor's first name.\n    last_name: The sponsor's last name.\n    organization_name: The sponsor's organization.\n    sponsor_type: The sponsor's affiliation.\n    email: The sponsor's address.\n    physical_packet: Whether the sponsor receives a physical packet.\n    num_children: How many children the sponsor asked for.\n    assigned_count: How many children are placed with the sponsor.\n    assigned_angel_ids: The placed children's angel letters.\n    sheets_ready_count: How many of them have an info sheet.\n    sheets_total: How many of them there are.\n    missing_sheet_angel_ids: The ones without a sheet.\n    packet_status: \"ready\" or \"missing\".\n    packet_pdf_artifact_id: The combined child information PDF.\n    packet_created_at: When the packet was built.\n    instruction_pdf_artifact_id: The sponsor instruction PDF.\n    attachments: The files the email will carry.\n    email_status: The email state (\"not_drafted\", \"draft_ready\",\n        \"draft_edited\", \"sending\", \"sent\", \"failed\", \"unknown\").\n    email_sent_at: When the email was accepted.\n    email_error: The last failure's reason.\n    draft_version: The draft's version, when it has one.\n    draft_subject: The draft's subject.\n    packets_dispatched: Whether the sponsor's packets went out.\n    packets_dispatched_at: When they went out.\n    sponsor_row_version: The sponsor row's version.\n    duplicate_recipient_sponsor_ids: Other sponsors with the same\n        address.\n    blockers: Why the sponsor cannot be sent yet.",
+        "properties": {
+          "assigned_angel_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Assigned Angel Ids",
+            "type": "array"
+          },
+          "assigned_count": {
+            "default": 0,
+            "title": "Assigned Count",
+            "type": "integer"
+          },
+          "attachments": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DispatchAttachment"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
+          "blockers": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "display_name": {
+            "default": "",
+            "title": "Display Name",
+            "type": "string"
+          },
+          "draft_subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Subject"
+          },
+          "draft_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Version"
+          },
+          "duplicate_recipient_sponsor_ids": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Duplicate Recipient Sponsor Ids",
+            "type": "array"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "email_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email Error"
+          },
+          "email_sent_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email Sent At"
+          },
+          "email_status": {
+            "default": "not_drafted",
+            "title": "Email Status",
+            "type": "string"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "instruction_pdf_artifact_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instruction Pdf Artifact Id"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "missing_sheet_angel_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Sheet Angel Ids",
+            "type": "array"
+          },
+          "num_children": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Num Children"
+          },
+          "organization_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Name"
+          },
+          "packet_created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Packet Created At"
+          },
+          "packet_pdf_artifact_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Packet Pdf Artifact Id"
+          },
+          "packet_status": {
+            "default": "missing",
+            "title": "Packet Status",
+            "type": "string"
+          },
+          "packets_dispatched": {
+            "default": false,
+            "title": "Packets Dispatched",
+            "type": "boolean"
+          },
+          "packets_dispatched_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Packets Dispatched At"
+          },
+          "physical_packet": {
+            "default": false,
+            "title": "Physical Packet",
+            "type": "boolean"
+          },
+          "sheets_ready_count": {
+            "default": 0,
+            "title": "Sheets Ready Count",
+            "type": "integer"
+          },
+          "sheets_total": {
+            "default": 0,
+            "title": "Sheets Total",
+            "type": "integer"
+          },
+          "sponsor_id": {
+            "title": "Sponsor Id",
+            "type": "integer"
+          },
+          "sponsor_row_version": {
+            "default": 0,
+            "title": "Sponsor Row Version",
+            "type": "integer"
+          },
+          "sponsor_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sponsor Type"
+          }
+        },
+        "required": [
+          "sponsor_id"
+        ],
+        "title": "DispatchRow",
+        "type": "object"
+      },
+      "DispatchSendRequest": {
+        "additionalProperties": false,
+        "description": "Send one sponsor's packet email.\n\nAttributes:\n    version: The draft version the popup was opened with.\n    subject: The subject being sent.\n    note: The note being sent.",
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "title": "DispatchSendRequest",
+        "type": "object"
+      },
+      "DispatchSendResult": {
+        "additionalProperties": true,
+        "description": "The outcome of one send attempt.\n\nAttributes:\n    sponsor_id: The sponsor's key.\n    state: \"sent\", \"failed\", or \"unknown\".\n    attempt_id: The attempt's id.\n    message_id: The RFC 5322 Message-ID.\n    draft_version: The draft's version after the attempt.\n    sent_at: When the message was accepted.\n    error: The failure's reason.",
+        "properties": {
+          "attempt_id": {
+            "default": "",
+            "title": "Attempt Id",
+            "type": "string"
+          },
+          "draft_version": {
+            "default": 0,
+            "title": "Draft Version",
+            "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "message_id": {
+            "default": "",
+            "title": "Message Id",
+            "type": "string"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "sponsor_id": {
+            "title": "Sponsor Id",
+            "type": "integer"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sponsor_id",
+          "state"
+        ],
+        "title": "DispatchSendResult",
+        "type": "object"
+      },
+      "DispatchTotals": {
+        "additionalProperties": true,
+        "description": "The work list's counters.\n\nAttributes:\n    sponsors: Sponsors with children.\n    assigned_children: Children placed with them.\n    sheets_ready: Children with an info sheet.\n    sheets_missing: Children without one.\n    packets_ready: Sponsors with a usable packet.\n    packets_missing: Sponsors without one.\n    dispatched: Sponsors whose packets went out.",
+        "properties": {
+          "assigned_children": {
+            "default": 0,
+            "title": "Assigned Children",
+            "type": "integer"
+          },
+          "dispatched": {
+            "default": 0,
+            "title": "Dispatched",
+            "type": "integer"
+          },
+          "packets_missing": {
+            "default": 0,
+            "title": "Packets Missing",
+            "type": "integer"
+          },
+          "packets_ready": {
+            "default": 0,
+            "title": "Packets Ready",
+            "type": "integer"
+          },
+          "sheets_missing": {
+            "default": 0,
+            "title": "Sheets Missing",
+            "type": "integer"
+          },
+          "sheets_ready": {
+            "default": 0,
+            "title": "Sheets Ready",
+            "type": "integer"
+          },
+          "sponsors": {
+            "default": 0,
+            "title": "Sponsors",
+            "type": "integer"
+          }
+        },
+        "title": "DispatchTotals",
+        "type": "object"
+      },
       "DraftPatch": {
         "additionalProperties": false,
         "description": "Tri-state draft edit (omitted = unchanged, null = clear).",
@@ -5326,6 +6040,335 @@
         "summary": "Match Report",
         "tags": [
           "diagnostics"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/dispatch": {
+      "get": {
+        "description": "List the sponsors that still need to go out.\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The work list.",
+        "operationId": "get_dispatch_list_api_v1_seasons__season__dispatch_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DispatchListView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Dispatch List",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/dispatch/children": {
+      "get": {
+        "description": "List the assigned children and their info-sheet state.\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The child rows.",
+        "operationId": "get_dispatch_children_api_v1_seasons__season__dispatch_children_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DispatchChildListView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Dispatch Children",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/dispatch/drafts": {
+      "post": {
+        "description": "Render and store one or more sponsors' email drafts.\n\nArgs:\n    body: Which sponsors to draft.\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The refreshed work list.\n\nRaises:\n    ApiError: The mapped refusal.",
+        "operationId": "post_drafts_api_v1_seasons__season__dispatch_drafts_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DispatchDraftBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DispatchListView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Drafts",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/dispatch/sponsors/{sponsor_id}/draft": {
+      "get": {
+        "description": "Read one sponsor's email draft.\n\nArgs:\n    sponsor_id: The sponsor's key.\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The draft.\n\nRaises:\n    ApiError: 404 when the sponsor has no draft.",
+        "operationId": "get_draft_api_v1_seasons__season__dispatch_sponsors__sponsor_id__draft_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sponsor_id",
+            "required": true,
+            "schema": {
+              "title": "Sponsor Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DispatchDraftView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Draft",
+        "tags": [
+          "dispatch"
+        ]
+      },
+      "patch": {
+        "description": "Change one sponsor's draft subject or note.\n\nArgs:\n    sponsor_id: The sponsor's key.\n    body: The fields to change.\n    request: The current request.\n    if_match: The draft version the caller read.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The updated draft.\n\nRaises:\n    ApiError: 412 without a usable If-Match; the mapped refusal.",
+        "operationId": "patch_draft_api_v1_seasons__season__dispatch_sponsors__sponsor_id__draft_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sponsor_id",
+            "required": true,
+            "schema": {
+              "title": "Sponsor Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DispatchDraftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DispatchDraftView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Draft",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/dispatch/sponsors/{sponsor_id}/send": {
+      "post": {
+        "description": "Send one sponsor's packet email (admin only).\n\nArgs:\n    sponsor_id: The sponsor's key.\n    body: The version and the edits being sent.\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The send outcome.\n\nRaises:\n    ApiError: The mapped refusal.",
+        "operationId": "post_send_api_v1_seasons__season__dispatch_sponsors__sponsor_id__send_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sponsor_id",
+            "required": true,
+            "schema": {
+              "title": "Sponsor Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DispatchSendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DispatchSendResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Send",
+        "tags": [
+          "dispatch"
         ]
       }
     },

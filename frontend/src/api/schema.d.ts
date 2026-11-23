@@ -1019,6 +1019,177 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/seasons/{season}/dispatch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Dispatch List
+         * @description List the sponsors that still need to go out.
+         *
+         *     Args:
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The work list.
+         */
+        get: operations["get_dispatch_list_api_v1_seasons__season__dispatch_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/dispatch/children": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Dispatch Children
+         * @description List the assigned children and their info-sheet state.
+         *
+         *     Args:
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The child rows.
+         */
+        get: operations["get_dispatch_children_api_v1_seasons__season__dispatch_children_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/dispatch/drafts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Drafts
+         * @description Render and store one or more sponsors' email drafts.
+         *
+         *     Args:
+         *         body: Which sponsors to draft.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The refreshed work list.
+         *
+         *     Raises:
+         *         ApiError: The mapped refusal.
+         */
+        post: operations["post_drafts_api_v1_seasons__season__dispatch_drafts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/dispatch/sponsors/{sponsor_id}/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Draft
+         * @description Read one sponsor's email draft.
+         *
+         *     Args:
+         *         sponsor_id: The sponsor's key.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The draft.
+         *
+         *     Raises:
+         *         ApiError: 404 when the sponsor has no draft.
+         */
+        get: operations["get_draft_api_v1_seasons__season__dispatch_sponsors__sponsor_id__draft_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Patch Draft
+         * @description Change one sponsor's draft subject or note.
+         *
+         *     Args:
+         *         sponsor_id: The sponsor's key.
+         *         body: The fields to change.
+         *         request: The current request.
+         *         if_match: The draft version the caller read.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The updated draft.
+         *
+         *     Raises:
+         *         ApiError: 412 without a usable If-Match; the mapped refusal.
+         */
+        patch: operations["patch_draft_api_v1_seasons__season__dispatch_sponsors__sponsor_id__draft_patch"];
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/dispatch/sponsors/{sponsor_id}/send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Send
+         * @description Send one sponsor's packet email (admin only).
+         *
+         *     Args:
+         *         sponsor_id: The sponsor's key.
+         *         body: The version and the edits being sent.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The send outcome.
+         *
+         *     Raises:
+         *         ApiError: The mapped refusal.
+         */
+        post: operations["post_send_api_v1_seasons__season__dispatch_sponsors__sponsor_id__send_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/seasons/{season}/duplications": {
         parameters: {
             query?: never;
@@ -2096,6 +2267,504 @@ export interface components {
              * @default 0
              */
             row_count: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DispatchAttachment
+         * @description One file attached to a sponsor packet email.
+         *
+         *     Attributes:
+         *         artifact_id: The artifact row, when the file is registered.
+         *         role: What the file is ("packet_pdf", "instructions_pdf").
+         *         filename: The name the recipient sees.
+         *         content_type: The MIME type.
+         *         size_bytes: The file's size.
+         *         sha256: The hash of the file's bytes.
+         */
+        DispatchAttachment: {
+            /** Artifact Id */
+            artifact_id?: number | null;
+            /**
+             * Content Type
+             * @default application/pdf
+             */
+            content_type: string;
+            /** Filename */
+            filename: string;
+            /** Role */
+            role: string;
+            /**
+             * Sha256
+             * @default
+             */
+            sha256: string;
+            /**
+             * Size Bytes
+             * @default 0
+             */
+            size_bytes: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DispatchChild
+         * @description One assigned child's sheet state.
+         *
+         *     Attributes:
+         *         zite_record_id: The child's key.
+         *         angel_id: The child's angel letter.
+         *         family_id: The child's family.
+         *         sponsor_id: The sponsor the child is placed with.
+         *         generated_info_sheet: Whether the sheet exists.
+         *         sheet_artifact_id: The sheet artifact.
+         */
+        DispatchChild: {
+            /** Angel Id */
+            angel_id?: string | null;
+            /** Family Id */
+            family_id?: number | null;
+            /**
+             * Generated Info Sheet
+             * @default false
+             */
+            generated_info_sheet: boolean;
+            /** Sheet Artifact Id */
+            sheet_artifact_id?: number | null;
+            /** Sponsor Id */
+            sponsor_id?: number | null;
+            /** Zite Record Id */
+            zite_record_id: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DispatchChildListView
+         * @description The assigned children and their sheet state.
+         *
+         *     Attributes:
+         *         rows: One row per assigned child.
+         */
+        DispatchChildListView: {
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["DispatchChild"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DispatchDraftBatchRequest
+         * @description Draft one or more sponsors' emails.
+         *
+         *     Attributes:
+         *         sponsor_ids: The sponsors to draft; every ready sponsor when
+         *             empty.
+         *         all: Draft every ready sponsor.
+         *         overwrite: Re-render a draft that already exists.
+         */
+        DispatchDraftBatchRequest: {
+            /**
+             * All
+             * @default false
+             */
+            all: boolean;
+            /**
+             * Overwrite
+             * @default false
+             */
+            overwrite: boolean;
+            /**
+             * Sponsor Ids
+             * @default []
+             */
+            sponsor_ids: number[];
+        };
+        /**
+         * DispatchDraftRequest
+         * @description Change one draft.
+         *
+         *     Attributes:
+         *         subject: The new subject.
+         *         note: The new plain-text note.
+         */
+        DispatchDraftRequest: {
+            /** Note */
+            note?: string | null;
+            /** Subject */
+            subject?: string | null;
+        };
+        /**
+         * DispatchDraftView
+         * @description One sponsor's email draft.
+         *
+         *     Attributes:
+         *         sponsor_id: The sponsor's key.
+         *         version: The draft's version, for If-Match updates.
+         *         subject: The subject.
+         *         body_html: The rendered body.
+         *         note: The coordinator's plain-text addition.
+         *         to_email: The recipient.
+         *         from_email: The address the mail goes out as.
+         *         bcc_emails: The archive addresses.
+         *         attachments: The files the email will carry.
+         *         build_id: The packet build the body came from.
+         *         email_status: The email state.
+         *         email_error: The last failure's reason.
+         *         blockers: Why the sponsor cannot be sent yet.
+         */
+        DispatchDraftView: {
+            /**
+             * Attachments
+             * @default []
+             */
+            attachments: components["schemas"]["DispatchAttachment"][];
+            /**
+             * Bcc Emails
+             * @default []
+             */
+            bcc_emails: string[];
+            /**
+             * Blockers
+             * @default []
+             */
+            blockers: string[];
+            /**
+             * Body Html
+             * @default
+             */
+            body_html: string;
+            /** Build Id */
+            build_id?: string | null;
+            /** Email Error */
+            email_error?: string | null;
+            /**
+             * Email Status
+             * @default not_drafted
+             */
+            email_status: string;
+            /**
+             * From Email
+             * @default
+             */
+            from_email: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /** Sponsor Id */
+            sponsor_id: number;
+            /**
+             * Subject
+             * @default
+             */
+            subject: string;
+            /**
+             * To Email
+             * @default
+             */
+            to_email: string;
+            /**
+             * Version
+             * @default 0
+             */
+            version: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DispatchListView
+         * @description The dispatch work list.
+         *
+         *     Attributes:
+         *         season: The season name.
+         *         mail_configured: Whether the mail account is usable.
+         *         can_send: Whether the caller may send.
+         *         totals: The page counters.
+         *         rows: One row per sponsor with children.
+         */
+        DispatchListView: {
+            /**
+             * Can Send
+             * @default false
+             */
+            can_send: boolean;
+            /**
+             * Mail Configured
+             * @default false
+             */
+            mail_configured: boolean;
+            /**
+             * Rows
+             * @default []
+             */
+            rows: components["schemas"]["DispatchRow"][];
+            /** Season */
+            season: string;
+            /**
+             * @default {
+             *       "assigned_children": 0,
+             *       "dispatched": 0,
+             *       "packets_missing": 0,
+             *       "packets_ready": 0,
+             *       "sheets_missing": 0,
+             *       "sheets_ready": 0,
+             *       "sponsors": 0
+             *     }
+             */
+            totals: components["schemas"]["DispatchTotals"];
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DispatchRow
+         * @description One sponsor's row in the dispatch work list.
+         *
+         *     Attributes:
+         *         sponsor_id: The sponsor's key.
+         *         display_name: The sponsor's name.
+         *         first_name: The sponsor's first name.
+         *         last_name: The sponsor's last name.
+         *         organization_name: The sponsor's organization.
+         *         sponsor_type: The sponsor's affiliation.
+         *         email: The sponsor's address.
+         *         physical_packet: Whether the sponsor receives a physical packet.
+         *         num_children: How many children the sponsor asked for.
+         *         assigned_count: How many children are placed with the sponsor.
+         *         assigned_angel_ids: The placed children's angel letters.
+         *         sheets_ready_count: How many of them have an info sheet.
+         *         sheets_total: How many of them there are.
+         *         missing_sheet_angel_ids: The ones without a sheet.
+         *         packet_status: "ready" or "missing".
+         *         packet_pdf_artifact_id: The combined child information PDF.
+         *         packet_created_at: When the packet was built.
+         *         instruction_pdf_artifact_id: The sponsor instruction PDF.
+         *         attachments: The files the email will carry.
+         *         email_status: The email state ("not_drafted", "draft_ready",
+         *             "draft_edited", "sending", "sent", "failed", "unknown").
+         *         email_sent_at: When the email was accepted.
+         *         email_error: The last failure's reason.
+         *         draft_version: The draft's version, when it has one.
+         *         draft_subject: The draft's subject.
+         *         packets_dispatched: Whether the sponsor's packets went out.
+         *         packets_dispatched_at: When they went out.
+         *         sponsor_row_version: The sponsor row's version.
+         *         duplicate_recipient_sponsor_ids: Other sponsors with the same
+         *             address.
+         *         blockers: Why the sponsor cannot be sent yet.
+         */
+        DispatchRow: {
+            /**
+             * Assigned Angel Ids
+             * @default []
+             */
+            assigned_angel_ids: string[];
+            /**
+             * Assigned Count
+             * @default 0
+             */
+            assigned_count: number;
+            /**
+             * Attachments
+             * @default []
+             */
+            attachments: components["schemas"]["DispatchAttachment"][];
+            /**
+             * Blockers
+             * @default []
+             */
+            blockers: string[];
+            /**
+             * Display Name
+             * @default
+             */
+            display_name: string;
+            /** Draft Subject */
+            draft_subject?: string | null;
+            /** Draft Version */
+            draft_version?: number | null;
+            /**
+             * Duplicate Recipient Sponsor Ids
+             * @default []
+             */
+            duplicate_recipient_sponsor_ids: number[];
+            /** Email */
+            email?: string | null;
+            /** Email Error */
+            email_error?: string | null;
+            /** Email Sent At */
+            email_sent_at?: string | null;
+            /**
+             * Email Status
+             * @default not_drafted
+             */
+            email_status: string;
+            /** First Name */
+            first_name?: string | null;
+            /** Instruction Pdf Artifact Id */
+            instruction_pdf_artifact_id?: number | null;
+            /** Last Name */
+            last_name?: string | null;
+            /**
+             * Missing Sheet Angel Ids
+             * @default []
+             */
+            missing_sheet_angel_ids: string[];
+            /** Num Children */
+            num_children?: number | null;
+            /** Organization Name */
+            organization_name?: string | null;
+            /** Packet Created At */
+            packet_created_at?: string | null;
+            /** Packet Pdf Artifact Id */
+            packet_pdf_artifact_id?: number | null;
+            /**
+             * Packet Status
+             * @default missing
+             */
+            packet_status: string;
+            /**
+             * Packets Dispatched
+             * @default false
+             */
+            packets_dispatched: boolean;
+            /** Packets Dispatched At */
+            packets_dispatched_at?: string | null;
+            /**
+             * Physical Packet
+             * @default false
+             */
+            physical_packet: boolean;
+            /**
+             * Sheets Ready Count
+             * @default 0
+             */
+            sheets_ready_count: number;
+            /**
+             * Sheets Total
+             * @default 0
+             */
+            sheets_total: number;
+            /** Sponsor Id */
+            sponsor_id: number;
+            /**
+             * Sponsor Row Version
+             * @default 0
+             */
+            sponsor_row_version: number;
+            /** Sponsor Type */
+            sponsor_type?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DispatchSendRequest
+         * @description Send one sponsor's packet email.
+         *
+         *     Attributes:
+         *         version: The draft version the popup was opened with.
+         *         subject: The subject being sent.
+         *         note: The note being sent.
+         */
+        DispatchSendRequest: {
+            /** Note */
+            note?: string | null;
+            /** Subject */
+            subject?: string | null;
+            /** Version */
+            version: number;
+        };
+        /**
+         * DispatchSendResult
+         * @description The outcome of one send attempt.
+         *
+         *     Attributes:
+         *         sponsor_id: The sponsor's key.
+         *         state: "sent", "failed", or "unknown".
+         *         attempt_id: The attempt's id.
+         *         message_id: The RFC 5322 Message-ID.
+         *         draft_version: The draft's version after the attempt.
+         *         sent_at: When the message was accepted.
+         *         error: The failure's reason.
+         */
+        DispatchSendResult: {
+            /**
+             * Attempt Id
+             * @default
+             */
+            attempt_id: string;
+            /**
+             * Draft Version
+             * @default 0
+             */
+            draft_version: number;
+            /** Error */
+            error?: string | null;
+            /**
+             * Message Id
+             * @default
+             */
+            message_id: string;
+            /** Sent At */
+            sent_at?: string | null;
+            /** Sponsor Id */
+            sponsor_id: number;
+            /** State */
+            state: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /**
+         * DispatchTotals
+         * @description The work list's counters.
+         *
+         *     Attributes:
+         *         sponsors: Sponsors with children.
+         *         assigned_children: Children placed with them.
+         *         sheets_ready: Children with an info sheet.
+         *         sheets_missing: Children without one.
+         *         packets_ready: Sponsors with a usable packet.
+         *         packets_missing: Sponsors without one.
+         *         dispatched: Sponsors whose packets went out.
+         */
+        DispatchTotals: {
+            /**
+             * Assigned Children
+             * @default 0
+             */
+            assigned_children: number;
+            /**
+             * Dispatched
+             * @default 0
+             */
+            dispatched: number;
+            /**
+             * Packets Missing
+             * @default 0
+             */
+            packets_missing: number;
+            /**
+             * Packets Ready
+             * @default 0
+             */
+            packets_ready: number;
+            /**
+             * Sheets Missing
+             * @default 0
+             */
+            sheets_missing: number;
+            /**
+             * Sheets Ready
+             * @default 0
+             */
+            sheets_ready: number;
+            /**
+             * Sponsors
+             * @default 0
+             */
+            sponsors: number;
         } & {
             [key: string]: unknown;
         };
@@ -4650,6 +5319,209 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     }[];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_dispatch_list_api_v1_seasons__season__dispatch_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DispatchListView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_dispatch_children_api_v1_seasons__season__dispatch_children_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DispatchChildListView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_drafts_api_v1_seasons__season__dispatch_drafts_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DispatchDraftBatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DispatchListView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_draft_api_v1_seasons__season__dispatch_sponsors__sponsor_id__draft_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sponsor_id: number;
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DispatchDraftView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_draft_api_v1_seasons__season__dispatch_sponsors__sponsor_id__draft_patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "If-Match"?: string | null;
+            };
+            path: {
+                sponsor_id: number;
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DispatchDraftRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DispatchDraftView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_send_api_v1_seasons__season__dispatch_sponsors__sponsor_id__send_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sponsor_id: number;
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DispatchSendRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DispatchSendResult"];
                 };
             };
             /** @description Validation Error */

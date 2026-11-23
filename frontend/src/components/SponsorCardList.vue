@@ -6,6 +6,13 @@
 
 import { computed, ref } from 'vue'
 
+import {
+  dispatchBlock,
+  organization,
+  personName,
+  remainingOf,
+} from '../utils/sponsor'
+
 /**
  * The sponsor fields the rows read. Structural on purpose: the generated
  * `ManualMatchSponsor` type gains the newer fields on the next API regen.
@@ -63,29 +70,6 @@ function auditClass(sponsor: SponsorCard): string {
     : 'audit-unset'
 }
 
-function personName(sponsor: SponsorCard): string {
-  return (
-    [sponsor.first_name, sponsor.last_name].filter(Boolean).join(' ') ||
-    sponsor.display_name ||
-    `Sponsor ${sponsor.sponsor_id}`
-  )
-}
-
-/** Secondary line, only when it adds something beyond the primary name. */
-function organization(sponsor: SponsorCard): string {
-  const org = sponsor.organization_name ?? ''
-  return org && org !== personName(sponsor) ? org : ''
-}
-
-/** Slots left; null when the sponsor has no quota (unlimited). */
-function remainingOf(sponsor: SponsorCard): number | null {
-  if (sponsor.num_children === null || sponsor.num_children === undefined) return null
-  return (
-    sponsor.remaining ??
-    Math.max(sponsor.num_children - (sponsor.assigned_count ?? 0), 0)
-  )
-}
-
 function isFull(sponsor: SponsorCard): boolean {
   return remainingOf(sponsor) === 0
 }
@@ -130,15 +114,6 @@ function ageText(sponsor: SponsorCard): string {
   const range = hasMin && hasMax ? `${min}–${max}` : hasMin ? `${min}+` : hasMax ? `up to ${max}` : ''
   if (sponsor.age_preference && range) return `${sponsor.age_preference} (${range})`
   return sponsor.age_preference || range
-}
-
-/** Why the dispatch button is off; empty when it is on. */
-function dispatchBlock(sponsor: SponsorCard): string {
-  if (isDispatched(sponsor)) return 'Packets already dispatched'
-  const remaining = remainingOf(sponsor)
-  if (remaining === null) return 'A children quota is required before dispatching packets'
-  if (remaining > 0) return `Fill all child slots first (${remaining} remaining)`
-  return ''
 }
 
 // ---- filters ---------------------------------------------------------------

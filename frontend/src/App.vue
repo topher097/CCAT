@@ -18,7 +18,7 @@ const nav = [
   { to: '/audit', label: 'Audit' },
   { to: '/match', label: 'Match' },
   { to: '/match/manual', label: 'Manual matching' },
-  { to: '/generate', label: 'Generate' },
+  { to: '/dispatch', label: 'Dispatch' },
   { to: '/stats', label: 'Stats' },
   { to: '/clarify', label: 'Clarify' },
   { to: '/jobs', label: 'Jobs' },

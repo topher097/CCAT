@@ -205,11 +205,11 @@ onUnmounted(() => overview.stopPolling())
         </RouterLink>
 
         <RouterLink
-          to="/generate"
+          to="/dispatch"
           class="card"
           style="text-decoration: none; color: inherit"
         >
-          <h2 style="margin-top: 0">Artifacts</h2>
+          <h2 style="margin-top: 0">Dispatch</h2>
           <p v-if="Object.keys(artifacts).length === 0" class="muted">
             No artifacts registered.
           </p>

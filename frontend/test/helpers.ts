@@ -84,6 +84,7 @@ export async function mountRouted(
       { path: '/match', component: placeholder },
       { path: '/match/manual', component: placeholder },
       { path: '/generate', component: placeholder },
+      { path: '/dispatch', component: placeholder },
       { path: '/stats', component: placeholder },
       { path: '/screen', component: placeholder },
       { path: '/acquire', component: placeholder },
