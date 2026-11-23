@@ -374,7 +374,39 @@ ownership the image sets. If a packet directory cannot be written, the
 packet build names the directory in its error instead of failing with a
 bare `PermissionError`.
 
-## 10. Single-host SQLite constraints
+## 10. The database is at a revision this build does not contain
+
+The deployment runs one branch's migrations against a shared volume, so
+the database can end up at a revision the deployed build does not
+contain — for example when a branch that added a migration ran once and
+a later build comes from a branch without it. Alembic cannot resolve
+the stored revision, so `db-upgrade` fails and the stack never starts:
+
+```
+alembic.util.exc.CommandError: Can't locate revision identified by '20261123_0010'
+```
+
+The migration runner now says so in one line (`the build and the
+database are out of step`). Two ways out:
+
+```sh
+# 1. deploy the branch that owns the migration (nothing to repair), or
+# 2. stamp the database to this build's head:
+docker compose --profile dev run --rm --no-deps --entrypoint sh api-dev \
+  -c 'CCAT_DATABASE_URL=sqlite:////data/ccat.sqlite3 \
+      /app/.venv/bin/alembic -c /app/alembic.ini stamp --purge head'
+```
+
+`stamp --purge` is needed because a plain `stamp` resolves the stored
+revision first, which is exactly what fails. Stamping only rewrites the
+version pointer; the schema stays as it is, and a revision that is
+already applied is skipped when it is taken again.
+
+Switching branches while the volume holds a migration from another
+branch will hit this again. Either merge the branch that owns the
+migration, or stamp after switching.
+
+## 11. Single-host SQLite constraints
 
 - **One writer.** Keep exactly one `worker` and one API process; do not add
   uvicorn `--workers` or scale replicas. WAL allows concurrent readers, not
@@ -386,7 +418,7 @@ bare `PermissionError`.
 - Scale-out to PostgreSQL is a planned portability follow-up (decision D11),
   not a configuration switch.
 
-## 11. Security checklist (plan §8)
+## 12. Security checklist (plan §8)
 
 - [ ] TLS terminates at Caddy; HSTS/security headers on (in `Caddyfile`).
 - [ ] Session cookie is `HttpOnly`, `SameSite`, `Secure` outside dev auth
@@ -416,7 +448,7 @@ bare `PermissionError`.
 - [ ] API/worker/opencode ports unpublished; only Caddy binds host ports.
 - [ ] Logs contain no child/family payloads, emails, addresses or AI prompts.
 
-## 12. LibreOffice dependency
+## 13. LibreOffice dependency
 
 `soffice` renders `.ott` info sheets through py3o; Python wheels alone cannot
 convert documents. The runtime installs `libreoffice-writer` plus
@@ -428,7 +460,7 @@ layout stable). Symptoms of a broken runtime: `InfoSheetError`, empty PDFs, or
 docker compose --profile prod run --rm --entrypoint soffice worker --version
 ```
 
-## 13. Known deviations / follow-ups
+## 14. Known deviations / follow-ups
 
 - `Caddyfile.dev` is an extra dev-only file: Caddy cannot switch from
   `file_server` to a Vite proxy by env var alone.
