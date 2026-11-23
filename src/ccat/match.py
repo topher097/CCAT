@@ -17,7 +17,6 @@ behavior.
 """
 
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Any
@@ -36,7 +35,11 @@ from ccat.audit.store import (
     read_final,
 )
 from ccat.config import Config
-from ccat.domain import SPECIAL_NEEDS_LABEL, angel_sort_key
+from ccat.domain import (
+    SPECIAL_NEEDS_LABEL,
+    angel_sort_key,
+    parse_prior_assigned,
+)
 from ccat.io import list_sheets, write_sheets
 
 logger = logging.getLogger(__name__)
@@ -101,23 +104,6 @@ class SponsorPlan:
 #: The angel-letter sort key lives in the neutral primitives module; the
 #: private name is kept because the pipeline imports it from here.
 _angel_sort_key = angel_sort_key
-
-
-def parse_prior_assigned(value: str) -> list[str]:
-    """Parse the Assigned Angel ID Code free text (§8.5).
-
-    Splits on commas/whitespace, strips, and uppercases so ids like ``3b``
-    normalize to ``3B``.
-
-    Args:
-        value: The raw `prior_assigned_angel_ids` string.
-
-    Returns:
-        The parsed, normalized angel ids.
-    """
-    return [
-        token.upper() for token in re.split(r"[,\s]+", value.strip()) if token
-    ]
 
 
 def canonical_location(

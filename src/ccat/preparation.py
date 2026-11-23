@@ -19,6 +19,7 @@ from ccat.acquire import PL_DTYPES
 from ccat.config import Config
 from ccat.domain import (
     DERIVED_COLUMNS,
+    SPONSOR_CLAIM_SHEET,
     _created_value,
     _cross_check_created,
     _parse_reported_age,
@@ -27,6 +28,7 @@ from ccat.domain import (
     assign_sponsor_ids,
     clean_value,
     index_to_letters,
+    parse_prior_assigned,
     sibling_dob_conflicts,
 )
 from ccat.io import read_sheet
@@ -318,6 +320,80 @@ def detect_duplicates(
                 [row.get("zite_record_id") for row in extras],
             )
     return log_rows, survivor_of
+
+
+def detect_sponsor_claim_contests(
+    sponsor_rows: list[dict[str, Any]],
+    child_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Detect sponsors claiming the same Assigned Angel ID.
+
+    A sponsor's ``prior_assigned_angel_ids`` is the free-text list of
+    children it claims (the Zite "Assigned Angel ID Code").  When two
+    sponsors claim the same angel id, only one of them can hold that
+    child, so the claim is a contest the audit has to settle: the
+    surviving sponsor keeps the claim and the loser is ignored.
+
+    Claims that name no known child are left alone (the matcher already
+    drops them), and claimants that all share one email are the same
+    person twice, which the email duplicate group already owns.
+
+    Args:
+        sponsor_rows: Cleaned sponsor rows.
+        child_rows: Child rows carrying their angel ids.
+
+    Returns:
+        Duplicate-log rows, one per claimant of a contested angel id.
+    """
+    known_angels = {
+        str(row.get("angel_id")) for row in child_rows if row.get("angel_id")
+    }
+    claimants: dict[str, list[dict[str, Any]]] = {}
+    for row in sponsor_rows:
+        raw = row.get("prior_assigned_angel_ids")
+        if not raw:
+            continue
+        for angel_id in parse_prior_assigned(str(raw)):
+            if angel_id in known_angels:
+                claimants.setdefault(angel_id, []).append(row)
+    log_rows: list[dict[str, Any]] = []
+    for angel_id, group in sorted(claimants.items()):
+        if len(group) < 2:
+            continue
+        emails = {str(row.get("email") or "").strip().lower() for row in group}
+        if len(emails) < 2:
+            # The same person twice; the email duplicate group owns it.
+            continue
+        ordered = sorted(
+            group,
+            key=lambda row: (
+                _created_value(row) or "",
+                str(row.get("zite_record_id") or ""),
+            ),
+            reverse=True,
+        )
+        survivor = ordered[0]
+        claimant_ids = ", ".join(
+            sorted(str(row.get("zite_record_id") or "") for row in group)
+        )
+        details = (
+            f"prior_assigned_angel_ids: angel {angel_id} claimed by"
+            f" {len(group)} sponsors: {claimant_ids}"
+        )
+        for row in group:
+            log_rows.append(
+                {
+                    "sheet": SPONSOR_CLAIM_SHEET,
+                    "group_key": angel_id,
+                    "zite_record_id": str(row.get("zite_record_id") or ""),
+                    "created": _created_value(row),
+                    "survivor": row is survivor,
+                    "conflict_columns": "prior_assigned_angel_ids",
+                    "conflict_details": details,
+                    "record": json.dumps(row, default=str, sort_keys=True),
+                }
+            )
+    return log_rows
 
 
 def duplicate_log_frame(log_rows: list[dict[str, Any]]) -> pl.DataFrame:
@@ -854,6 +930,9 @@ def prepare_rows(
         prepared["child"] = _reconcile_child_ids(
             prepared["child"], existing.get("child", [])
         )
+    duplicate_log.extend(
+        detect_sponsor_claim_contests(prepared["sponsor"], prepared["child"])
+    )
     _cross_check_created(prepared["family"], "family")
     _cross_check_created(prepared["child"], "child")
     dob_log = sibling_dob_conflicts(prepared["child"], cfg, report=report)

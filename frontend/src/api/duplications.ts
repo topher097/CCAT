@@ -3,13 +3,23 @@
 import { api } from './client'
 import type { Schemas } from './client'
 
+export type DuplicationKind = 'duplicate_submission' | 'angel_claim_conflict'
+
+/** Auditor-facing names for each group kind. */
+export const DUPLICATION_KIND_LABELS: Record<DuplicationKind, string> = {
+  duplicate_submission: 'Duplicate submission',
+  angel_claim_conflict: 'Assigned Angel ID conflict',
+}
+
 // The generated schema carries these fields; the intersections narrow the
 // member state to its three values.
 export type DuplicationListItem = Schemas['DuplicationListItem'] & {
+  kind: DuplicationKind
   survivor_count: number
   released_count: number
 }
 export type DuplicationDetail = Schemas['DuplicationDetail'] & {
+  kind: DuplicationKind
   survivor_count: number
   children: DuplicationChild[]
 }
@@ -31,17 +41,20 @@ export type DuplicationMember = Schemas['DuplicationMember'] & {
 
 export type DuplicationListPage = Schemas['DuplicationListPage']
 export type DuplicationDecision = 'not_duplicate' | 'ignore'
+export type DuplicationFilters = {
+  q?: string
+  entity?: string | null
+  kind?: string | null
+}
 
 /** Season name -> URL-safe path segment. */
 function seasonPath(season: string): string {
   return encodeURIComponent(season)
 }
 
-export type DuplicationListParams = {
+export type DuplicationListParams = DuplicationFilters & {
   page?: number
   page_size?: number
-  q?: string
-  entity?: string | null
 }
 
 /** GET one server-paginated duplicate-group list page. */
@@ -56,6 +69,7 @@ export function listDuplications(
   if (params.q) query.set('q', params.q)
   if (params.entity && params.entity !== 'all')
     query.set('entity', params.entity)
+  if (params.kind && params.kind !== 'all') query.set('kind', params.kind)
   const suffix = query.size ? `?${query.toString()}` : ''
   return api.get(
     `/api/v1/seasons/${seasonPath(season)}/duplications${suffix}`,
@@ -66,12 +80,13 @@ export function listDuplications(
 export function getDuplication(
   season: string,
   groupId: string,
-  filters: { q?: string; entity?: string | null } = {},
+  filters: DuplicationFilters = {},
 ): Promise<DuplicationDetail> {
   const query = new URLSearchParams()
   if (filters.q) query.set('q', filters.q)
   if (filters.entity && filters.entity !== 'all')
     query.set('entity', filters.entity)
+  if (filters.kind && filters.kind !== 'all') query.set('kind', filters.kind)
   const suffix = query.size ? `?${query.toString()}` : ''
   return api.get(
     `/api/v1/seasons/${seasonPath(season)}/duplications/${encodeURIComponent(groupId)}${suffix}`,
@@ -82,13 +97,14 @@ export function getDuplication(
 export function auditDuplication(
   season: string,
   groupId: string,
-  filters: { q?: string; entity?: string | null } = {},
+  filters: DuplicationFilters = {},
   body?: { values?: Record<string, unknown>; expected_version?: number | null },
 ): Promise<DuplicationDetail> {
   const query = new URLSearchParams()
   if (filters.q) query.set('q', filters.q)
   if (filters.entity && filters.entity !== 'all')
     query.set('entity', filters.entity)
+  if (filters.kind && filters.kind !== 'all') query.set('kind', filters.kind)
   const suffix = query.size ? `?${query.toString()}` : ''
   const postBody: Record<string, unknown> = {}
   if (body?.values !== undefined) postBody.values = body.values
@@ -105,12 +121,13 @@ export function assignDuplicationChildren(
   season: string,
   groupId: string,
   assignments: Record<string, number>,
-  filters: { q?: string; entity?: string | null } = {},
+  filters: DuplicationFilters = {},
 ): Promise<DuplicationDetail> {
   const query = new URLSearchParams()
   if (filters.q) query.set('q', filters.q)
   if (filters.entity && filters.entity !== 'all')
     query.set('entity', filters.entity)
+  if (filters.kind && filters.kind !== 'all') query.set('kind', filters.kind)
   const suffix = query.size ? `?${query.toString()}` : ''
   return api.post<DuplicationDetail>(
     `/api/v1/seasons/${seasonPath(season)}/duplications/${encodeURIComponent(groupId)}/children${suffix}`,
@@ -125,7 +142,7 @@ export function decideDuplication(
   recordId: string,
   decision: DuplicationDecision,
   expectedVersion?: number | null,
-  filters: { q?: string; entity?: string | null } = {},
+  filters: DuplicationFilters = {},
 ): Promise<DuplicationDetail> {
   const body: Record<string, unknown> = { decision, confirm: true }
   if (expectedVersion !== undefined && expectedVersion !== null)
@@ -134,6 +151,7 @@ export function decideDuplication(
   if (filters.q) query.set('q', filters.q)
   if (filters.entity && filters.entity !== 'all')
     query.set('entity', filters.entity)
+  if (filters.kind && filters.kind !== 'all') query.set('kind', filters.kind)
   const suffix = query.size ? `?${query.toString()}` : ''
   return api.post<DuplicationDetail>(
     `/api/v1/seasons/${seasonPath(season)}/duplications/${encodeURIComponent(groupId)}/members/${encodeURIComponent(recordId)}${suffix}`,

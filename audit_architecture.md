@@ -476,7 +476,57 @@ auditor leaves alone stay with the surviving family, and the page says
 so. The duplication module is the only writer of a child's `family_id`
 outside preparation, exactly as it already is of a child's `angel_id`.
 
-#### 10.5.4 Navigation
+#### 10.5.4 Assigned Angel ID conflicts
+
+A sponsor's `prior_assigned_angel_ids` (the Zite "Assigned Angel ID
+Code") is the list of children the sponsor claims. Two sponsors can
+claim the same angel id: the program runs generic Walmart sponsors that
+hold the angel ids allocated to a store, and a person who signs up at
+that store claims the same id to take the slot over.
+
+The screening run detects the contest deterministically
+(`preparation.detect_sponsor_claim_contests`, called from
+`prepare_rows` once the children carry their angel ids). The claims are
+grouped by angel id; an angel id claimed by two or more sponsors makes a
+group, unless every claimant shares one email (the same person twice,
+which the email duplicate group already owns). A claim on an angel id no
+child has is not a contest; the matcher drops those with a warning.
+
+The contest is written to the same `duplicate_log` the section already
+reads, under the sheet label `sponsor_angel_claims` and the group key
+being the contested angel id. The sheet label is the group's **kind**:
+
+| kind | sheet | what it is |
+|---|---|---|
+| `duplicate_submission` | `child_submissions`, `family_submissions`, `sponsor_submissions` | two submissions of the same person, found by email or name |
+| `angel_claim_conflict` | `sponsor_angel_claims` | two sponsors claiming the same child |
+
+Both kinds resolve through the same decisions. The group key of a
+contest is the angel id, so the list shows exactly which child is
+contested. The screen suggests the **later** submission as the survivor
+(the generic placeholder was created first, the person who claimed the
+slot came second), but the suggestion is a default only; the auditor
+decides.
+
+The resolution that hands the child to the right sponsor is **ignore**:
+the loser keeps its `sponsor_id`, its row is ignored (which blanks its
+claim and drops it out of the match pool), and the survivor holds the
+only claim on the angel id. The `not_duplicate` decision keeps both rows
+and only clears the duplicate flag; the angel id still goes to the lower
+sponsor id, so it settles nothing.
+
+The matcher is unchanged: an undecided contest does not reserve the angel
+id, and the lower sponsor id keeps it until the auditor acts.
+
+**The id invariants.** A resolution never moves an id:
+
+- a sponsor's `sponsor_id` never changes, whether the sponsor is
+  ignored or released;
+- an ignored family's `family_id` is never handed to another family;
+- an ignored child's `angel_id` is never handed to another child;
+- a family's angel letters do not skip; they read A, B, C.
+
+#### 10.5.5 Navigation
 
 The audit lists keep their filters in the query string, so a detail
 link carries them and the back button restores the place in the table

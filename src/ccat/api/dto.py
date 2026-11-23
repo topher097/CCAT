@@ -214,6 +214,7 @@ class DuplicationListItem(StrictModel):
         id: The group's stable, URL-safe id.
         sheet: The duplicate-log sheet label.
         entity: "child", "family", or "sponsor".
+        kind: "duplicate_submission" or "angel_claim_conflict".
         group_key: The duplicate group's key.
         member_count: Submissions in the group.
         decided_count: Members the audit already resolved.
@@ -228,6 +229,7 @@ class DuplicationListItem(StrictModel):
     id: str
     sheet: str
     entity: str
+    kind: str = "duplicate_submission"
     group_key: str
     member_count: int
     decided_count: int
@@ -313,6 +315,7 @@ class DuplicationDetail(StrictModel):
         id: The group's stable, URL-safe id.
         sheet: The duplicate-log sheet label.
         entity: "child", "family", or "sponsor".
+        kind: "duplicate_submission" or "angel_claim_conflict".
         group_key: The duplicate group's key.
         status: "pending", "resolved", or "audited".
         audited_at: When the group was marked audited.
@@ -326,6 +329,7 @@ class DuplicationDetail(StrictModel):
     id: str
     sheet: str
     entity: str
+    kind: str = "duplicate_submission"
     group_key: str
     status: str
     audited_at: str | None = None

@@ -1208,6 +1208,7 @@ export interface paths {
          *         page_size: Page size (max 200).
          *         q: Search on the group key.
          *         entity: Restrict to "child", "family", or "sponsor".
+         *         kind: Restrict to "duplicate_submission" or "angel_claim_conflict".
          *         _user: Authenticated identity.
          *
          *     Returns:
@@ -1240,6 +1241,8 @@ export interface paths {
          *         q: The list's search query (for the neighbours).
          *         entity: Restrict to "child", "family", or "sponsor" (for the
          *             neighbours).
+         *         kind: Restrict to "duplicate_submission" or "angel_claim_conflict"
+         *             (for the neighbours).
          *         _user: Authenticated identity.
          *
          *     Returns:
@@ -1283,6 +1286,8 @@ export interface paths {
          *         q: The list's search query (for the neighbours).
          *         entity: Restrict to "child", "family", or "sponsor" (for the
          *             neighbours).
+         *         kind: Restrict to "duplicate_submission" or "angel_claim_conflict"
+         *             (for the neighbours).
          *         user: The authenticated identity.
          *         body: The reviewed values under canonical DTO names, and the
          *             surviving entry's expected ``row_version``.
@@ -1324,6 +1329,8 @@ export interface paths {
          *         q: The list's search query (for the neighbours).
          *         entity: Restrict to "child", "family", or "sponsor" (for the
          *             neighbours).
+         *         kind: Restrict to "duplicate_submission" or "angel_claim_conflict"
+         *             (for the neighbours).
          *         user: The authenticated identity.
          *
          *     Returns:
@@ -1362,6 +1369,8 @@ export interface paths {
          *         q: The list's search query (for the neighbours).
          *         entity: Restrict to "child", "family", or "sponsor" (for the
          *             neighbours).
+         *         kind: Restrict to "duplicate_submission" or "angel_claim_conflict"
+         *             (for the neighbours).
          *         user: The authenticated identity.
          *
          *     Returns:
@@ -2868,6 +2877,7 @@ export interface components {
          *         id: The group's stable, URL-safe id.
          *         sheet: The duplicate-log sheet label.
          *         entity: "child", "family", or "sponsor".
+         *         kind: "duplicate_submission" or "angel_claim_conflict".
          *         group_key: The duplicate group's key.
          *         status: "pending", "resolved", or "audited".
          *         audited_at: When the group was marked audited.
@@ -2888,6 +2898,11 @@ export interface components {
             group_key: string;
             /** Id */
             id: string;
+            /**
+             * Kind
+             * @default duplicate_submission
+             */
+            kind: string;
             /** Members */
             members?: components["schemas"]["DuplicationMember"][];
             next?: components["schemas"]["NeighbourView"] | null;
@@ -2912,6 +2927,7 @@ export interface components {
          *         id: The group's stable, URL-safe id.
          *         sheet: The duplicate-log sheet label.
          *         entity: "child", "family", or "sponsor".
+         *         kind: "duplicate_submission" or "angel_claim_conflict".
          *         group_key: The duplicate group's key.
          *         member_count: Submissions in the group.
          *         decided_count: Members the audit already resolved.
@@ -2935,6 +2951,11 @@ export interface components {
             group_key: string;
             /** Id */
             id: string;
+            /**
+             * Kind
+             * @default duplicate_submission
+             */
+            kind: string;
             /** Member Count */
             member_count: number;
             /**
@@ -5542,6 +5563,7 @@ export interface operations {
                 page_size?: number;
                 q?: string;
                 entity?: string | null;
+                kind?: string | null;
             };
             header?: never;
             path: {
@@ -5576,6 +5598,7 @@ export interface operations {
             query?: {
                 q?: string;
                 entity?: string | null;
+                kind?: string | null;
             };
             header?: never;
             path: {
@@ -5611,6 +5634,7 @@ export interface operations {
             query?: {
                 q?: string;
                 entity?: string | null;
+                kind?: string | null;
             };
             header?: never;
             path: {
@@ -5650,6 +5674,7 @@ export interface operations {
             query?: {
                 q?: string;
                 entity?: string | null;
+                kind?: string | null;
             };
             header?: never;
             path: {
@@ -5689,6 +5714,7 @@ export interface operations {
             query?: {
                 q?: string;
                 entity?: string | null;
+                kind?: string | null;
             };
             header?: never;
             path: {

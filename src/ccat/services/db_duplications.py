@@ -41,7 +41,7 @@ from ccat.audit.store import (
     _raw_columns,
     as_bool,
 )
-from ccat.domain import index_to_letters
+from ccat.domain import SPONSOR_CLAIM_SHEET, index_to_letters
 from ccat.services import db_audit
 from ccat.services.audit import SavePatch
 from ccat.services.db_assignments import (
@@ -62,6 +62,15 @@ _SHEET_ENTITY = {
     "child_submissions": "child",
     "family_submissions": "family",
     "sponsor_submissions": "sponsor",
+    SPONSOR_CLAIM_SHEET: "sponsor",
+}
+
+#: Duplicate-log sheet label -> the kind of group the sheet holds.
+_SHEET_KIND = {
+    "child_submissions": "duplicate_submission",
+    "family_submissions": "duplicate_submission",
+    "sponsor_submissions": "duplicate_submission",
+    SPONSOR_CLAIM_SHEET: "angel_claim_conflict",
 }
 
 #: The member is a unique entity and receives an id of its own.
@@ -132,6 +141,7 @@ async def list_groups(repo: SeasonStoreRepository) -> list[dict[str, Any]]:
                 "id": group.id,
                 "sheet": group.sheet,
                 "entity": group.entity,
+                "kind": _SHEET_KIND.get(group.sheet, "duplicate_submission"),
                 "group_key": group.group_key,
                 "member_count": len(group.members),
                 "decided_count": decided,
@@ -149,7 +159,10 @@ async def list_groups(repo: SeasonStoreRepository) -> list[dict[str, Any]]:
 
 
 def filter_groups(
-    groups: list[dict[str, Any]], q: str = "", entity: str | None = None
+    groups: list[dict[str, Any]],
+    q: str = "",
+    entity: str | None = None,
+    kind: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return the groups the duplication list shows.
 
@@ -161,6 +174,7 @@ def filter_groups(
         groups: Every group summary, in the list's order.
         q: The list's search query.
         entity: Restrict to "child", "family", or "sponsor".
+        kind: Restrict to "duplicate_submission" or "angel_claim_conflict".
 
     Returns:
         The filtered groups, in the list's order.
@@ -170,6 +184,7 @@ def filter_groups(
         group
         for group in groups
         if (entity is None or group["entity"] == entity)
+        and (kind is None or group["kind"] == kind)
         and (
             not needle
             or needle in str(group["group_key"]).lower()
@@ -242,6 +257,7 @@ async def group_neighbours(
     wanted_id: str,
     q: str = "",
     entity: str | None = None,
+    kind: str | None = None,
 ) -> tuple[dict[str, str] | None, dict[str, str] | None]:
     """Return the groups before and after one group in the list's order.
 
@@ -250,12 +266,13 @@ async def group_neighbours(
         wanted_id: The group's id.
         q: The list's search query.
         entity: Restrict to "child", "family", or "sponsor".
+        kind: Restrict to "duplicate_submission" or "angel_claim_conflict".
 
     Returns:
         A (previous, next) pair of ``{"key": ..., "label": ...}`` dicts;
         each side is None when the group sits at the list's edge.
     """
-    groups = filter_groups(await list_groups(repo), q, entity)
+    groups = filter_groups(await list_groups(repo), q, entity, kind)
     index = next(
         (
             position
@@ -353,6 +370,7 @@ async def group_detail(
         "id": group.id,
         "sheet": group.sheet,
         "entity": group.entity,
+        "kind": _SHEET_KIND.get(group.sheet, "duplicate_submission"),
         "group_key": group.group_key,
         "status": _group_status(group, decisions, states),
         "survivor_count": len(classified["surviving"]),

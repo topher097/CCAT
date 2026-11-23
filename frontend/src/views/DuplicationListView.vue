@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import {
+  DUPLICATION_KIND_LABELS,
   listDuplications,
   type DuplicationListItem,
 } from '../api/duplications'
@@ -13,6 +14,12 @@ import AuditBackLink from '../components/AuditBackLink.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 
 const ENTITIES = ['all', 'child', 'family', 'sponsor']
+const KINDS = ['all', 'duplicate_submission', 'angel_claim_conflict']
+const KIND_CHIP_LABELS: Record<string, string> = {
+  all: 'All',
+  duplicate_submission: 'Duplicate submissions',
+  angel_claim_conflict: 'Assigned Angel ID conflicts',
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -23,6 +30,7 @@ const page = ref(1)
 const pageSize = ref(50)
 const query = ref('')
 const entity = ref<string>('all')
+const kind = ref<string>('all')
 const loading = ref(false)
 const error = ref<string | null>(null)
 
@@ -60,6 +68,7 @@ function detailTo(row: DuplicationListItem): string {
 function readUrl(): void {
   query.value = String(route.query.q ?? '')
   entity.value = String(route.query.entity ?? 'all')
+  kind.value = String(route.query.kind ?? 'all')
   page.value = Math.max(1, Number(route.query.page ?? 1) || 1)
   pageSize.value = Math.max(1, Number(route.query.page_size ?? 50) || 50)
 }
@@ -69,6 +78,7 @@ function writeUrl(): void {
   const next: Record<string, string> = {}
   if (query.value) next.q = query.value
   if (entity.value !== 'all') next.entity = entity.value
+  if (kind.value !== 'all') next.kind = kind.value
   if (page.value > 1) next.page = String(page.value)
   if (pageSize.value !== 50) next.page_size = String(pageSize.value)
   void router.replace({ path: route.path, query: next })
@@ -87,6 +97,7 @@ async function load(): Promise<void> {
       page_size: pageSize.value,
       q: query.value,
       entity: entity.value,
+      kind: kind.value,
     })
     rows.value = (result.items ?? []) as DuplicationListItem[]
     total.value = result.total
@@ -105,6 +116,12 @@ function submitSearch(): void {
 
 function setEntity(next: string): void {
   entity.value = next
+  page.value = 1
+  writeUrl()
+}
+
+function setKind(next: string): void {
+  kind.value = next
   page.value = 1
   writeUrl()
 }
@@ -142,7 +159,7 @@ onMounted(() => {
         v-model="query"
         type="search"
         name="q"
-        placeholder="Search group key or member id"
+        placeholder="Search group key, angel ID or member id"
         aria-label="Search"
       />
       <button type="submit">Search</button>
@@ -159,6 +176,20 @@ onMounted(() => {
         @click="setEntity(option)"
       >
         {{ option }}
+      </button>
+    </div>
+
+    <div class="filters" role="group" aria-label="Kind filter">
+      <button
+        v-for="option in KINDS"
+        :key="option"
+        type="button"
+        class="chip"
+        :aria-pressed="kind === option"
+        data-testid="kind-chip"
+        @click="setKind(option)"
+      >
+        {{ KIND_CHIP_LABELS[option] }}
       </button>
     </div>
 
@@ -189,6 +220,11 @@ onMounted(() => {
             <RouterLink :to="detailTo(row)">
               {{ row.group_key }}
             </RouterLink>
+            <div>
+              <span class="badge" data-testid="kind-badge">
+                {{ DUPLICATION_KIND_LABELS[row.kind] ?? row.kind }}
+              </span>
+            </div>
           </td>
           <td>{{ row.entity }}</td>
           <td>{{ row.member_count }}</td>

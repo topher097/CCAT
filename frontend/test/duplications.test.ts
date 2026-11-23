@@ -12,6 +12,7 @@ const GROUPS = [
     id: 'g1',
     sheet: 'duplicates',
     entity: 'child',
+    kind: 'duplicate_submission',
     group_key: 'key-1',
     member_count: 2,
     decided_count: 0,
@@ -26,6 +27,7 @@ const GROUPS = [
     id: 'g2',
     sheet: 'duplicates',
     entity: 'family',
+    kind: 'duplicate_submission',
     group_key: 'key-2',
     member_count: 3,
     decided_count: 3,
@@ -1295,5 +1297,131 @@ describe('duplication detail', () => {
 
     expect(wrapper.get('tr[data-child="c1"]').text()).toContain('f1')
     expect(wrapper.get('tr[data-child="c2"]').text()).toContain('f2')
+  })
+})
+
+describe('duplication kind', () => {
+  it('renders the kind chips and sends the chosen kind in the request and URL', async () => {
+    const fetchMock = mockRoutes([
+      (url) =>
+        url.includes('/duplications?')
+          ? jsonResponse(200, { items: [], total: 0, page: 1, page_size: 50 })
+          : undefined,
+    ])
+    const { wrapper, router } = await mountRouted(DuplicationListView, {
+      path: '/audit/duplications',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const chips = () => wrapper.findAll('[data-testid="kind-chip"]')
+    expect(chips().map((chip) => chip.text())).toEqual([
+      'All',
+      'Duplicate submissions',
+      'Assigned Angel ID conflicts',
+    ])
+    expect(chips()[0]!.attributes('aria-pressed')).toBe('true')
+
+    await chips()[2]!.trigger('click')
+    await flushPromises()
+
+    expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain(
+      'kind=angel_claim_conflict',
+    )
+    expect(router.currentRoute.value.query.kind).toBe('angel_claim_conflict')
+    expect(chips()[2]!.attributes('aria-pressed')).toBe('true')
+    expect(chips()[0]!.attributes('aria-pressed')).toBe('false')
+  })
+
+  it('labels each group with its kind and restores the kind filter from the URL', async () => {
+    const fetchMock = mockRoutes([
+      (url) =>
+        url.includes('/duplications?')
+          ? jsonResponse(200, {
+              items: [
+                GROUPS[0],
+                {
+                  ...GROUPS[1],
+                  id: 'g3',
+                  entity: 'sponsor',
+                  kind: 'angel_claim_conflict',
+                  group_key: '12A',
+                },
+              ],
+              total: 2,
+              page: 1,
+              page_size: 50,
+            })
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationListView, {
+      path: '/audit/duplications?kind=angel_claim_conflict',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
+      'kind=angel_claim_conflict',
+    )
+    const badges = wrapper.findAll('[data-testid="kind-badge"]')
+    expect(badges.map((badge) => badge.text())).toEqual([
+      'Duplicate submission',
+      'Assigned Angel ID conflict',
+    ])
+    expect(
+      wrapper.findAll('[data-testid="kind-chip"]')[2]!.attributes('aria-pressed'),
+    ).toBe('true')
+    expect(wrapper.find('input[name="q"]').attributes('placeholder')).toContain(
+      'angel ID',
+    )
+  })
+
+  it('shows the contested angel id and both decisions for an angel claim conflict', async () => {
+    const fetchMock = mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail(
+                [
+                  member({
+                    zite_record_id: 'walmart',
+                    survivor: false,
+                    raw: { first_name: 'Walmart', prior_assigned_angel_ids: '12A' },
+                    screened: { zite_record_id: 'walmart', row_version: 1 },
+                  }),
+                  member({
+                    zite_record_id: 'r2',
+                    survivor: true,
+                    raw: { first_name: 'Ann', prior_assigned_angel_ids: '12A' },
+                    screened: null,
+                  }),
+                ],
+                { entity: 'sponsor', kind: 'angel_claim_conflict', group_key: '12A' },
+              ),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1?kind=angel_claim_conflict',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
+      'kind=angel_claim_conflict',
+    )
+    expect(wrapper.get('h1').text()).toBe('Angel ID 12A')
+    expect(wrapper.get('[data-testid="contested-angel-id"]').text()).toContain('12A')
+    const explainer = wrapper.get('[data-testid="contest-explainer"]').text()
+    expect(explainer).toContain('Ignore')
+    expect(explainer).toContain('settles the contest')
+    expect(explainer).toContain('Not duplicate')
+    expect(explainer).toContain('settles nothing')
+    const claims = wrapper.findAll('[data-testid="member-angel-claim"]')
+    expect(claims.map((claim) => claim.text())).toEqual([
+      'Assigned Angel ID: 12A',
+      'Assigned Angel ID: 12A',
+    ])
   })
 })

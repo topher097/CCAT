@@ -230,6 +230,27 @@ def angel_sort_key(angel_id: str) -> tuple[int, str]:
     return (int(match.group(1)), match.group(2))
 
 
+#: Duplicate-log sheet label for sponsors that claim the same angel id.
+SPONSOR_CLAIM_SHEET = "sponsor_angel_claims"
+
+
+def parse_prior_assigned(value: str) -> list[str]:
+    """Parse the Assigned Angel ID Code free text (§8.5).
+
+    Splits on commas/whitespace, strips, and uppercases so ids like ``3b``
+    normalize to ``3B``.
+
+    Args:
+        value: The raw `prior_assigned_angel_ids` string.
+
+    Returns:
+        The parsed, normalized angel ids.
+    """
+    return [
+        token.upper() for token in re.split(r"[,\s]+", value.strip()) if token
+    ]
+
+
 def index_to_letters(index: int) -> str:
     """Map a zero-based sibling index to an angel letter suffix (§6.5).
 

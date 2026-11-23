@@ -1363,7 +1363,7 @@
       },
       "DuplicationDetail": {
         "additionalProperties": true,
-        "description": "One duplicate group's raw and screened results.\n\nAttributes:\n    id: The group's stable, URL-safe id.\n    sheet: The duplicate-log sheet label.\n    entity: \"child\", \"family\", or \"sponsor\".\n    group_key: The duplicate group's key.\n    status: \"pending\", \"resolved\", or \"audited\".\n    audited_at: When the group was marked audited.\n    members: The group's submissions.\n    survivor_count: Members left undecided (candidates to survive).\n    children: The group's children (family groups).\n    previous: The group before this one in the list's order.\n    next: The group after this one in the list's order.",
+        "description": "One duplicate group's raw and screened results.\n\nAttributes:\n    id: The group's stable, URL-safe id.\n    sheet: The duplicate-log sheet label.\n    entity: \"child\", \"family\", or \"sponsor\".\n    kind: \"duplicate_submission\" or \"angel_claim_conflict\".\n    group_key: The duplicate group's key.\n    status: \"pending\", \"resolved\", or \"audited\".\n    audited_at: When the group was marked audited.\n    members: The group's submissions.\n    survivor_count: Members left undecided (candidates to survive).\n    children: The group's children (family groups).\n    previous: The group before this one in the list's order.\n    next: The group after this one in the list's order.",
         "properties": {
           "audited_at": {
             "anyOf": [
@@ -1393,6 +1393,11 @@
           },
           "id": {
             "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "default": "duplicate_submission",
+            "title": "Kind",
             "type": "string"
           },
           "members": {
@@ -1448,7 +1453,7 @@
       },
       "DuplicationListItem": {
         "additionalProperties": true,
-        "description": "One detected duplicate group in the Duplications list.\n\nAttributes:\n    id: The group's stable, URL-safe id.\n    sheet: The duplicate-log sheet label.\n    entity: \"child\", \"family\", or \"sponsor\".\n    group_key: The duplicate group's key.\n    member_count: Submissions in the group.\n    decided_count: Members the audit already resolved.\n    survivor_count: Members left undecided (candidates to survive).\n    released_count: Members released with ``not_duplicate``.\n    status: \"pending\" or \"resolved\".\n    survivor_record_id: The group's surviving submission.\n    conflict_columns: Columns whose values differ across the group.\n    created: The group's earliest submission timestamp.",
+        "description": "One detected duplicate group in the Duplications list.\n\nAttributes:\n    id: The group's stable, URL-safe id.\n    sheet: The duplicate-log sheet label.\n    entity: \"child\", \"family\", or \"sponsor\".\n    kind: \"duplicate_submission\" or \"angel_claim_conflict\".\n    group_key: The duplicate group's key.\n    member_count: Submissions in the group.\n    decided_count: Members the audit already resolved.\n    survivor_count: Members left undecided (candidates to survive).\n    released_count: Members released with ``not_duplicate``.\n    status: \"pending\" or \"resolved\".\n    survivor_record_id: The group's surviving submission.\n    conflict_columns: Columns whose values differ across the group.\n    created: The group's earliest submission timestamp.",
         "properties": {
           "conflict_columns": {
             "items": {
@@ -1482,6 +1487,11 @@
           },
           "id": {
             "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "default": "duplicate_submission",
+            "title": "Kind",
             "type": "string"
           },
           "member_count": {
@@ -6374,7 +6384,7 @@
     },
     "/api/v1/seasons/{season}/duplications": {
       "get": {
-        "description": "List the detected duplicate groups.\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: Search on the group key.\n    entity: Restrict to \"child\", \"family\", or \"sponsor\".\n    _user: Authenticated identity.\n\nReturns:\n    One page of duplicate groups.",
+        "description": "List the detected duplicate groups.\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: Search on the group key.\n    entity: Restrict to \"child\", \"family\", or \"sponsor\".\n    kind: Restrict to \"duplicate_submission\" or \"angel_claim_conflict\".\n    _user: Authenticated identity.\n\nReturns:\n    One page of duplicate groups.",
         "operationId": "list_duplications_api_v1_seasons__season__duplications_get",
         "parameters": [
           {
@@ -6434,6 +6444,22 @@
               ],
               "title": "Entity"
             }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
           }
         ],
         "responses": {
@@ -6466,7 +6492,7 @@
     },
     "/api/v1/seasons/{season}/duplications/{group_id}": {
       "get": {
-        "description": "Read one duplicate group's raw and screened results.\n\nArgs:\n    group_id: The group's id.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    _user: Authenticated identity.\n\nReturns:\n    The group detail.\n\nRaises:\n    ApiError: 404 when no group carries that id.",
+        "description": "Read one duplicate group's raw and screened results.\n\nArgs:\n    group_id: The group's id.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    kind: Restrict to \"duplicate_submission\" or \"angel_claim_conflict\"\n        (for the neighbours).\n    _user: Authenticated identity.\n\nReturns:\n    The group detail.\n\nRaises:\n    ApiError: 404 when no group carries that id.",
         "operationId": "get_duplication_api_v1_seasons__season__duplications__group_id__get",
         "parameters": [
           {
@@ -6512,6 +6538,22 @@
               ],
               "title": "Entity"
             }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
           }
         ],
         "responses": {
@@ -6544,7 +6586,7 @@
     },
     "/api/v1/seasons/{season}/duplications/{group_id}/audit": {
       "post": {
-        "description": "Mark a resolved duplication audited (auditor).\n\nThe group's surviving entry (its single undecided submission) is\naudited with the carried ``Current (editable)`` values, and every\nmember's row status is overridden by the group's adjudication.  The\nbody is optional: without it the surviving entry's stored row is\nfinalized as it stands.\n\nArgs:\n    group_id: The group's id.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    user: The authenticated identity.\n    body: The reviewed values under canonical DTO names, and the\n        surviving entry's expected ``row_version``.\n\nReturns:\n    The updated group detail.\n\nRaises:\n    ApiError: 404 for an unknown group; 409 when the group has zero\n        or more than one surviving entry; 409 when the surviving\n        entry is already audited and values were carried; 412 when a\n        stored row changed since the read.",
+        "description": "Mark a resolved duplication audited (auditor).\n\nThe group's surviving entry (its single undecided submission) is\naudited with the carried ``Current (editable)`` values, and every\nmember's row status is overridden by the group's adjudication.  The\nbody is optional: without it the surviving entry's stored row is\nfinalized as it stands.\n\nArgs:\n    group_id: The group's id.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    kind: Restrict to \"duplicate_submission\" or \"angel_claim_conflict\"\n        (for the neighbours).\n    user: The authenticated identity.\n    body: The reviewed values under canonical DTO names, and the\n        surviving entry's expected ``row_version``.\n\nReturns:\n    The updated group detail.\n\nRaises:\n    ApiError: 404 for an unknown group; 409 when the group has zero\n        or more than one surviving entry; 409 when the surviving\n        entry is already audited and values were carried; 412 when a\n        stored row changed since the read.",
         "operationId": "audit_duplication_api_v1_seasons__season__duplications__group_id__audit_post",
         "parameters": [
           {
@@ -6589,6 +6631,22 @@
                 }
               ],
               "title": "Entity"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
             }
           }
         ],
@@ -6639,7 +6697,7 @@
     },
     "/api/v1/seasons/{season}/duplications/{group_id}/children": {
       "post": {
-        "description": "Assign a split family's children to their families (auditor).\n\nArgs:\n    group_id: The group's id.\n    body: Child record id -> target family id.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    user: The authenticated identity.\n\nReturns:\n    The updated group detail.\n\nRaises:\n    ApiError: 404 for an unknown group or child; 412 when a stored\n        row changed since the read.",
+        "description": "Assign a split family's children to their families (auditor).\n\nArgs:\n    group_id: The group's id.\n    body: Child record id -> target family id.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    kind: Restrict to \"duplicate_submission\" or \"angel_claim_conflict\"\n        (for the neighbours).\n    user: The authenticated identity.\n\nReturns:\n    The updated group detail.\n\nRaises:\n    ApiError: 404 for an unknown group or child; 412 when a stored\n        row changed since the read.",
         "operationId": "assign_duplication_children_api_v1_seasons__season__duplications__group_id__children_post",
         "parameters": [
           {
@@ -6685,6 +6743,22 @@
               ],
               "title": "Entity"
             }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
           }
         ],
         "requestBody": {
@@ -6727,7 +6801,7 @@
     },
     "/api/v1/seasons/{season}/duplications/{group_id}/members/{record_id}": {
       "post": {
-        "description": "Resolve one duplicate group member (auditor; confirmed).\n\nArgs:\n    group_id: The group's id.\n    record_id: The audited group member.\n    body: The decision.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    user: The authenticated identity.\n\nReturns:\n    The updated group detail.\n\nRaises:\n    ApiError: 422 without confirmation; 404 for an unknown group or\n        member; 412 when the stored row changed since the read.",
+        "description": "Resolve one duplicate group member (auditor; confirmed).\n\nArgs:\n    group_id: The group's id.\n    record_id: The audited group member.\n    body: The decision.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    kind: Restrict to \"duplicate_submission\" or \"angel_claim_conflict\"\n        (for the neighbours).\n    user: The authenticated identity.\n\nReturns:\n    The updated group detail.\n\nRaises:\n    ApiError: 422 without confirmation; 404 for an unknown group or\n        member; 412 when the stored row changed since the read.",
         "operationId": "decide_duplication_api_v1_seasons__season__duplications__group_id__members__record_id__post",
         "parameters": [
           {
@@ -6781,6 +6855,22 @@
                 }
               ],
               "title": "Entity"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
             }
           }
         ],

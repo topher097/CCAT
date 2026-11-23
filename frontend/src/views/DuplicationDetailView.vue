@@ -5,6 +5,7 @@ import { RouterLink, useRoute } from 'vue-router'
 import { ApiError } from '../api/client'
 import {
   assignDuplicationChildren,
+  DUPLICATION_KIND_LABELS,
   auditDuplication,
   decideDuplication,
   getDuplication,
@@ -58,8 +59,16 @@ const { listUrl, query: carriedQuery } = useAuditNav('/audit/duplications')
 /** The list's filters, carried in the URL, decide the neighbours. */
 const filters = computed(() => {
   const params = new URLSearchParams(carriedQuery.value)
-  return { q: params.get('q') ?? '', entity: params.get('entity') }
+  return {
+    q: params.get('q') ?? '',
+    entity: params.get('entity'),
+    kind: params.get('kind'),
+  }
 })
+/** An angel claim conflict: two sponsors claim the same child. */
+const isContest = computed(
+  () => detail.value?.kind === 'angel_claim_conflict',
+)
 const members = computed<DuplicationMember[]>(
   () => (detail.value?.members ?? []) as DuplicationMember[],
 )
@@ -124,6 +133,13 @@ const blockerMessage = computed(() => {
     return 'No submission is left to survive — discard or release them all.'
   return `${count} submissions are still undecided — this group has more than one surviving entry.`
 })
+/** The ignore dialog names what ignoring does, which differs by kind. */
+const ignoreMessage = computed(() => {
+  if (isContest.value) {
+    return `Ignoring takes this sponsor out of the match pool and clears its claim on angel ${detail.value?.group_key ?? ''}. The other sponsor keeps the only claim. The decision is applied when you save.`
+  }
+  return "Ignoring destroys this row's adjudicated data — it is reduced to its identity skeleton. Un-ignore later restores the raw baseline values and loses the edits. The decision is applied when you save."
+})
 const auditHint = computed(() => {
   if (!detail.value) return ''
   if (undecidedMembers.value.length !== 1) return blockerMessage.value
@@ -169,6 +185,8 @@ const rawFields = computed<string[]>(() => {
 })
 
 const entityHint = computed(() => {
+  // A contest's explainer block says what each decision does.
+  if (isContest.value) return ''
   if (entity.value === 'child') {
     return 'Not duplicate gives this submission its own angel letter in the same family: it becomes a second angel of that family, with its own sheet and its own sponsor assignment. Ignore destroys this row.'
   }
@@ -177,6 +195,11 @@ const entityHint = computed(() => {
   }
   return "This group's submissions share one family row. Ignore drops this registration and keeps the family — destroy the family from the family's own row. Not duplicate creates a new family, and the group's children need a decision about which family they belong to."
 })
+
+/** A sponsor's claimed angel ids, as submitted. */
+function assignedAngelOf(member: DuplicationMember): string {
+  return show(member.raw?.prior_assigned_angel_ids)
+}
 
 /** Family choices for each child of a split family group. */
 const familyOptions = computed(() => {
@@ -611,7 +634,13 @@ onMounted(() => {
       <div class="status-line" style="justify-content: space-between">
         <div class="status-line">
           <AuditBackLink :to="listUrl" label="All duplications" />
-          <h1 style="margin: 0">Group {{ detail.group_key }}</h1>
+          <h1 v-if="isContest" style="margin: 0" data-testid="contested-angel-id">
+            Angel ID {{ detail.group_key }}
+          </h1>
+          <h1 v-else style="margin: 0">Group {{ detail.group_key }}</h1>
+          <span v-if="isContest" class="badge" data-testid="kind-label">
+            {{ DUPLICATION_KIND_LABELS.angel_claim_conflict }}
+          </span>
           <span class="badge">{{ detail.entity }}</span>
           <StatusBadge :status="detail.status" />
         </div>
@@ -627,6 +656,33 @@ onMounted(() => {
             {{ detail.status === 'audited' ? 'Re-audit' : 'Mark audited' }}
           </button>
         </div>
+      </div>
+      <div
+        v-if="isContest"
+        class="card"
+        style="margin-bottom: 1rem"
+        data-testid="contest-explainer"
+      >
+        <p style="margin-top: 0">
+          Two sponsors claim the child with angel ID
+          <strong>{{ detail.group_key }}</strong>. Only one can keep it.
+        </p>
+        <ul class="muted" style="margin-bottom: 0">
+          <li>
+            <strong>Ignore</strong> settles the contest. The ignored sponsor
+            leaves the match pool and its claim is cleared; the other sponsor
+            holds the only claim.
+          </li>
+          <li>
+            <strong>Not duplicate</strong> settles nothing. Both sponsors keep
+            their claim and only the duplicate flag clears, so the lower
+            sponsor id keeps the child.
+          </li>
+        </ul>
+        <p class="muted" style="margin-bottom: 0">
+          The screen suggests the later sign-up as survivor, because the
+          generic placeholder sponsor was created first.
+        </p>
       </div>
       <p class="muted">
         {{ members.length }} submission(s). The columns are the raw
@@ -700,6 +756,9 @@ onMounted(() => {
                     />
                     Ignore
                   </label>
+                </div>
+                <div v-if="isContest" data-testid="member-angel-claim">
+                  Assigned Angel ID: {{ assignedAngelOf(member) }}
                 </div>
                 <span v-if="member.assigned_id" class="muted">
                   → {{ member.assigned_id }}
@@ -803,7 +862,7 @@ onMounted(() => {
         </table>
       </div>
 
-      <p class="muted" style="margin-top: 0.75rem">{{ entityHint }}</p>
+      <p v-if="entityHint" class="muted" style="margin-top: 0.75rem">{{ entityHint }}</p>
 
       <div
         v-if="detail.children.length > 0"
@@ -915,7 +974,7 @@ onMounted(() => {
         </span>
       </div>
 
-      <p class="muted" style="margin-top: 0.75rem">
+      <p v-if="!isContest" class="muted" style="margin-top: 0.75rem">
         A field conflicts when the submissions disagree on it; a field one
         submission leaves blank while another fills in does not conflict.
         “Not duplicate” gives the submission its own unique id; “Ignore”
@@ -926,7 +985,7 @@ onMounted(() => {
       <ConfirmDialog
         :open="ignoreTarget !== null"
         title="Ignore this submission?"
-        message="Ignoring destroys this row's adjudicated data — it is reduced to its identity skeleton. Un-ignore later restores the raw baseline values and loses the edits. The decision is applied when you save."
+        :message="ignoreMessage"
         confirm-label="Ignore on save"
         dangerous
         @confirm="confirmIgnore"

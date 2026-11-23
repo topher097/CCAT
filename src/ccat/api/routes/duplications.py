@@ -108,6 +108,7 @@ def _detail_dto(
         id=str(detail.get("id") or ""),
         sheet=str(detail.get("sheet") or ""),
         entity=entity,
+        kind=str(detail.get("kind") or "duplicate_submission"),
         group_key=str(detail.get("group_key") or ""),
         status=str(detail.get("status") or ""),
         audited_at=detail.get("audited_at"),
@@ -132,6 +133,7 @@ async def list_duplications(
     page_size: int = Query(50, ge=1, le=200),
     q: str = "",
     entity: str | None = None,
+    kind: str | None = None,
     _user: AuthUser = Depends(current_user),
 ) -> DuplicationListPage:
     """List the detected duplicate groups.
@@ -143,13 +145,14 @@ async def list_duplications(
         page_size: Page size (max 200).
         q: Search on the group key.
         entity: Restrict to "child", "family", or "sponsor".
+        kind: Restrict to "duplicate_submission" or "angel_claim_conflict".
         _user: Authenticated identity.
 
     Returns:
         One page of duplicate groups.
     """
     groups = db_duplications.filter_groups(
-        await db_duplications.list_groups(repo), q, entity
+        await db_duplications.list_groups(repo), q, entity, kind
     )
     start = (page - 1) * page_size
     return DuplicationListPage(
@@ -167,6 +170,7 @@ async def get_duplication(
     repo: SeasonStoreRepository = Depends(season_repo),
     q: str = "",
     entity: str | None = None,
+    kind: str | None = None,
     _user: AuthUser = Depends(current_user),
 ) -> DuplicationDetail:
     """Read one duplicate group's raw and screened results.
@@ -178,6 +182,8 @@ async def get_duplication(
         q: The list's search query (for the neighbours).
         entity: Restrict to "child", "family", or "sponsor" (for the
             neighbours).
+        kind: Restrict to "duplicate_submission" or "angel_claim_conflict"
+            (for the neighbours).
         _user: Authenticated identity.
 
     Returns:
@@ -192,7 +198,7 @@ async def get_duplication(
             404, "not_found", f"unknown duplication group {group_id!r}"
         )
     previous, next_row = await db_duplications.group_neighbours(
-        repo, group_id, q, entity
+        repo, group_id, q, entity, kind
     )
     return _detail_dto(detail, previous, next_row)
 
@@ -210,6 +216,7 @@ async def decide_duplication(
     repo: SeasonStoreRepository = Depends(season_repo),
     q: str = "",
     entity: str | None = None,
+    kind: str | None = None,
     user: AuthUser = Depends(require_roles("auditor")),
 ) -> Any:
     """Resolve one duplicate group member (auditor; confirmed).
@@ -223,6 +230,8 @@ async def decide_duplication(
         q: The list's search query (for the neighbours).
         entity: Restrict to "child", "family", or "sponsor" (for the
             neighbours).
+        kind: Restrict to "duplicate_submission" or "angel_claim_conflict"
+            (for the neighbours).
         user: The authenticated identity.
 
     Returns:
@@ -260,7 +269,7 @@ async def decide_duplication(
             current_version=error.current_version,
         ) from error
     previous, next_row = await db_duplications.group_neighbours(
-        repo, group_id, q, entity
+        repo, group_id, q, entity, kind
     )
     return _detail_dto(detail, previous, next_row)
 
@@ -276,6 +285,7 @@ async def audit_duplication(
     repo: SeasonStoreRepository = Depends(season_repo),
     q: str = "",
     entity: str | None = None,
+    kind: str | None = None,
     user: AuthUser = Depends(require_roles("auditor")),
     body: DuplicationAuditRequest | None = None,
 ) -> Any:
@@ -294,6 +304,8 @@ async def audit_duplication(
         q: The list's search query (for the neighbours).
         entity: Restrict to "child", "family", or "sponsor" (for the
             neighbours).
+        kind: Restrict to "duplicate_submission" or "angel_claim_conflict"
+            (for the neighbours).
         user: The authenticated identity.
         body: The reviewed values under canonical DTO names, and the
             surviving entry's expected ``row_version``.
@@ -332,7 +344,7 @@ async def audit_duplication(
             current_version=error.current_version,
         ) from error
     previous, next_row = await db_duplications.group_neighbours(
-        repo, group_id, q, entity
+        repo, group_id, q, entity, kind
     )
     return _detail_dto(detail, previous, next_row)
 
@@ -349,6 +361,7 @@ async def assign_duplication_children(
     repo: SeasonStoreRepository = Depends(season_repo),
     q: str = "",
     entity: str | None = None,
+    kind: str | None = None,
     user: AuthUser = Depends(require_roles("auditor")),
 ) -> Any:
     """Assign a split family's children to their families (auditor).
@@ -361,6 +374,8 @@ async def assign_duplication_children(
         q: The list's search query (for the neighbours).
         entity: Restrict to "child", "family", or "sponsor" (for the
             neighbours).
+        kind: Restrict to "duplicate_submission" or "angel_claim_conflict"
+            (for the neighbours).
         user: The authenticated identity.
 
     Returns:
@@ -384,7 +399,7 @@ async def assign_duplication_children(
             current_version=error.current_version,
         ) from error
     previous, next_row = await db_duplications.group_neighbours(
-        repo, group_id, q, entity
+        repo, group_id, q, entity, kind
     )
     return _detail_dto(detail, previous, next_row)
 
