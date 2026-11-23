@@ -25,12 +25,30 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Add the group's entry key to the duplication-group state table."""
+    """Add the group's entry key to the duplication-group state table.
+
+    The column is added only when it is missing: a database that was
+    migrated by this revision and then re-stamped (the deployment runs
+    one branch's migrations against a shared volume) must be able to
+    take the revision again.
+    """
+    if "entry_key" in _columns():
+        return
     with op.batch_alter_table("duplication_state", schema=None) as batch_op:
         batch_op.add_column(sa.Column("entry_key", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
     """Drop the group's entry key."""
+    if "entry_key" not in _columns():
+        return
     with op.batch_alter_table("duplication_state", schema=None) as batch_op:
         batch_op.drop_column("entry_key")
+
+
+def _columns() -> set[str]:
+    """Return the duplication-state table's current column names."""
+    inspector = sa.inspect(op.get_bind())
+    return {
+        column["name"] for column in inspector.get_columns("duplication_state")
+    }
