@@ -99,7 +99,20 @@ async def _seed(
     families: list[dict[str, Any]] | None = None,
     sponsors: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Seed final stores through migrate ownership."""
+    """Seed final stores through migrate ownership.
+
+    A child without its own ``assigned_sponsor_id`` inherits its
+    family's, so a test can state the assignment at either grain.
+    """
+    family_sponsors = {
+        family.get("family_id"): family.get("assigned_sponsor_id")
+        for family in families or []
+    }
+    for child in children or []:
+        if not child.get("assigned_sponsor_id"):
+            child["assigned_sponsor_id"] = family_sponsors.get(
+                child.get("family_id")
+            )
     uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
     try:
         async with uow.store(cfg, "migration") as repo:
@@ -781,6 +794,64 @@ def test_packet_artifacts_registered(
     }
 
 
+def test_packet_split_family_two_sponsors(
+    tmp_path: Path, packets_cfg: Any, fake_convert: list[str]
+) -> None:
+    """A split family produces one packet per sponsor, right children."""
+    cfg = packets_cfg(_prepare(tmp_path))
+    children = [
+        _angel_child("c1", "1A", assigned_sponsor_id=7),
+        _angel_child("c2", "1B", assigned_sponsor_id=8),
+    ]
+    asyncio.run(
+        _seed(
+            cfg,
+            children=children,
+            families=[family_row(1, assigned_sponsor_id=None)],
+            sponsors=[
+                _assigned_sponsor(7, assigned_angel_ids="1A"),
+                _assigned_sponsor(8, assigned_angel_ids="1B"),
+            ],
+        )
+    )
+    result = _run(cfg, {})
+    assert result.packets_built == 2
+    packets_dir = tmp_path / "artifacts" / "sponsor_packets"
+    seven = (packets_dir / "7" / "sponsor_packet_7.html").read_text()
+    eight = (packets_dir / "8" / "sponsor_packet_8.html").read_text()
+    assert "<strong>1A</strong>" in seven
+    assert "<strong>1B</strong>" not in seven
+    assert "<strong>1B</strong>" in eight
+    assert "<strong>1A</strong>" not in eight
+
+
+def test_packet_shared_angel_letter_keeps_every_child(
+    tmp_path: Path, packets_cfg: Any, fake_convert: list[str]
+) -> None:
+    """A shared angel letter no longer drops a child from the packet."""
+    cfg = packets_cfg(_prepare(tmp_path))
+    first = _angel_child("c1", "1A", family_id=1, assigned_sponsor_id=7)
+    second = _angel_child("c2", "1A", family_id=2, assigned_sponsor_id=7)
+    asyncio.run(
+        _seed(
+            cfg,
+            children=[first, second],
+            families=[_family(1), _family(2)],
+            sponsors=[_assigned_sponsor(7, assigned_angel_ids="1A,1A")],
+        )
+    )
+    result = _run(cfg, {})
+    assert result.packets_built == 1
+    html = (
+        tmp_path
+        / "artifacts"
+        / "sponsor_packets"
+        / "7"
+        / "sponsor_packet_7.html"
+    ).read_text()
+    assert html.count("<strong>1A</strong>") == 2
+
+
 def test_packet_validation_legacy_scope_d18(
     tmp_path: Path,
     packets_cfg: Any,
@@ -891,12 +962,12 @@ def test_packet_angel_ordering(
     ]
 
 
-def test_packet_unknown_angel_dropped(
+def test_packet_stored_angel_ids_ignored(
     tmp_path: Path,
     packets_cfg: Any,
     fake_convert: list[str],
 ) -> None:
-    """Unknown angel ids in the stored list are dropped with a warning."""
+    """Packet membership is the child's column; stored ids do not count."""
     cfg = packets_cfg(_prepare(tmp_path))
     children = [_angel_child("c1", "1A")]
     asyncio.run(
@@ -916,6 +987,7 @@ def test_packet_unknown_angel_dropped(
         / "sponsor_packet_7.html"
     ).read_text()
     assert "9X" not in html
+    assert "<strong>1A</strong>" in html
     assert result.packets_built == 1
 
 

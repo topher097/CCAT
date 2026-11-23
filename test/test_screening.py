@@ -815,6 +815,118 @@ def test_run_redo_and_overwrite_protect_human_state(
     assert by_id["rec_c2"]["screened"] is True
 
 
+def test_run_overwrite_new_overwrites_existing_values(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The global flag lets the AI replace a human edit on a "new" child."""
+    screen_cfg.ai_screening.overwrite_new = True
+    _seed_workbook(
+        screen_cfg,
+        children=[child(zite_record_id="rec_c1")],
+        final_children=[
+            final_child_row(
+                child(zite_record_id="rec_c1"),
+                need_1="human-fixed coat",
+                status="new",
+            )
+        ],
+    )
+    KeyedFakeOpencode.responses = {
+        "rec_c1": json.dumps(full_response("rec_c1") | {"need_1": "model coat"})
+    }
+    _use_keyed_opencode(monkeypatch)
+
+    run(screen_cfg, overwrite=True)
+
+    row = _rows(screen_cfg, "final_child")[0]
+    assert row["need_1"] == "model coat"
+    assert row["screened"] is True
+
+
+def test_run_overwrite_new_keeps_edits_of_audited_children(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag never touches a child that moved past "new"."""
+    screen_cfg.ai_screening.overwrite_new = True
+    _seed_workbook(
+        screen_cfg,
+        children=[child(zite_record_id="rec_c1")],
+        final_children=[
+            final_child_row(
+                child(zite_record_id="rec_c1"),
+                need_1="human-fixed coat",
+                status="audited",
+            )
+        ],
+    )
+    KeyedFakeOpencode.responses = {
+        "rec_c1": json.dumps(full_response("rec_c1") | {"need_1": "model coat"})
+    }
+    _use_keyed_opencode(monkeypatch)
+
+    run(screen_cfg, overwrite=True)
+
+    row = _rows(screen_cfg, "final_child")[0]
+    assert row["need_1"] == "human-fixed coat"
+
+
+def test_run_without_overwrite_new_keeps_human_edits(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the flag off, a human edit survives re-screening."""
+    _seed_workbook(
+        screen_cfg,
+        children=[child(zite_record_id="rec_c1")],
+        final_children=[
+            final_child_row(
+                child(zite_record_id="rec_c1"),
+                need_1="human-fixed coat",
+                status="new",
+            )
+        ],
+    )
+    KeyedFakeOpencode.responses = {
+        "rec_c1": json.dumps(full_response("rec_c1") | {"need_1": "model coat"})
+    }
+    _use_keyed_opencode(monkeypatch)
+
+    run(screen_cfg, overwrite=True)
+
+    row = _rows(screen_cfg, "final_child")[0]
+    assert row["need_1"] == "human-fixed coat"
+
+
+def test_run_overwrite_new_keeps_the_control_columns(
+    screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag replaces values only; controls stay untouched."""
+    screen_cfg.ai_screening.overwrite_new = True
+    _seed_workbook(
+        screen_cfg,
+        children=[child(zite_record_id="rec_c1")],
+        final_children=[
+            final_child_row(
+                child(zite_record_id="rec_c1"),
+                need_1="human-fixed coat",
+                clarification_notes="call the family",
+                generated_info_sheet=True,
+                status="new",
+            )
+        ],
+    )
+    KeyedFakeOpencode.responses = {
+        "rec_c1": json.dumps(full_response("rec_c1") | {"need_1": "model coat"})
+    }
+    _use_keyed_opencode(monkeypatch)
+
+    run(screen_cfg, overwrite=True)
+
+    row = _rows(screen_cfg, "final_child")[0]
+    assert row["need_1"] == "model coat"
+    assert row["clarification_notes"] == "call the family"
+    assert row["generated_info_sheet"] is True
+
+
 def test_run_redo_unknown_child_fails(screen_cfg: Config, monkeypatch) -> None:
     """Redo of an unknown zite_record_id fails fast."""
     _seed_workbook(screen_cfg)

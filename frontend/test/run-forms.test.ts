@@ -64,23 +64,6 @@ describe('pipeline run forms', () => {
     })
   })
 
-  it('maps match options to the CLI payload exactly', async () => {
-    const fetchMock = mockRoutes([
-      (url) => (url.endsWith('/seasons/2026/jobs') ? jsonResponse(202, JOB) : undefined),
-    ])
-    const { wrapper } = await mountForm('match')
-    await wrapper.get('input[name="test"]').setValue(true)
-    await wrapper.get('input[name="skip_match"]').setValue(true)
-    await wrapper.get('form').trigger('submit')
-    await wrapper.get('[data-testid="confirm"]').trigger('click')
-    await flushPromises()
-
-    expect(await enqueueAndRead(fetchMock)).toEqual({
-      job_type: 'match',
-      options: { test: true, overwrite: false, skip_match: true },
-    })
-  })
-
   it('maps generate options to the CLI payload exactly', async () => {
     const fetchMock = mockRoutes([
       (url) => (url.endsWith('/seasons/2026/jobs') ? jsonResponse(202, JOB) : undefined),
@@ -185,5 +168,100 @@ describe('pipeline run forms', () => {
     const text = wrapper.get('[data-testid="run-error"]').text()
     expect(text).toContain('body.options.redo')
     expect(text).toContain('unknown child')
+  })
+
+  it('shows the global AI screening flag on the screen page', async () => {
+    mockRoutes([
+      (url) =>
+        url.endsWith('/runs/screen/settings')
+          ? jsonResponse(200, {
+              command: 'screen',
+              run: { overwrite_new: true },
+              config_path: '/tmp/ccat.json',
+              editable: true,
+              saved: false,
+            })
+          : undefined,
+    ])
+    const { wrapper } = await mountForm('screen')
+    await flushPromises()
+
+    const box = wrapper.get('input[name="overwrite_new"]')
+    expect((box.element as HTMLInputElement).checked).toBe(true)
+    expect(wrapper.get('[data-testid="overwrite-new-warning"]').text()).toContain(
+      'status is still',
+    )
+  })
+
+  it('writes the global AI screening flag to the configuration file', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) =>
+        url.endsWith('/runs/screen/settings') && init.method === 'PATCH'
+          ? jsonResponse(200, {
+              command: 'screen',
+              run: { overwrite_new: true },
+              config_path: '/tmp/ccat.json',
+              editable: true,
+              saved: true,
+            })
+          : url.endsWith('/runs/screen/settings')
+            ? jsonResponse(200, {
+                command: 'screen',
+                run: { overwrite_new: false },
+                config_path: '/tmp/ccat.json',
+                editable: true,
+                saved: false,
+              })
+            : undefined,
+    ])
+    const { wrapper } = await mountForm('screen')
+    await flushPromises()
+
+    await wrapper.get('input[name="overwrite_new"]').setValue(true)
+    await flushPromises()
+
+    const patch = fetchMock.mock.calls.find(
+      (entry) =>
+        String(entry[0]).endsWith('/runs/screen/settings') &&
+        String((entry[1] as RequestInit).method) === 'PATCH',
+    )
+    expect(patch).toBeDefined()
+    expect(bodyOf(patch!)).toEqual({ overwrite_new: true })
+    expect(
+      (wrapper.get('input[name="overwrite_new"]').element as HTMLInputElement)
+        .checked,
+    ).toBe(true)
+  })
+
+  it('leaves the global AI flag out of the job options', async () => {
+    const fetchMock = mockRoutes([
+      (url) =>
+        url.endsWith('/runs/screen/settings')
+          ? jsonResponse(200, {
+              command: 'screen',
+              run: { overwrite_new: true },
+              config_path: '/tmp/ccat.json',
+              editable: true,
+              saved: false,
+            })
+          : url.endsWith('/seasons/2026/jobs')
+            ? jsonResponse(202, JOB)
+            : undefined,
+    ])
+    const { wrapper } = await mountForm('screen')
+    await flushPromises()
+    await wrapper.get('form').trigger('submit')
+    await wrapper.get('[data-testid="confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(await enqueueAndRead(fetchMock)).toEqual({
+      job_type: 'screen',
+      options: {
+        test: false,
+        overwrite: false,
+        skip_email_check: false,
+        skip_address_check: false,
+      },
+    })
   })
 })

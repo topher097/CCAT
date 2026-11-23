@@ -28,6 +28,10 @@ from ccat.clarify.extract import build_table, write_csv
 from ccat.config import Config
 from ccat.io import list_sheets, read_sheet
 from ccat.services.audit import entity_count_changes
+from ccat.services.db_assignments import (
+    child_sponsor,
+    group_children_by_family,
+)
 from ccat.services.results import (
     AcquireResult,
     ClarifyExportResult,
@@ -191,7 +195,9 @@ def match(
     before_sheets = set(list_sheets(cfg.excel_file))
     match_module.run(cfg, test=test, overwrite=overwrite, skip_match=skip_match)
     families = eligible_output_rows(read_final(cfg, "family"), "family")
+    children = eligible_output_rows(read_final(cfg, "child"), "child")
     sponsors = eligible_output_rows(read_final(cfg, "sponsor"), "sponsor")
+    family_sponsors = _family_sponsors(families, children)
     angel_ids = {
         angel.strip()
         for row in sponsors
@@ -204,28 +210,39 @@ def match(
         for name in set(list_sheets(cfg.excel_file)) - before_sheets
         if name.startswith(("final_family_", "final_sponsor_", "match_report_"))
     }
-    return MatchResult(
-        matched_families=sum(
-            1 for row in families if row.get("assigned_sponsor_id") is not None
+    split_family_ids = sorted(
+        int(family_id)
+        for family_id, sponsors_here in family_sponsors.items()
+        if len(sponsors_here) > 1
+    )
+    result: dict[str, Any] = {
+        "matched_families": sum(
+            1
+            for sponsors_here in family_sponsors.values()
+            if len(sponsors_here) == 1
         ),
-        matched_sponsors=sum(
+        "matched_sponsors": sum(
             1 for row in sponsors if row.get("assigned_angel_ids")
         ),
-        assigned_angel_ids=sorted(angel_ids, key=match_module._angel_sort_key),
-        unmatched_family_ids=[
-            int(row["family_id"])
-            for row in families
-            if row.get("assigned_sponsor_id") is None
-        ],
-        unmatched_sponsor_ids=[
+        "assigned_angel_ids": sorted(
+            angel_ids, key=match_module._angel_sort_key
+        ),
+        "unmatched_family_ids": sorted(
+            int(family_id)
+            for family_id, sponsors_here in family_sponsors.items()
+            if not sponsors_here
+        ),
+        "unmatched_sponsor_ids": [
             int(row["sponsor_id"])
             for row in sponsors
             if not row.get("assigned_angel_ids")
         ],
-        report_rows=_sheet_height(cfg.excel_file, "match_report"),
-        archived=bool(archives),
-        csv_path=str(cfg.match_report_csv),
-    )
+        "report_rows": _sheet_height(cfg.excel_file, "match_report"),
+        "archived": bool(archives),
+        "csv_path": str(cfg.match_report_csv),
+        "split_family_ids": split_family_ids,
+    }
+    return MatchResult(**result)
 
 
 def generate(
@@ -294,7 +311,11 @@ def generate(
         angel_id = row.get("angel_id")
         if angel_id is None:
             continue
-        assigned = family_sponsor.get(row.get("family_id"))
+        # The child's own column is the assignment; the family summary
+        # is only a fallback for a workbook the legacy matcher wrote.
+        assigned = child_sponsor(row)
+        if assigned is None:
+            assigned = family_sponsor.get(row.get("family_id"))
         if sponsor is not None and assigned != sponsor:
             continue
         if assigned is None:
@@ -435,6 +456,40 @@ def _first_family_id(children: dict[str, dict[str, Any]]) -> int | None:
         if row.get("family_id") is not None
     ]
     return min(present) if present else None
+
+
+def _family_sponsors(
+    families: list[dict[str, Any]], children: list[dict[str, Any]]
+) -> dict[int, set[int]]:
+    """Map each family to the sponsors of its assigned children.
+
+    The child row is the assignment grain.  A legacy match run writes
+    only the family summary, so a family whose children carry no
+    assignment falls back to its derived single sponsor; once the
+    matcher writes child rows the fallback never fires.
+
+    Args:
+        families: Non-ignored family rows.
+        children: Non-ignored, non-orphan child rows.
+
+    Returns:
+        Mapping of family id -> the set of its children's sponsors.
+    """
+    grouped = group_children_by_family(children)
+    result: dict[int, set[int]] = {}
+    for family in families:
+        family_id = family.get("family_id")
+        if family_id is None:
+            continue
+        sponsors = {
+            sponsor
+            for child in grouped.get(family_id, [])
+            if (sponsor := child_sponsor(child)) is not None
+        }
+        if not sponsors and family.get("assigned_sponsor_id") is not None:
+            sponsors = {int(family["assigned_sponsor_id"])}
+        result[int(family_id)] = sponsors
+    return result
 
 
 def _packet_sponsors(cfg: Config, sponsor: int | None) -> list[int]:

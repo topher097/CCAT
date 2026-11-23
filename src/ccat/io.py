@@ -89,7 +89,9 @@ WRITABLE_SHEETS: dict[str, frozenset[str]] = {
         }
     ),
     "audit": frozenset({"final_child", "final_family", "final_sponsor"}),
-    "match": frozenset({"final_family", "final_sponsor", "match_report"}),
+    "match": frozenset(
+        {"final_child", "final_family", "final_sponsor", "match_report"}
+    ),
     "generate": frozenset({"final_child"}),
     "migrate": frozenset(SHEETS),
 }

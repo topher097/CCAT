@@ -90,6 +90,12 @@ blanket data replacement: human edits, controls, and module-owned fields
 retain their protections. Failed or interrupted AI/PDF work remains
 retryable; completed work remains complete.
 
+The one exception to the human-edit protection is the global setting
+`ai_screening.overwrite_new` (off by default). With it on, AI screening
+replaces every value of a child whose status is still `new`; children that
+have moved past `new` keep their human edits either way. The `/screen`
+page toggles it, and the flag applies to every screening run.
+
 Duplicates are flagged, never merged. ZeroBounce and Nominatim reuse their
 logs, so reruns do not repeat successful external checks; complete verbatim
 responses remain stored.
@@ -101,6 +107,16 @@ responses remain stored.
   `frontend/dist` exists.
 - The interactive audit lists/detail editors and the clarification
   list/detail views live in the Vue SPA; there is no separate local editor.
+- **Manual matching** (`/match/manual`) lets a coordinator place families
+  by hand: a filtered pool of family cards, per-child selection, and an
+  assignment to a sponsor. The assignment lives on the child row
+  (`final_child.assigned_sponsor_id`), so a family may be split across two
+  sponsors; the family and sponsor columns are derived summaries of it. In
+  an exported workbook the **child sheet is the authoritative assignment
+  record**. The automatic matcher keeps its own path: it is started from a
+  run button with a pop-up menu on `/match`, its run flags live in the
+  configuration file (`matchmaking.run`, `generate.run`), and a manual
+  placement is protected from an automatic run.
 - `ccat worker` runs the durable job worker. Jobs are queued in the
   database, leased with heartbeats, cancelled cooperatively, and report
   typed, retryable errors.

@@ -83,6 +83,8 @@ class MatchResult(StrictResult):
         assigned_angel_ids: Every angel id across sponsor assignments,
             in natural angel order (``1A < 1B < 1Z < 1AA``).
         unmatched_family_ids: Non-ignored families left unassigned.
+        split_family_ids: Non-ignored families whose assigned children
+            span two or more sponsors.
         unmatched_sponsor_ids: Non-ignored sponsors without angels.
         report_rows: match_report sheet row count (0 when absent).
         archived: True when this run created timestamped archive
@@ -98,6 +100,7 @@ class MatchResult(StrictResult):
     matched_sponsors: int = 0
     assigned_angel_ids: list[str] = Field(default_factory=list)
     unmatched_family_ids: list[int] = Field(default_factory=list)
+    split_family_ids: list[int] = Field(default_factory=list)
     unmatched_sponsor_ids: list[int] = Field(default_factory=list)
     report_rows: int = 0
     archived: bool = False

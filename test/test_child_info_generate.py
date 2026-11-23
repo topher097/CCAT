@@ -70,10 +70,23 @@ def _seed(
     flags: list[bool] | None = None,
     sponsors: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Write full persistent child, family, and sponsor final stores."""
+    """Write full persistent child, family, and sponsor final stores.
+
+    A child row without its own ``assigned_sponsor_id`` inherits its
+    family's, so a test can state the assignment at either grain.
+    """
     if flags is not None:
         for row, flag in zip(children, flags, strict=True):
             row["generated_info_sheet"] = flag
+    family_sponsors = {
+        family.get("family_id"): family.get("assigned_sponsor_id")
+        for family in families
+    }
+    for row in children:
+        if "assigned_sponsor_id" not in row:
+            row["assigned_sponsor_id"] = family_sponsors.get(
+                row.get("family_id")
+            )
     write_sheets(
         cfg.excel_file,
         "audit",
@@ -461,20 +474,22 @@ class TestLoadEnriched:
     def test_unmatched_family_id(
         self, gen_cfg: Config, two_children: list[dict[str, Any]]
     ) -> None:
-        """A family_id with no final_family row raises a typed error."""
+        """An ignored/missing family no longer blocks generation.
+
+        Manual matching keeps ignored families out of the eligible
+        family set; their children enrich with a blank drop-off and
+        still flow through, while a matched family joins normally.
+        """
         _seed(
             gen_cfg,
-            two_children,
-            [
-                {
-                    "family_id": 2,
-                    "gift_pickup_location": "Calumet",
-                    "assigned_sponsor_id": 9,
-                }
-            ],
+            [two_children[0], child_row("c2", "2A", 2)],
+            _family(),  # family 1 only; family 2 has no final_family row
         )
-        with pytest.raises(InfoSheetError, match="no row for family_id"):
-            gen._load_enriched_rows(gen_cfg)
+        _frame, enriched = gen._load_enriched_rows(gen_cfg)
+        assert enriched["gift_pickup_location"].to_list() == [
+            "Hancock",
+            None,
+        ]
 
     def test_duplicate_family_id(
         self,
@@ -809,6 +824,49 @@ class TestRun:
             "sponsor_id": 7,
             # The child's own angel id, same as info.angel_id.
             "angel_id": "1A",
+            "family_size": 2,
+        }
+
+    def test_split_family_names_child_own_sponsor(
+        self,
+        gen_cfg: Config,
+        render_calls: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """Each child's sheet names its own sponsor, not the family's."""
+        children = [child_row("c1", "1A", 1), child_row("c2", "1B", 1)]
+        children[0]["assigned_sponsor_id"] = 7
+        children[1]["assigned_sponsor_id"] = 8
+        _seed(
+            gen_cfg,
+            children,
+            [
+                {
+                    "family_id": 1,
+                    "gift_pickup_location": "Hancock",
+                    "assigned_sponsor_id": None,
+                }
+            ],
+            sponsors=[
+                _sponsor(sponsor_id=7),
+                _sponsor(sponsor_id=8, first_name="Riley"),
+            ],
+        )
+        gen.run(gen_cfg)
+        by_odt = {name: data for name, data in render_calls}
+        assert by_odt[f"AT{gen_cfg.season}_1A.odt"]["sponsor"] == {
+            "full_name": "Sam Sponsor",
+            "email": "sam@example.com",
+            "phone": "555-0100",
+            "sponsor_id": 7,
+            "angel_id": "1A",
+            "family_size": 2,
+        }
+        assert by_odt[f"AT{gen_cfg.season}_1B.odt"]["sponsor"] == {
+            "full_name": "Riley Sponsor",
+            "email": "sam@example.com",
+            "phone": "555-0100",
+            "sponsor_id": 8,
+            "angel_id": "1B",
             "family_size": 2,
         }
 

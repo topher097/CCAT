@@ -42,9 +42,12 @@ from ccat.audit.store import (
     as_bool,
 )
 from ccat.domain import index_to_letters
-from ccat.match import _children_per_family
 from ccat.services import db_audit
 from ccat.services.audit import SavePatch
+from ccat.services.db_assignments import (
+    apply_family_summary,
+    apply_sponsor_summary,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -1014,10 +1017,12 @@ async def _refresh_angel_columns(
     actor: str,
     family_ids: Iterable[int | None],
 ) -> None:
-    """Re-derive the angel columns a duplication decision changed.
+    """Re-derive the assignment summaries a duplication decision changed.
 
-    The family's assigned angels and angel count, and the assigned
-    sponsor's angel list, follow the children that carry a letter.
+    The child's own assignment is the truth; the family's and the
+    sponsor's summaries follow the children through the shared
+    derivation, so the duplication workflow cannot drift from the
+    matcher.
 
     Args:
         repo: The season-bound repository.
@@ -1030,37 +1035,8 @@ async def _refresh_angel_columns(
     family_rows = await repo.final_rows("family")
     sponsor_rows = await repo.final_rows("sponsor")
     child_rows = await repo.final_rows("child")
-    sponsors: set[int] = set()
-    for row in family_rows:
-        family_id = _as_int(row.get("family_id"))
-        if family_id not in wanted:
-            continue
-        letters = _family_letters(family_id, child_rows)
-        row["assigned_angel_ids"] = ",".join(letters) if letters else None
-        row["num_angels_in_family"] = _children_per_family(child_rows).get(
-            family_id, 0
-        )
-        sponsor_id = _as_int(row.get("assigned_sponsor_id"))
-        if sponsor_id is not None:
-            sponsors.add(sponsor_id)
-    if sponsors:
-        for row in sponsor_rows:
-            sponsor_id = _as_int(row.get("sponsor_id"))
-            if sponsor_id not in sponsors:
-                continue
-            letters: list[str] = []
-            for family in family_rows:
-                if _as_int(family.get("assigned_sponsor_id")) != sponsor_id:
-                    continue
-                family_id = _as_int(family.get("family_id"))
-                if family_id is None:
-                    continue
-                for letter in _family_letters(family_id, child_rows):
-                    if letter not in letters:
-                        letters.append(letter)
-            letters.sort(key=_angel_sort_key)
-            row["assigned_angel_ids"] = ",".join(letters) if letters else None
-            row["num_angels_assigned"] = len(letters)
+    apply_family_summary(family_rows, child_rows)
+    apply_sponsor_summary(sponsor_rows, child_rows)
     await repo.commit_finals("duplication", "family", family_rows, actor)
     await repo.commit_finals("duplication", "sponsor", sponsor_rows, actor)
 

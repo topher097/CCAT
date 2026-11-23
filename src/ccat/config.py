@@ -132,6 +132,11 @@ class AIScreeningSpec(BaseModel):
         temperature: Sampling temperature (0.0 = deterministic).
         max_workers: Concurrent LLM requests during batch screening.
             One opencode session is created per worker thread.
+        overwrite_new: Let the model's corrections overwrite the
+            existing values of children whose status is still ``new``.
+            Off by default, so the human-edit protection of §7.3 keeps
+            holding; on, a re-screened ``new`` child takes the model's
+            value even where a human already edited that field.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -140,6 +145,7 @@ class AIScreeningSpec(BaseModel):
     system_prompt: str
     temperature: float = 0.0
     max_workers: int = 4
+    overwrite_new: bool = False
 
     @field_validator("max_workers")
     @classmethod
@@ -246,8 +252,34 @@ class AddressCheckSpec(BaseModel):
     timeout: float = 30.0
 
 
+class MatchRunSpec(BaseModel):
+    """Default run flags for the automatic matcher (module 4b)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    test: bool = False
+    skip_match: bool = False
+
+    @model_validator(mode="after")
+    def _exclusive(self) -> "MatchRunSpec":
+        """Reject the combination the runtime already ignores."""
+        if self.test and self.skip_match:
+            raise ValueError("test and skip_match cannot both be set")
+        return self
+
+
+class GenerateRunSpec(BaseModel):
+    """Default run flags for sheet and packet generation (module 5)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    test: bool = False
+    overwrite: bool = False
+    max_workers: int = 4
+
+
 class MatchmakingSpec(BaseModel):
-    """Lexicographic tier weights (module 4, §8.3).
+    """Lexicographic tier weights (module 4, §8.3) and run defaults.
 
     Weights are sized so no lower tier can outweigh a higher one.
     """
@@ -257,6 +289,15 @@ class MatchmakingSpec(BaseModel):
     location_weight: int = 1000
     age_weight: int = 100
     gender_weight: int = 1
+    run: MatchRunSpec = MatchRunSpec()
+
+
+class GenerateSpec(BaseModel):
+    """Run defaults for the generation command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run: GenerateRunSpec = GenerateRunSpec()
 
 
 class InfoSheetSpec(BaseModel):
@@ -554,6 +595,7 @@ class Config(BaseModel):
     info_sheet: InfoSheetSpec
     report: ReportSpec = ReportSpec()
     sponsor_packets: SponsorPacketSpec = SponsorPacketSpec()
+    generate: GenerateSpec = GenerateSpec()
     storage: StorageSpec = StorageSpec()
     api: ApiSpec = ApiSpec()
     worker: WorkerSpec = WorkerSpec()

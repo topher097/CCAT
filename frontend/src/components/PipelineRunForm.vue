@@ -1,17 +1,18 @@
 <script setup lang="ts">
 /** One pipeline command form with exact CLI option semantics (§7.1.8). */
 
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { enqueueJob, type Job } from '../api/jobs'
+import { getRunSettings, saveRunSettings } from '../api/runs'
 import { useSessionStore } from '../stores/session'
 import ConfirmDialog from './ConfirmDialog.vue'
 
 const props = withDefaults(
   defineProps<{
-    command: 'acquire' | 'screen' | 'match' | 'generate' | 'stats'
+    command: 'acquire' | 'screen' | 'generate' | 'stats'
     submitLabel?: string
   }>(),
   { submitLabel: 'Enqueue run' },
@@ -26,11 +27,19 @@ const test = ref(false)
 const overwrite = ref(false)
 const skipEmail = ref(false)
 const skipAddress = ref(false)
-const skipMatch = ref(false)
 const redo = ref('')
 const sponsor = ref('')
 const maxWorkers = ref('')
 const prepared = ref(false)
+
+/** The global AI screening flag: overwrite the values of "new" children. */
+const overwriteNew = ref(false)
+/** Whether the caller may write the global flag. */
+const canEditSettings = ref(false)
+/** Whether the global flag is currently being written. */
+const savingSettings = ref(false)
+/** Message shown when the global flag cannot be read or written. */
+const settingsError = ref<string | null>(null)
 
 const confirmOpen = ref(false)
 const enqueueing = ref(false)
@@ -40,7 +49,6 @@ const conflictJobId = ref<number | null>(null)
 const SCOPE: Record<string, string> = {
   acquire: 'Replaces the raw sponsor/family/child snapshot from Zite. Final rows are never deleted or rebuilt.',
   screen: 'Prepares raw records, reconciles final rows, runs email/address checks, and AI-screens uncompleted children.',
-  match: 'Matches audited children to sponsors, commits assignments, and writes a match report.',
   generate: 'Renders child info sheets, then builds sponsor packets from completed sheets.',
   stats: 'Builds the statistics report as HTML and PDF artifacts.',
 }
@@ -55,6 +63,54 @@ const title = computed(
   () => props.command.charAt(0).toUpperCase() + props.command.slice(1),
 )
 
+/** Whether this command carries the global AI screening flag. */
+const hasGlobalAiFlag = computed(() => props.command === 'screen')
+
+/** Load the global AI screening flag and the caller's right to change it. */
+async function loadSettings(): Promise<void> {
+  if (!hasGlobalAiFlag.value) return
+  try {
+    const view = await getRunSettings('screen')
+    overwriteNew.value = view.run?.overwrite_new === true
+    canEditSettings.value = view.editable
+  } catch {
+    // A settings read failure leaves the flag off and the box
+    // disabled; it must not masquerade as a run failure.
+    settingsError.value = 'Could not read the screening setting.'
+  }
+}
+
+onMounted(() => {
+  void loadSettings()
+})
+
+/**
+ * Write the global AI screening flag to the configuration file.
+ *
+ * A failed write reverts the checkbox: the page must not show a
+ * setting the configuration file does not hold.
+ */
+async function onOverwriteNewChange(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const wanted = input.checked
+  savingSettings.value = true
+  settingsError.value = null
+  try {
+    const view = await saveRunSettings('screen', { overwrite_new: wanted })
+    overwriteNew.value = view.run?.overwrite_new === true
+    canEditSettings.value = view.editable
+  } catch (failure) {
+    overwriteNew.value = !wanted
+    input.checked = !wanted
+    settingsError.value =
+      failure instanceof ApiError
+        ? failure.message
+        : 'Could not save the screening setting.'
+  } finally {
+    savingSettings.value = false
+  }
+}
+
 /** Exact payload mirroring the CLI flags (§7.1.8). */
 const options = computed<Record<string, unknown>>(() => {
   switch (props.command) {
@@ -65,12 +121,6 @@ const options = computed<Record<string, unknown>>(() => {
         skip_email_check: skipEmail.value,
         skip_address_check: skipAddress.value,
         ...(textOf(redo.value).trim() ? { redo: textOf(redo.value).trim() } : {}),
-      }
-    case 'match':
-      return {
-        test: test.value,
-        overwrite: overwrite.value,
-        skip_match: skipMatch.value,
       }
     case 'generate':
       return {
@@ -211,10 +261,42 @@ async function enqueue(): Promise<void> {
         <input v-model="redo" type="text" name="redo" />
       </label>
 
-      <label v-if="props.command === 'match'" style="display: block">
-        <input v-model="skipMatch" type="checkbox" name="skip_match" />
-        Skip matching; reconcile existing assignments only
-      </label>
+      <fieldset
+        v-if="props.command === 'screen'"
+        style="border: 0; padding: 0; margin: 0 0 0.75rem"
+        data-testid="screen-global-settings"
+      >
+        <legend class="muted">AI screening setting (global)</legend>
+        <label style="display: block">
+          <input
+            :checked="overwriteNew"
+            type="checkbox"
+            name="overwrite_new"
+            data-testid="overwrite-new"
+            :disabled="!canEditSettings || savingSettings"
+            @change="onOverwriteNewChange"
+          />
+          Overwrite existing values of new children
+        </label>
+        <p class="muted" data-testid="overwrite-new-warning">
+          Off by default: a human edit to a new child survives re-screening.
+          On: the AI replaces every value of a child whose status is still
+          "new". Saved to the configuration file, so it applies to every
+          screening run.
+        </p>
+        <p v-if="!canEditSettings" class="muted" data-testid="read-only">
+          Read-only: you need the coordinator or admin role to change this
+          setting.
+        </p>
+        <p
+          v-if="settingsError"
+          class="error-text"
+          role="alert"
+          data-testid="settings-error"
+        >
+          {{ settingsError }}
+        </p>
+      </fieldset>
 
       <label v-if="props.command === 'generate'" style="display: block">
         Restrict to one sponsor id

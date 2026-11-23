@@ -20,6 +20,13 @@ const CONFIG = {
       },
     },
     email_check: { enabled: true, delay: 0.25 },
+    ai_screening: {
+      model: 'opencode/glm-5.3-flash',
+      system_prompt: 'prompt',
+      temperature: 0,
+      max_workers: 4,
+      overwrite_new: false,
+    },
     vocabularies: { sponsor_affiliation: ['Individual', 'Organization'] },
   },
 }
@@ -140,6 +147,22 @@ describe('settings', () => {
     await flushPromises()
 
     expect(savedBody(fetchMock)).toMatchObject({ season: '2027' })
+  })
+
+  it('shows the AI overwrite-new flag as a checkbox and saves it', async () => {
+    const fetchMock = echoConfigRoutes()
+    const { wrapper } = await mountSettings('/settings/ai')
+
+    const box = wrapper.get('input[name="ai_screening.overwrite_new"]')
+    expect((box.element as HTMLInputElement).type).toBe('checkbox')
+    expect((box.element as HTMLInputElement).checked).toBe(false)
+    await box.setValue(true)
+    await wrapper.get('[data-testid="settings-save"]').trigger('click')
+    await flushPromises()
+
+    expect(savedBody(fetchMock)).toMatchObject({
+      ai_screening: { overwrite_new: true },
+    })
   })
 
   it('adds and deletes list entries', async () => {

@@ -54,10 +54,11 @@ async function mountEditor(
   entity: 'child' | 'sponsor' | 'family',
   key = 'c1',
   admin = false,
+  embedded = false,
 ) {
   const { wrapper } = await mountRouted(EntityEditor, {
     path: `/audit/${entity === 'child' ? 'children' : entity === 'family' ? 'families' : 'sponsors'}/${key}`,
-    props: { entity, entityKey: key },
+    props: { entity, entityKey: key, embedded },
     setup: () => {
       const session = useSessionStore()
       session.season = {
@@ -100,6 +101,28 @@ describe('entity editor', () => {
     expect(wrapper.get('[data-testid="age-warning"]').text()).toContain(
       'Age mismatch',
     )
+  })
+
+  it('embedded mode loads the row but renders no neighbour chips', async () => {
+    const neighbours = {
+      previous: { key: 'c0', label: 'Zed' },
+      next: { key: 'c2', label: 'Bea' },
+    }
+    mockRoutes([
+      (url) =>
+        url.includes('/children/c1')
+          ? jsonResponse(200, childDetail(neighbours))
+          : undefined,
+    ])
+    const full = await mountEditor('child')
+    await flushPromises()
+    expect(full.find('[data-testid="previous-entry"]').exists()).toBe(true)
+
+    const wrapper = await mountEditor('child', 'c1', false, true)
+    await flushPromises()
+    expect(wrapper.get('[data-field="first_name"]').text()).toContain('Ann')
+    expect(wrapper.find('[data-testid="previous-entry"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="next-entry"]').exists()).toBe(false)
   })
 
   it('sends only touched fields (tri-state) with If-Match', async () => {
@@ -796,5 +819,72 @@ describe('ignore / unignore', () => {
       confirm: true,
       expected_version: 4,
     })
+  })
+})
+
+describe('sponsor boolean fields', () => {
+  it('renders elevated budget and physical packet and patches them as booleans', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (!url.includes('/sponsors/10')) return undefined
+        if (init.method === 'PATCH') {
+          return jsonResponse(
+            200,
+            sponsorDetail({
+              row: { ...SPONSOR_ROW, elevated_budget: true, physical_packet: false },
+              baseline: { elevated_budget: true, physical_packet: false },
+              row_version: 4,
+            }),
+          )
+        }
+        return jsonResponse(
+          200,
+          sponsorDetail({
+            row: { ...SPONSOR_ROW, elevated_budget: null, physical_packet: true },
+            baseline: { elevated_budget: null, physical_packet: true },
+          }),
+        )
+      },
+    ])
+    const wrapper = await mountEditor('sponsor', '10')
+    await flushPromises()
+
+    const elevated = wrapper.get('input[name="elevated_budget"]')
+    const packet = wrapper.get('input[name="physical_packet"]')
+    expect(wrapper.get('[data-field="elevated_budget"]').text()).toContain('Elevated budget')
+    expect(wrapper.get('[data-field="physical_packet"]').text()).toContain('Physical packet')
+    // Unset (null) reads as unchecked and is not a pending change.
+    expect((elevated.element as HTMLInputElement).checked).toBe(false)
+    expect((packet.element as HTMLInputElement).checked).toBe(true)
+    expect(wrapper.find('[data-field="elevated_budget"] [data-testid="diff-marker"]').exists()).toBe(false)
+
+    await elevated.setValue(true)
+    await packet.setValue(false)
+    await wrapper.get('[data-testid="save"]').trigger('click')
+    await flushPromises()
+
+    expect(bodyOf(patchCall(fetchMock)!)).toEqual({
+      elevated_budget: true,
+      physical_packet: false,
+    })
+    expect((wrapper.get('input[name="elevated_budget"]').element as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('does not flag an untouched null as differing from a false baseline', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/sponsors/10')
+          ? jsonResponse(
+              200,
+              sponsorDetail({
+                row: { ...SPONSOR_ROW, elevated_budget: false },
+                baseline: { elevated_budget: null },
+              }),
+            )
+          : undefined,
+    ])
+    const wrapper = await mountEditor('sponsor', '10')
+    await flushPromises()
+    expect(wrapper.find('[data-field="elevated_budget"] [data-testid="diff-marker"]').exists()).toBe(false)
   })
 })

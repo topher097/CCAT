@@ -219,11 +219,10 @@ def run(
     from ccat.clarify.status import load_statuses
 
     statuses = load_statuses(cfg)
-    sponsored_families = {
-        family_id
-        for family_id, row in old_final_family.items()
-        if row.get("assigned_sponsor_id") is not None
-    }
+    # The legacy family column names the sponsor and the children it
+    # placed; the child row is now the assignment grain, so carry that
+    # pairing onto each child.
+    family_assignments = _family_assignments(old_final_family)
     replied_families = {
         str(family_id)
         for family_id, status in statuses.items()
@@ -235,23 +234,34 @@ def run(
     raw_child_ids = {str(row.get("zite_record_id")) for row in raw_children}
     legacy_child_ids = set(old_adj_by_id) | set(old_final_by_id)
     final_children = [
-        _migrated_child_row(
-            raw,
-            old_adj_by_id.get(str(raw.get("zite_record_id"))),
-            old_final_by_id.get(str(raw.get("zite_record_id"))),
-            cfg,
-            sponsored=str(raw.get("family_id")) in sponsored_families,
-            replied=str(raw.get("family_id")) in replied_families,
-            marked_at=marked_at,
+        _carry_child_assignment(
+            _migrated_child_row(
+                raw,
+                old_adj_by_id.get(str(raw.get("zite_record_id"))),
+                old_final_by_id.get(str(raw.get("zite_record_id"))),
+                cfg,
+                sponsored=_carried_sponsor(
+                    raw.get("family_id"),
+                    raw.get("angel_id"),
+                    family_assignments,
+                )
+                is not None,
+                replied=str(raw.get("family_id")) in replied_families,
+                marked_at=marked_at,
+            ),
+            family_assignments,
         )
         for raw in raw_children
     ]
     for record_id in sorted(legacy_child_ids - raw_child_ids):
         final_children.append(
-            _legacy_only_child_row(
-                old_adj_by_id.get(record_id),
-                old_final_by_id.get(record_id),
-                cfg,
+            _carry_child_assignment(
+                _legacy_only_child_row(
+                    old_adj_by_id.get(record_id),
+                    old_final_by_id.get(record_id),
+                    cfg,
+                ),
+                family_assignments,
             )
         )
 
@@ -393,19 +403,110 @@ def run(
         row["status"] == STATUS_NEEDS_CLARIFICATION for row in final_children
     )
     assignments = sum(
-        row.get("assigned_sponsor_id") is not None for row in final_families
+        row.get("assigned_sponsor_id") is not None for row in final_children
     )
     logger.info(
         "migration complete: %d children (%d audited, %d needing"
-        " clarification), %d families (%d with carried-over assignments),"
+        " clarification, %d with carried-over assignments), %d families,"
         " %d sponsors; source never written",
         len(final_children),
         audited,
         notes,
-        len(final_families),
         assignments,
+        len(final_families),
         len(final_sponsors),
     )
+
+
+def _family_assignments(
+    old_final_family: dict[str, dict[str, Any]],
+) -> dict[str, tuple[int, set[str]]]:
+    """Map each legacy family to its sponsor and the angel ids it names.
+
+    Args:
+        old_final_family: The old workbook's final family rows by id.
+
+    Returns:
+        Mapping of family id -> (sponsor id, the named angel ids).  An
+        empty set means the whole family was placed (the legacy column
+        was not narrowed).
+    """
+    assignments: dict[str, tuple[int, set[str]]] = {}
+    for family_id, row in old_final_family.items():
+        sponsor_id = _as_int_or_none(row.get("assigned_sponsor_id"))
+        if sponsor_id is None:
+            continue
+        assignments[str(family_id)] = (
+            sponsor_id,
+            _assigned_angel_ids(row.get("assigned_angel_ids")),
+        )
+    return assignments
+
+
+def _assigned_angel_ids(value: Any) -> set[str]:
+    """Parse one comma-joined legacy angel id list into uppercase tokens.
+
+    Args:
+        value: The stored cell, or anything else.
+
+    Returns:
+        The stripped, uppercased angel ids; empty when the cell is blank.
+    """
+    if value is None:
+        return set()
+    return {
+        token.strip().upper()
+        for token in str(value).replace(";", ",").split(",")
+        if token.strip()
+    }
+
+
+def _carried_sponsor(
+    family_id: Any,
+    angel_id: Any,
+    family_assignments: dict[str, tuple[int, set[str]]],
+) -> int | None:
+    """Return the sponsor the legacy family assignment gives one child.
+
+    Args:
+        family_id: The child's family id.
+        angel_id: The child's angel id.
+        family_assignments: The legacy family assignment map.
+
+    Returns:
+        The sponsor id, or None when the child was not placed.
+    """
+    entry = family_assignments.get(str(family_id))
+    if entry is None:
+        return None
+    sponsor_id, named = entry
+    if named and str(angel_id or "").strip().upper() not in named:
+        return None
+    return sponsor_id
+
+
+def _carry_child_assignment(
+    row: dict[str, Any],
+    family_assignments: dict[str, tuple[int, set[str]]],
+) -> dict[str, Any]:
+    """Carry the legacy family assignment onto the child row.
+
+    Args:
+        row: One normalized final child row.
+        family_assignments: The legacy family assignment map.
+
+    Returns:
+        The same row with its own assignment columns set when placed.
+    """
+    from ccat.services.db_assignments import SOURCE_AUTO
+
+    sponsor_id = _carried_sponsor(
+        row.get("family_id"), row.get("angel_id"), family_assignments
+    )
+    if sponsor_id is not None:
+        row["assigned_sponsor_id"] = sponsor_id
+        row["assignment_source"] = SOURCE_AUTO
+    return row
 
 
 def _legacy_only_child_row(

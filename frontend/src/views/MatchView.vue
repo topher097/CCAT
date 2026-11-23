@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** /match: run form, match report, and assignment results (§7.1.10). */
+/** /match: run menus, match report, and assignment results (§7.1.10). */
 
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
@@ -7,8 +7,15 @@ import { RouterLink } from 'vue-router'
 import { ApiError } from '../api/client'
 import { listEntities } from '../api/audit'
 import { getMatchReport, type MatchReportRow } from '../api/commands'
+import {
+  listHolds,
+  listPool,
+  type ManualHoldResult,
+  type ManualMatchFamilyCard,
+} from '../api/manual-match'
 import { useSessionStore } from '../stores/session'
-import PipelineRunForm from '../components/PipelineRunForm.vue'
+import { formatTime } from '../utils/format'
+import RunMenu from '../components/RunMenu.vue'
 
 const session = useSessionStore()
 
@@ -17,7 +24,10 @@ const reportMissing = ref(false)
 const reportError = ref<string | null>(null)
 const families = ref<Record<string, unknown>[]>([])
 const sponsors = ref<Record<string, unknown>[]>([])
+const splitFamilies = ref<ManualMatchFamilyCard[]>([])
+const holds = ref<ManualHoldResult[]>([])
 const assignmentError = ref<string | null>(null)
+const manualError = ref<string | null>(null)
 const loading = ref(false)
 
 const seasonName = computed(() => session.season?.name ?? '')
@@ -71,9 +81,25 @@ async function loadAssignments(): Promise<void> {
   }
 }
 
+async function loadManual(): Promise<void> {
+  if (!seasonName.value) return
+  manualError.value = null
+  try {
+    const [splitPage, holdPage] = await Promise.all([
+      listPool(seasonName.value, { assignment: 'split', page_size: 50 }),
+      listHolds(seasonName.value),
+    ])
+    splitFamilies.value = splitPage.items ?? []
+    holds.value = holdPage.items ?? []
+  } catch (failure) {
+    manualError.value =
+      failure instanceof Error ? failure.message : 'manual matching request failed'
+  }
+}
+
 async function load(): Promise<void> {
   loading.value = true
-  await Promise.all([loadReport(), loadAssignments()])
+  await Promise.all([loadReport(), loadAssignments(), loadManual()])
   loading.value = false
 }
 
@@ -88,7 +114,10 @@ onMounted(() => void load())
       <RouterLink to="/jobs">Job center</RouterLink>
     </p>
 
-    <PipelineRunForm command="match" />
+    <div class="status-line" style="margin-bottom: 0.75rem">
+      <RunMenu command="match" />
+      <RunMenu command="generate" />
+    </div>
 
     <section class="card" style="margin-top: 1rem">
       <div class="status-line" style="justify-content: space-between">
@@ -184,6 +213,73 @@ onMounted(() => void load())
                   {{ row.assigned_sponsor_id }}
                 </RouterLink>
               </td>
+            </tr>
+          </tbody>
+        </table>
+      </template>
+
+      <p v-if="manualError" class="error-text" role="alert">
+        {{ manualError }}
+      </p>
+      <template v-else>
+        <h2>Split families</h2>
+        <p
+          v-if="splitFamilies.length === 0"
+          class="muted"
+          data-testid="split-families-empty"
+        >
+          No family's children hold more than one sponsor.
+        </p>
+        <table v-else class="data" data-testid="split-families">
+          <thead>
+            <tr>
+              <th>Family</th>
+              <th>Contact</th>
+              <th>Sponsors</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in splitFamilies" :key="row.family_id">
+              <td>
+                <RouterLink :to="`/audit/families/${row.family_id}`">
+                  {{ row.family_id }}
+                </RouterLink>
+              </td>
+              <td>
+                {{ [row.first_name, row.last_name].filter(Boolean).join(' ') }}
+              </td>
+              <td>{{ (row.assigned_sponsor_ids ?? []).join(', ') }}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Held families</h2>
+        <p
+          v-if="holds.length === 0"
+          class="muted"
+          data-testid="held-families-empty"
+        >
+          No family is held.
+        </p>
+        <table v-else class="data" data-testid="held-families">
+          <thead>
+            <tr>
+              <th>Family</th>
+              <th>Note</th>
+              <th>Author</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="hold in holds" :key="hold.family_id">
+              <td>
+                <RouterLink :to="`/audit/families/${hold.family_id}`">
+                  {{ hold.family_id }}
+                </RouterLink>
+              </td>
+              <td>{{ hold.note ?? '—' }}</td>
+              <td>{{ hold.created_by ?? '—' }}</td>
+              <td class="muted">{{ formatTime(hold.created_at) }}</td>
             </tr>
           </tbody>
         </table>

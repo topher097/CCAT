@@ -20,6 +20,7 @@ import DuplicationDetailView from '../views/DuplicationDetailView.vue'
 
 import PipelineCommandView from '../views/PipelineCommandView.vue'
 import MatchView from '../views/MatchView.vue'
+import ManualMatchView from '../views/ManualMatchView.vue'
 import GenerateView from '../views/GenerateView.vue'
 import StatsView from '../views/StatsView.vue'
 import ClarifyListView from '../views/ClarifyListView.vue'
@@ -41,6 +42,8 @@ declare module 'vue-router' {
     /** Admin-only route (nav hidden and guard enforced). */
     admin?: boolean
     title?: string
+    /** Page uses the full viewport width (see .app-main--wide). */
+    wide?: boolean
   }
 }
 
@@ -135,6 +138,12 @@ export const routes: RouteRecordRaw[] = [
     name: 'match',
     component: MatchView,
     meta: { title: 'Match' },
+  },
+  {
+    path: '/match/manual',
+    name: 'match-manual',
+    component: ManualMatchView,
+    meta: { title: 'Manual matching', wide: true },
   },
   {
     path: '/generate',

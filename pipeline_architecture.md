@@ -361,6 +361,30 @@ Rules:
   `age_reported` for cross-checking only; the computed `age_at_xmas` (from
   `xmas_date`) is the value used downstream.
 
+### 3.1 The admin settings page
+
+The web server's **Settings** tab (`/settings`, admin role only) edits this
+file; no other role sees the tab or reaches the API.
+
+- The tree is the file's own values over the model's defaults: every setting
+  the contract knows appears, including the ones the file leaves implicit, and
+  a setting added to the contract later appears without a frontend change.
+- The JSON's levels are the page's levels. Each level is addressed by its
+  path (`tables.sponsor.columns.email.type`), rendered as a nested group, and
+  edited with the editor its shape needs (scalar, list, map of entries).
+  Lists and maps can gain and lose entries; a map key can be renamed.
+- `GET /api/v1/config` returns that tree plus `dropped`: the file's keys the
+  contract does not know. They are not editable, the page names them, and
+  saving removes them from the file.
+- `PUT /api/v1/config` writes the whole tree: the mapping is validated against
+  the contract first (a violation is `422` and the file is untouched), then
+  written atomically (temp file, then rename), then reloaded into the running
+  server (`app.state.cfg`; a changed `storage.database_url` swaps the engine).
+  The job worker picks the same file up between jobs, watching its mtime.
+- The server ignores a key the contract does not know instead of refusing to
+  start, so a hand-edited file never takes the web server down; every other
+  violation (a bad value, a missing key) still stops it.
+
 ## 4. Excel Import/Export Contract
 
 One import/export workbook (`excel_file` from config). The live store is
@@ -644,7 +668,8 @@ Match patches only assignment columns: family
 `assigned_sponsor_id`, `assigned_angel_ids`, `num_angels_in_family`; sponsor
 `assigned_angel_ids`, `num_angels_assigned`. Every other field and row,
 including ignored/raw-missing entities and all controls, remains intact.
-`final_child` is not written.
+The child's own `assigned_sponsor_id` and `assignment_source` are written
+too — see §8b.
 
 Normal runs archive existing `final_family`, `final_sponsor`, and
 `match_report` to timestamped sheets; `--overwrite` skips archives. The
@@ -658,17 +683,133 @@ angels point unassigned families to their sponsor. Duplicate ownership
 raises before write. Stale assignments follow deterministic rules. Finals
 archive unless `--overwrite`; `match_report` remains untouched.
 
+## 8b. Module 4b — Manual Matching
+
+The automatic matcher and the manual matcher sit side by side. The manual
+matcher is a human-driven path: a coordinator reads a pool of family cards,
+narrows it with filters, selects whole families or individual children, and
+assigns them to a sponsor. The automatic matcher stays the default path.
+
+### 8b.1 The assignment grain
+
+**The child row is the canonical assignment.** `final_child.assigned_sponsor_id`
+is the authoritative "this child is sponsored by S" link, and
+`final_child.assignment_source` (`auto` | `manual`) says who placed it. The
+family and sponsor assignment columns are **derived summaries** of the
+children, computed by one shared helper
+(`src/ccat/services/db_assignments.py::apply_family_summary` and
+`apply_sponsor_summary`) that both writers call, so the automatic matcher
+and the manual matcher can never derive the summaries differently.
+
+The rules:
+
+- Family `assigned_sponsor_id` is the single sponsor shared by all of the
+  family's assigned children, or NULL when the family is split across two
+  sponsors or has none. `assigned_angel_ids` still lists the children that
+  ARE placed, so a split family still reads as "has an assignment".
+- Family `num_angels_in_family` is the family's angel count (distinct
+  letters; a letterless child counts as one angel of its own).
+- Sponsor `assigned_angel_ids` lists the assigned children's angel ids;
+  `num_angels_assigned` counts the assigned **children**, which is the
+  truthful number when two children share an angel letter.
+
+Every consumer resolves a child's sponsor from the child row
+(`child -> sponsor`), never through the family (`child -> family ->
+sponsor`). The information sheet, the sponsor packet, the statistics, the
+season overview, the consolidation counts and the workbook parity checks all
+follow.
+
+### 8b.2 Provenance
+
+`assignment_source = manual` marks a placement a human made. The automatic
+matcher protects it: a child with a manual assignment leaves the automatic
+pool **with its whole family**, exactly as a pre-assigned family does, and
+the match report gives the reason "manual assignment" rather than "no exact
+count combination". The automatic matcher replaces its own (`auto`)
+assignments on every run. `prior_assigned_angel_ids` still works exactly as
+before and still marks its children as manually assigned; the field is
+hidden in the sponsor editor because it cannot express a partial placement.
+
+### 8b.3 The pool, the filters, the card
+
+The pool is a filtered query over the live final stores, not a stored
+entity. A family is in the pool when its row exists, is not ignored, and it
+has at least one child that is not ignored, is not in an unresolved
+duplicate group, and whose `status` is not `ignored`. Child-level filters
+are existential (a family matches when at least one child matches);
+family-level filters apply to the family row.
+
+The card carries the family's contact details and one line per child with
+the child's angel letter, name, age, gender, needs, wants, interests, notes
+and sizes. A child with no angel letter or in a pending duplicate group is
+shown but not selectable, with the reason.
+
+The four assignment states: `unassigned` (no child has a sponsor),
+`partial` (some children have a sponsor and they share one), `split` (the
+assigned children span two or more sponsors), `assigned` (every child has a
+sponsor and they share one).
+
+### 8b.4 Writes
+
+A placement is one transaction: the child rows, the derived family and
+sponsor summaries, and the `security_audit_events` row land together
+(`SeasonStoreRepository.commit_assignments`). The ownership registry gives
+`manual_match` the child's two assignment columns and the family/sponsor
+summary columns, and nothing else.
+
+Two categories of outcome:
+
+- **Blocking** — an unknown or ignored sponsor or child, an orphan child, a
+  child with no angel letter, a child in an unresolved duplicate group, a
+  child already held by a different sponsor (without `confirm`), an
+  assignment that would exceed the sponsor's `num_children` (a HARD cap), a
+  duplicate selection, a missing expected version, a stale expected version.
+- **Advisory only** — an age outside the sponsor's preference, a gender
+  mismatch (including the non-binary case the automatic matcher forbids), a
+  location mismatch, a family that would be split, a child that is not
+  audited, a child whose information sheet on disk still names the old
+  sponsor, a sibling DOB conflict. The point of a manual matcher is to
+  override the automatic rules; only capacity blocks.
+
+The sponsor's `num_children` is a hard cap in the manual path, not a target:
+exceeding it is refused, and releasing an assignment frees capacity
+immediately.
+
+### 8b.5 Holds
+
+A family can be **held**: looked at and deliberately not placed. A hold
+keeps the family out of the automatic pool without placing it and carries a
+required note saying why. Holds live in their own table, `family_holds`,
+with at most one active hold per family. The invariant: *a hold exists only
+while the family has no manual assignment* — holding a family that already
+carries one is refused, and assigning a held family releases its hold in the
+same transaction. A hold is matching state, not a final-entity attribute,
+so it does not round-trip through the workbook export.
+
+### 8b.6 The run menu
+
+The automatic matcher is not started from a form. It is started from a
+**button** that opens a **pop-up menu** of run settings, and the menu's
+primary action enqueues the run. The menu is seeded from the configuration
+file (`matchmaking.run` for the matcher, `generate.run` for the generation
+command) and a changed setting is propagated: to this run (the values travel
+in the job's options), to the configuration file (when "remember these
+settings" is on), and therefore to every later run. The write surface is one
+command's run flags; the weights, the endpoints, the paths and the database
+URL stay admin-only.
+
 ## 9. Ownership and Idempotency
 
-| Sheet | acquire | screen | audit | match | generate | migrate |
-|---|---|---|---|---|---|---|
-| `raw_*` | replace | read | read | - | - | explicit conversion/bootstrap |
-| `final_sponsor` | verify unchanged | seed + safe merges/backstop | full save | assignment fields | read | explicit conversion/bootstrap |
-| `final_family` | verify unchanged | seed + safe merges/backstop | full save | assignment fields | read | explicit conversion/bootstrap |
-| `final_child` | verify unchanged | seed + safe merges/AI | full save | read | generation marker | explicit conversion/bootstrap |
-| duplicate/DOB logs | - | replace snapshot | read | - | - | explicit conversion/bootstrap |
-| email/address logs | - | append unlogged checks | read | - | - | explicit conversion/bootstrap |
-| `match_report` | verify unchanged | - | - | write when produced | read | explicit conversion/bootstrap |
+| Sheet | acquire | screen | audit | match | manual_match | generate | migrate |
+|---|---|---|---|---|---|---|---|
+| `raw_*` | replace | read | read | - | - | - | explicit conversion/bootstrap |
+| `final_sponsor` | verify unchanged | seed + safe merges/backstop | full save | assignment fields | assignment fields | read | explicit conversion/bootstrap |
+| `final_family` | verify unchanged | seed + safe merges/backstop | full save | assignment fields | assignment fields | read | explicit conversion/bootstrap |
+| `final_child` | verify unchanged | seed + safe merges/AI | full save | assignment fields | assignment fields | generation marker | explicit conversion/bootstrap |
+| `family_holds` | - | - | - | read | read | - | explicit conversion/bootstrap |
+| duplicate/DOB logs | - | replace snapshot | read | - | - | - | explicit conversion/bootstrap |
+| email/address logs | - | append unlogged checks | read | - | - | - | explicit conversion/bootstrap |
+| `match_report` | verify unchanged | - | - | write when produced | read | read | explicit conversion/bootstrap |
 
 Stats, clarify, and packet readers write no storage. `migrate` is reserved
 for explicit migration commands. Column ownership is enforced by each writer

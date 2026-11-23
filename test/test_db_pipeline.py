@@ -150,6 +150,11 @@ def child_row(record_id: str, **overrides: Any) -> dict[str, Any]:
         generated_info_sheet=False,
     )
     base.update(overrides)
+    # Keep the seeded dob consistent with the requested age: the commit
+    # path recomputes age_at_xmas from dob, and match may only change the
+    # two assignment columns.
+    if "dob" not in overrides:
+        base["dob"] = f"{2018 + (8 - int(base['age_at_xmas']))}-05-10"
     return base
 
 
@@ -1308,9 +1313,13 @@ def test_match_db_assigns_and_records_artifact(tmp_path: Path) -> None:
             assert artifacts[0]["meta"]["match_run_id"] == result.run_id
             # Perfect pool: nothing to report; the run itself is recorded.
             assert report_rows == []
-            # Children untouched by match (§9.4).
+            # The child row is the assignment grain (§9.4).
             children = _by_key(await repo.final_rows("child"), "zite_record_id")
             assert children["c1"]["screened"] is False
+            assert children["c1"]["assigned_sponsor_id"] == 1
+            assert children["c1"]["assignment_source"] == "auto"
+            assert children["c2"]["assigned_sponsor_id"] == 1
+            assert children["c2"]["assignment_source"] == "auto"
         finally:
             await uow.engine.dispose()
 
@@ -1318,7 +1327,11 @@ def test_match_db_assigns_and_records_artifact(tmp_path: Path) -> None:
 
 
 def test_match_db_counts_a_shared_angel_letter_once(tmp_path: Path) -> None:
-    """A pending duplicate shares its group's letter: one angel, not two."""
+    """A pending duplicate shares its group's letter: one family angel.
+
+    Both submissions are assigned children, so the sponsor summary counts
+    two children; the family size counts the one letter (D2).
+    """
     cfg = _match_cfg(tmp_path)
 
     async def main() -> None:
@@ -1350,10 +1363,231 @@ def test_match_db_counts_a_shared_angel_letter_once(tmp_path: Path) -> None:
                 sponsors = _by_key(
                     await repo.final_rows("sponsor"), "sponsor_id"
                 )
+                children = _by_key(
+                    await repo.final_rows("child"), "zite_record_id"
+                )
             assert families["1"]["num_angels_in_family"] == 1
+            assert families["1"]["assigned_angel_ids"] == "1A,1A"
+            assert sponsors["1"]["assigned_angel_ids"] == "1A,1A"
+            assert sponsors["1"]["num_angels_assigned"] == 2
+            for record_id in ("c1", "c2"):
+                assert children[record_id]["assigned_sponsor_id"] == 1
+                assert children[record_id]["assignment_source"] == "auto"
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())
+
+
+def test_match_db_clears_stale_automatic_assignments(tmp_path: Path) -> None:
+    """A run recomputes its own assignments; the unmatched family clears."""
+    cfg = _match_cfg(tmp_path)
+
+    async def main() -> None:
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed_stores(
+                    repo,
+                    children=[
+                        child_row(
+                            "c1",
+                            angel_id="1A",
+                            status="audited",
+                            age_at_xmas=8,
+                            assigned_sponsor_id=9,
+                            assignment_source="auto",
+                        ),
+                        child_row(
+                            "c2",
+                            first_name="Two",
+                            angel_id="2A",
+                            family_id=2,
+                            status="audited",
+                            age_at_xmas=8,
+                            assigned_sponsor_id=9,
+                            assignment_source="auto",
+                        ),
+                    ],
+                    families=[family_row(1), family_row(2)],
+                    sponsors=[sponsor_row(1, num_children=1)],
+                )
+            await db_pipeline.match(
+                cfg, "topher", {}, lambda *a, **k: None, lambda: None
+            )
+            async with uow.store(cfg, "topher") as repo:
+                children = _by_key(
+                    await repo.final_rows("child"), "zite_record_id"
+                )
+            assert children["c1"]["assigned_sponsor_id"] == 1
+            assert children["c1"]["assignment_source"] == "auto"
+            assert children["c2"]["assigned_sponsor_id"] is None
+            assert children["c2"]["assignment_source"] is None
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())
+
+
+def test_match_db_manual_assignment_leaves_pool(tmp_path: Path) -> None:
+    """A manual child protects its whole family and survives the run (D3)."""
+    cfg = _match_cfg(tmp_path)
+
+    async def main() -> None:
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed_stores(
+                    repo,
+                    children=[
+                        child_row(
+                            "c1",
+                            angel_id="1A",
+                            status="audited",
+                            age_at_xmas=8,
+                            assigned_sponsor_id=2,
+                            assignment_source="manual",
+                        ),
+                        child_row(
+                            "c2",
+                            first_name="Two",
+                            angel_id="1B",
+                            status="audited",
+                            age_at_xmas=8,
+                        ),
+                        child_row(
+                            "c3",
+                            first_name="Three",
+                            angel_id="2A",
+                            family_id=2,
+                            status="audited",
+                            age_at_xmas=8,
+                        ),
+                    ],
+                    families=[family_row(1), family_row(2)],
+                    sponsors=[
+                        sponsor_row(1, num_children=1),
+                        sponsor_row(2, num_children=1),
+                    ],
+                )
+            await db_pipeline.match(
+                cfg, "topher", {}, lambda *a, **k: None, lambda: None
+            )
+            async with uow.store(cfg, "topher") as repo:
+                children = _by_key(
+                    await repo.final_rows("child"), "zite_record_id"
+                )
+                families = _by_key(await repo.final_rows("family"), "family_id")
+                report_rows = await repo.match_report_rows()
+            assert children["c1"]["assigned_sponsor_id"] == 2
+            assert children["c1"]["assignment_source"] == "manual"
+            assert children["c2"]["assigned_sponsor_id"] is None
+            assert children["c3"]["assigned_sponsor_id"] == 1
+            assert children["c3"]["assignment_source"] == "auto"
+            assert families["1"]["assigned_sponsor_id"] == 2
             assert families["1"]["assigned_angel_ids"] == "1A"
+            reasons = {
+                row["ref"]: row["reason"]
+                for row in report_rows or []
+                if row["kind"] == "family"
+            }
+            assert reasons["1"] == "manual assignment"
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())
+
+
+def test_match_db_held_family_leaves_pool(tmp_path: Path) -> None:
+    """A held family leaves the pool and is reported with its reason (D14)."""
+    cfg = _match_cfg(tmp_path)
+
+    async def main() -> None:
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed_stores(repo, **_MATCH_FINALS)
+                await repo.record_family_hold(1, "needs review", "alice")
+            result = await db_pipeline.match(
+                cfg, "topher", {}, lambda *a, **k: None, lambda: None
+            )
+            async with uow.store(cfg, "topher") as repo:
+                children = _by_key(
+                    await repo.final_rows("child"), "zite_record_id"
+                )
+                report_rows = await repo.match_report_rows()
+            assert result.matched_families == 0
+            assert result.unmatched_family_ids == [1]
+            assert children["c1"]["assigned_sponsor_id"] is None
+            assert children["c2"]["assigned_sponsor_id"] is None
+            reasons = {
+                row["ref"]: row["reason"]
+                for row in report_rows or []
+                if row["kind"] == "family"
+            }
+            assert reasons["1"] == "held by alice: needs review"
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())
+
+
+def test_match_db_reports_split_families_at_child_grain(
+    tmp_path: Path,
+) -> None:
+    """The run result separates split families from matched and unmatched."""
+    cfg = _match_cfg(tmp_path)
+
+    async def main() -> None:
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed_stores(
+                    repo,
+                    children=[
+                        child_row(
+                            "c1",
+                            angel_id="1A",
+                            status="audited",
+                            age_at_xmas=8,
+                            assigned_sponsor_id=1,
+                            assignment_source="manual",
+                        ),
+                        child_row(
+                            "c2",
+                            first_name="Two",
+                            angel_id="1B",
+                            status="audited",
+                            age_at_xmas=8,
+                            assigned_sponsor_id=2,
+                            assignment_source="manual",
+                        ),
+                    ],
+                    families=[family_row(1)],
+                    sponsors=[
+                        sponsor_row(1, num_children=1),
+                        sponsor_row(2, num_children=1),
+                    ],
+                )
+            result = await db_pipeline.match(
+                cfg,
+                "topher",
+                {"skip_match": True},
+                lambda *a, **k: None,
+                lambda: None,
+            )
+            async with uow.store(cfg, "topher") as repo:
+                families = _by_key(await repo.final_rows("family"), "family_id")
+                sponsors = _by_key(
+                    await repo.final_rows("sponsor"), "sponsor_id"
+                )
+            assert result.matched_families == 0
+            assert result.unmatched_family_ids == []
+            assert result.split_family_ids == [1]
+            assert families["1"]["assigned_sponsor_id"] is None
+            assert families["1"]["assigned_angel_ids"] == "1A,1B"
             assert sponsors["1"]["assigned_angel_ids"] == "1A"
-            assert sponsors["1"]["num_angels_assigned"] == 1
+            assert sponsors["2"]["assigned_angel_ids"] == "1B"
         finally:
             await uow.engine.dispose()
 
@@ -1523,6 +1757,50 @@ def test_match_db_revision_conflict(
                 report_rows = await repo.match_report_rows()
             assert families["1"]["assigned_sponsor_id"] is None
             assert report_rows is None
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())
+
+
+def test_match_db_child_revision_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child row_version bump after the snapshot → MatchError (D8)."""
+    from ccat.match import MatchError
+
+    cfg = _prepare(tmp_path)
+    original_match_sponsors = db_pipeline.match_sponsors
+    db_path = _db_path(cfg)
+
+    def bump_and_match(*args: Any, **kwargs: Any) -> Any:
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(
+                "UPDATE final_child SET row_version = row_version + 1"
+                " WHERE zite_record_id = 'c1'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return original_match_sponsors(*args, **kwargs)
+
+    monkeypatch.setattr(db_pipeline, "match_sponsors", bump_and_match)
+
+    async def main() -> None:
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed_stores(repo, **_MATCH_FINALS)
+            with pytest.raises(MatchError, match="final_child rows changed"):
+                await db_pipeline.match(
+                    cfg, "topher", {}, lambda *a, **k: None, lambda: None
+                )
+            async with uow.store(cfg, "topher") as repo:
+                children = _by_key(
+                    await repo.final_rows("child"), "zite_record_id"
+                )
+            assert children["c1"]["assigned_sponsor_id"] is None
         finally:
             await uow.engine.dispose()
 

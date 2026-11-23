@@ -125,6 +125,11 @@ export const NODE_META: Record<string, NodeMeta> = {
     label: 'Max workers',
     description: 'Concurrent screening requests.',
   },
+  'ai_screening.overwrite_new': {
+    label: 'Overwrite new children',
+    description:
+      'Let the AI replace every value of a child whose status is still "new".',
+  },
   clarify: {
     label: 'Clarification emails',
     description: 'Model and files used to write family clarification emails.',

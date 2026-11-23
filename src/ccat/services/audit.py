@@ -103,6 +103,8 @@ class SavePatch(BaseModel):
     age_preference: str | None = None
     gender_preference: str | None = None
     dropoff_location: str | None = None
+    elevated_budget: bool | None = None
+    physical_packet: bool | None = None
     clarification_notes: str | None = None
     status: str | None = None
 

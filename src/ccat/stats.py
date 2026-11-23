@@ -48,11 +48,11 @@ from ccat.preparation import PreparationError, prepare_workbook, prepared_frame
 
 logger = logging.getLogger(__name__)
 
-#: ``final_family`` columns joined onto each child row.
+#: ``final_family`` columns joined onto each child row.  The sponsor is
+#: the child's own column now, so it is not part of the family join.
 FAMILY_JOIN_COLUMNS = (
     "family_id",
     "gift_pickup_location",
-    "assigned_sponsor_id",
 )
 
 #: ``final_child`` columns the report cannot work without.
@@ -225,15 +225,16 @@ def _load_enriched(
         cfg: The pipeline configuration.
         raw: Clean and ID-assign all three raw forms locally in memory.  No
             final-output ignore/orphan filtering applies to these prepared
-            rows, and no workbook output is produced.  Prepared families have
+            rows, and no workbook output is produced.  Prepared children carry
             no ``assigned_sponsor_id``, so sponsored-angel counts are zero.
 
     Returns:
         A tuple of (enriched child frame -- child rows plus
-        ``gift_pickup_location`` and ``assigned_sponsor_id`` joined
-        from the family rows with normalized location/gender columns,
-        family frame with a normalized location column, sponsor frame
-        (empty schema stand-in when absent), ordered location labels).
+        ``gift_pickup_location`` joined from the family rows, with
+        normalized location/gender columns and the child's own
+        ``assigned_sponsor_id``, family frame with a normalized location
+        column, sponsor frame (empty schema stand-in when absent), ordered
+        location labels).
 
     Raises:
         StatsError: If preparation fails, a final store is malformed, or the
@@ -279,6 +280,16 @@ def _load_enriched(
             f" run `ccat {prerequisite}` first"
         )
     child = _coerce_created(child, "prepared child" if raw else "final_child")
+    if "assigned_sponsor_id" not in child.columns:
+        if not raw:
+            raise StatsError(
+                f"{child_label} lacks column(s): ['assigned_sponsor_id'];"
+                f" run `ccat audit` first"
+            )
+        # Ephemeral prepared rows precede matchmaking assignments.
+        child = child.with_columns(
+            pl.lit(None, dtype=pl.Int64).alias("assigned_sponsor_id")
+        )
     family_prerequisite = "acquire" if raw else "match"
     if family.is_empty():
         raise StatsError(
@@ -288,17 +299,10 @@ def _load_enriched(
     missing_family = [
         column for column in FAMILY_JOIN_COLUMNS if column not in family.columns
     ]
-    if missing_family and not (
-        raw and missing_family == ["assigned_sponsor_id"]
-    ):
+    if missing_family:
         raise StatsError(
             f"{family_label} lacks column(s): {missing_family}; run"
             f" `ccat {family_prerequisite}` first"
-        )
-    if "assigned_sponsor_id" not in family.columns:
-        # Ephemeral prepared rows precede matchmaking assignments.
-        family = family.with_columns(
-            pl.lit(None, dtype=pl.Int64).alias("assigned_sponsor_id")
         )
     duplicated = family.group_by("family_id").len().filter(pl.col("len") > 1)
     if not duplicated.is_empty():
@@ -313,7 +317,6 @@ def _load_enriched(
         .fill_null("")
         .map_elements(_normalize_location, return_dtype=pl.String)
         .alias("gift_pickup_location"),
-        pl.col("assigned_sponsor_id").cast(pl.Int64, strict=False),
     )
     enriched = child.join(
         family.select(FAMILY_JOIN_COLUMNS),

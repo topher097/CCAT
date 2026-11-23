@@ -39,6 +39,7 @@ def child_row(
     age: int = 8,
     *,
     ignore: bool = False,
+    sponsor: int | None = None,
 ) -> dict[str, Any]:
     """One full-store child row for stats tests."""
     return {
@@ -49,13 +50,13 @@ def child_row(
         "age_at_xmas": age,
         "gender": gender,
         "ignore": ignore,
+        "assigned_sponsor_id": sponsor,
     }
 
 
 def family_row(
     family_id: int,
     location: str | None,
-    sponsor: int | None,
     *,
     ignore: bool = False,
 ) -> dict[str, Any]:
@@ -63,7 +64,6 @@ def family_row(
     return {
         "family_id": family_id,
         "gift_pickup_location": location,
-        "assigned_sponsor_id": sponsor,
         "ignore": ignore,
     }
 
@@ -236,8 +236,8 @@ class TestOutputEligibility:
                 child_row("rec-orphan", None, stamp, "Male"),
             ],
             [
-                family_row(1, "Hancock", 7),
-                family_row(2, "Calumet", 8, ignore=True),
+                family_row(1, "Hancock"),
+                family_row(2, "Calumet", ignore=True),
             ],
             [
                 sponsor_row(7, 5, "Hancock"),
@@ -253,6 +253,20 @@ class TestOutputEligibility:
         assert family["family_id"].to_list() == [1]
         assert sponsor["sponsor_id"].to_list() == [7]
 
+    def test_child_assignment_wins_over_family_summary(
+        self, cfg: Config
+    ) -> None:
+        """The child's own sponsor is the truth; the family cannot override."""
+        stamp = datetime(2026, 10, 2, 12, 0)
+        family = {**family_row(1, "Hancock"), "assigned_sponsor_id": 9}
+        _seed(
+            cfg,
+            [child_row("rec1", 1, stamp, "Male", sponsor=7)],
+            [family],
+        )
+        enriched, _family, _sponsor, _locations = stats._load_enriched(cfg)
+        assert enriched["assigned_sponsor_id"].to_list() == [7]
+
 
 class TestDailyAdmissions:
     """Tests for the per-day per-location admissions aggregation."""
@@ -265,7 +279,7 @@ class TestDailyAdmissions:
                 child_row("rec1", 1, datetime(2026, 10, 1, 9, 0), "Male"),
                 child_row("rec2", 1, datetime(2026, 10, 3, 9, 0), "Female"),
             ],
-            [family_row(1, "Hancock", 7)],
+            [family_row(1, "Hancock")],
         )
         enriched, _family, _sponsor, _locations = stats._load_enriched(cfg)
         days, per_location = stats._daily_admissions(enriched)
@@ -289,8 +303,8 @@ class TestDailyAdmissions:
                 child_row("rec3", 2, stamp, "Male"),
             ],
             [
-                family_row(1, "Hancock", 7),
-                family_row(2, "Calumet", None),
+                family_row(1, "Hancock"),
+                family_row(2, "Calumet"),
             ],
         )
         enriched, _family, _sponsor, _locations = stats._load_enriched(cfg)
@@ -310,15 +324,19 @@ class TestLocationTable:
         _seed(
             cfg,
             [
-                child_row("rec1", 1, stamp, "Male"),
-                child_row("rec2", 1, stamp, "Female"),
-                child_row("rec3", 2, stamp, "Non-binary"),
+                child_row("rec1", 1, stamp, "Male", sponsor=7),
+                child_row("rec2", 1, stamp, "Female", sponsor=7),
+                child_row("rec3", 2, stamp, "Non-binary", sponsor=7),
                 child_row("rec4", 3, stamp, "Female", age=4),
+                # A split family: its placed children count individually.
+                child_row("rec5", 4, stamp, "Male", sponsor=7),
+                child_row("rec6", 4, stamp, "Female", sponsor=8),
             ],
             [
-                family_row(1, "Hancock", 7),
-                family_row(2, "Calumet", 7),
-                family_row(3, "Calumet", None),
+                family_row(1, "Hancock"),
+                family_row(2, "Calumet"),
+                family_row(3, "Calumet"),
+                family_row(4, "Hancock"),
             ],
             [
                 sponsor_row(7, 5, "Hancock"),
@@ -337,15 +355,17 @@ class TestLocationTable:
         unknown = next(row for row in rows if row["label"] == "Unknown")
         total = rows[-1]
         assert hancock["genders"] == {
-            "male": 1,
-            "female": 1,
+            "male": 2,
+            "female": 2,
             "non-binary": 0,
         }
-        assert hancock["families"] == 1
+        assert hancock["families"] == 2
         # Desired angels: sponsor 7 wants 5, sponsor 10's
         # "TSA (Hancock)" alias wants 4 more.
         assert hancock["sponsors"] == 9
-        assert hancock["sponsored"] == 2
+        # Two children of family 1 plus both placed children of the
+        # split family 4; the split family is not one sponsored unit.
+        assert hancock["sponsored"] == 4
         assert calumet["genders"] == {
             "male": 0,
             "female": 1,
@@ -357,11 +377,11 @@ class TestLocationTable:
         # "Any Location" sponsors bucket under Unknown.
         assert unknown["sponsors"] == 3
         assert total["label"] == "All locations"
-        assert total["genders"] == {"male": 1, "female": 2, "non-binary": 1}
-        assert total["families"] == 3
+        assert total["genders"] == {"male": 2, "female": 3, "non-binary": 1}
+        assert total["families"] == 4
         # Totals sum every site's desired angels once.
         assert total["sponsors"] == 22
-        assert total["sponsored"] == 3
+        assert total["sponsored"] == 5
 
     def test_buckets_unknown_location(self, cfg: Config) -> None:
         """Null and unmatched family locations land in ``Unknown``."""
@@ -372,7 +392,7 @@ class TestLocationTable:
                 child_row("rec1", 1, stamp, "Male"),
                 child_row("rec2", 99, stamp, "Female"),
             ],
-            [family_row(1, None, None)],
+            [family_row(1, None)],
         )
         enriched, family, sponsor, locations = stats._load_enriched(cfg)
         assert locations[-1] == "Unknown"
@@ -401,7 +421,7 @@ class TestGenderAge:
                 child_row("rec3", 1, stamp, "Male"),
                 child_row("rec4", 1, stamp, None),
             ],
-            [family_row(1, "Hancock", None)],
+            [family_row(1, "Hancock")],
         )
         enriched, _family, _sponsor, _locations = stats._load_enriched(cfg)
         counts = {
@@ -420,7 +440,7 @@ class TestGenderAge:
                 child_row("rec2", 1, stamp, "Female", age=3),
                 child_row("rec3", 1, stamp, "Male", age=11),
             ],
-            [family_row(1, "Hancock", None)],
+            [family_row(1, "Hancock")],
         )
         enriched, _family, _sponsor, _locations = stats._load_enriched(cfg)
         ages = enriched["age_at_xmas"].drop_nulls().cast(pl.Int64)
@@ -464,7 +484,7 @@ class TestRun:
                 child_row("rec1", 1, stamp, "Male"),
                 child_row("rec2", 1, stamp, "Female", age=5),
             ],
-            [family_row(1, "Hancock", 7)],
+            [family_row(1, "Hancock")],
         )
         report_cfg = _report_cfg(cfg, tmp_path)
         stats.run(report_cfg)

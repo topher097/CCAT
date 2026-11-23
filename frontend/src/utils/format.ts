@@ -30,9 +30,14 @@ export function statusLabel(status: string | null | undefined): string {
 export type FieldSpec = {
   field: string
   label: string
-  kind?: 'text' | 'number' | 'textarea' | 'date'
+  kind?: 'text' | 'number' | 'textarea' | 'date' | 'boolean'
   /** Control field whose diff is informational, not status-relevant. */
   neutral?: boolean
+  /**
+   * Hidden from the entity editor. The field still exists and still
+   * round-trips; the editor simply does not offer it.
+   */
+  hidden?: boolean
 }
 
 export const ENTITY_FIELDS: Record<'sponsor' | 'family' | 'child', FieldSpec[]> = {
@@ -47,10 +52,15 @@ export const ENTITY_FIELDS: Record<'sponsor' | 'family' | 'child', FieldSpec[]> 
     { field: 'age_preference', label: 'Age preference' },
     { field: 'gender_preference', label: 'Gender preference' },
     { field: 'dropoff_location', label: 'Drop-off location' },
+    { field: 'elevated_budget', label: 'Elevated budget', kind: 'boolean' },
+    { field: 'physical_packet', label: 'Physical packet', kind: 'boolean' },
     {
       field: 'prior_assigned_angel_ids',
       label: 'Prior angel ids',
       kind: 'textarea',
+      // Manual matching places families by hand; the free-text field
+      // cannot express a partial placement, so the editor hides it.
+      hidden: true,
     },
   ],
   family: [

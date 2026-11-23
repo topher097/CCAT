@@ -1,8 +1,11 @@
 """Module 5b — sponsor packet generation (§13b).
 
 For every output-eligible row in the complete persistent ``final_sponsor``
-store with assigned angels, builds one **sponsor packet** directory under
-``sponsor_packets.output_dir``.  Children and families use their own eligible
+store that owns at least one child (``final_child.assigned_sponsor_id``),
+builds one **sponsor packet** directory under
+``sponsor_packets.output_dir``.  Membership is resolved through the child
+row, so two sponsors can share one family and two children can share an
+angel letter without either being dropped.  Children and families use their own eligible
 populations independently: ignored entities are excluded, and orphaned
 children are excluded:
 
@@ -47,6 +50,7 @@ from pypdf import PdfWriter
 from ccat.audit.store import read_eligible_final_frame
 from ccat.config import Config
 from ccat.match import canonical_location
+from ccat.services.db_assignments import child_sponsor
 
 logger = logging.getLogger(__name__)
 
@@ -95,24 +99,29 @@ def _angel_sort_key(angel: dict[str, Any]) -> tuple[int, str, int, str]:
 def _sponsors_with_angels(
     cfg: Config, sponsor_id: int | None = None
 ) -> list[dict[str, Any]]:
-    """Join eligible assigned sponsors with eligible angels' details (§13b).
+    """Join eligible assigned sponsors with their children's details (§13b).
 
-    Each complete persistent final store is filtered independently: ignored
-    families/sponsors/children and orphaned children do not enter this join.
+    Membership is the child's own ``assigned_sponsor_id`` — the
+    assignment grain — not the sponsor's stored ``assigned_angel_ids``,
+    which cannot resolve which duplicate child holds a shared letter.
+    Each complete persistent final store is filtered independently:
+    ignored families/sponsors/children and orphaned children do not
+    enter this join.
 
     Args:
         cfg: The pipeline configuration.
         sponsor_id: Restrict to one ``sponsor_id``.
 
     Returns:
-        One packet payload per sponsor with assigned angels, angels
-        ordered by family ID then angel letter.  Sponsors whose
-        ``assigned_angel_ids`` are empty or unparseable are skipped.
+        One packet payload per sponsor with assigned children, angels
+        ordered by family ID then angel letter.  Sponsors without
+        assigned children are skipped.
 
     Raises:
         SponsorPacketError: If ``final_sponsor``/``final_child`` has no
             eligible rows, the workbook has no matched sponsors, or
-            ``sponsor_id`` is given but that sponsor has no assigned angels.
+            ``sponsor_id`` is given but that sponsor has no assigned
+            children.
     """
     sponsors = read_eligible_final_frame(cfg, "sponsor")
     if sponsors is None or sponsors.is_empty():
@@ -143,49 +152,34 @@ def _sponsors_with_angels(
             row.get("family_id"): row.get("gift_pickup_location")
             for row in family.to_dicts()
         }
-    angels_by_id = {
-        row["angel_id"]: row
-        for row in children.to_dicts()
-        if row.get("angel_id")
-    }
+    children_by_sponsor: dict[int, list[dict[str, Any]]] = {}
+    for child in children.to_dicts():
+        owner = child_sponsor(child)
+        if owner is None or not child.get("angel_id"):
+            continue
+        children_by_sponsor.setdefault(owner, []).append(child)
     packets: list[dict[str, Any]] = []
     for row in sponsors.to_dicts():
-        raw_ids = row.get("assigned_angel_ids") or ""
-        angel_ids = [
-            angel_id.strip()
-            for angel_id in str(raw_ids).split(",")
-            if angel_id.strip()
-        ]
-        if not angel_ids:
+        owner = row.get("sponsor_id")
+        sponsor_children = (
+            children_by_sponsor.get(int(owner)) if owner is not None else None
+        )
+        if not sponsor_children:
             continue
-        unknown = [
-            angel_id for angel_id in angel_ids if angel_id not in angels_by_id
-        ]
-        if unknown:
-            logger.warning(
-                "sponsor %s assigned unknown angel id(s) %s; skipping them",
-                row.get("sponsor_id"),
-                unknown,
-            )
         angels = [
             {
-                "angel_id": angel_id,
-                "family_id": angels_by_id[angel_id].get("family_id"),
-                "gender": angels_by_id[angel_id].get("gender"),
-                "age": angels_by_id[angel_id].get("age_at_xmas"),
-                "dropoff": location_by_family.get(
-                    angels_by_id[angel_id].get("family_id")
-                ),
+                "angel_id": child["angel_id"],
+                "family_id": child.get("family_id"),
+                "gender": child.get("gender"),
+                "age": child.get("age_at_xmas"),
+                "dropoff": location_by_family.get(child.get("family_id")),
                 "location": canonical_location(
-                    location_by_family.get(
-                        angels_by_id[angel_id].get("family_id")
-                    ),
+                    location_by_family.get(child.get("family_id")),
                     cfg.location_groups,
                 )
                 or "unknown",
             }
-            for angel_id in angel_ids
-            if angel_id in angels_by_id
+            for child in sponsor_children
         ]
         angels.sort(key=_angel_sort_key)
         packets.append(
@@ -271,21 +265,22 @@ def _merge_sheets_pdf(
 def validate_all_sheets_exist(
     cfg: Config, sponsor_id: int | None = None
 ) -> None:
-    """Require a generated info sheet PDF for every sponsored angel (§13b).
+    """Require a generated info sheet PDF for every sponsored child (§13b).
 
     The sponsor packets combine the child information sheets, so the
     packet phase must never run with sheets missing.  Only output-eligible
     children and families participate, filtered independently from their full
-    persistent stores.  With ``sponsor_id``, only angels assigned to that
-    sponsor count.
+    persistent stores.  Sponsorship is the child's own
+    ``assigned_sponsor_id``; with ``sponsor_id``, only that sponsor's
+    children count.
 
     Args:
         cfg: The pipeline configuration.
         sponsor_id: Restrict the check to one ``sponsor_id``.
 
     Raises:
-        SponsorPacketError: If any eligible child whose eligible family has
-            an assigned sponsor (the given sponsor when scoped) lacks its
+        SponsorPacketError: If any eligible child with an assigned
+            sponsor (the given sponsor when scoped) lacks its
             ``AT<season>_<angel_id>.pdf`` file.
     """
     children = read_eligible_final_frame(cfg, "child")
@@ -294,13 +289,6 @@ def validate_all_sheets_exist(
     family = read_eligible_final_frame(cfg, "family")
     if family is None:
         return
-    family_rows = family.to_dicts()
-    sponsored_family_ids = {
-        row.get("family_id")
-        for row in family_rows
-        if row.get("assigned_sponsor_id") is not None
-        and (sponsor_id is None or row.get("assigned_sponsor_id") == sponsor_id)
-    }
     location_by_family = {
         row.get("family_id"): row.get("gift_pickup_location")
         for row in family.to_dicts()
@@ -308,7 +296,8 @@ def validate_all_sheets_exist(
     missing = [
         str(row["angel_id"])
         for row in children.to_dicts()
-        if row.get("family_id") in sponsored_family_ids
+        if child_sponsor(row) is not None
+        and (sponsor_id is None or child_sponsor(row) == sponsor_id)
         and row.get("angel_id")
         and not _sheet_pdf(
             cfg,

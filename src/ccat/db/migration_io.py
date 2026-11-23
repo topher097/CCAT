@@ -77,6 +77,7 @@ from ccat.db.repositories import (
 from ccat.db.uow import UnitOfWork
 from ccat.io import list_sheets, read_sheet, write_sheets
 from ccat.match import canonical_location
+from ccat.services.db_assignments import backfill_child_assignments
 from ccat.screening import (
     ADDRESS_VALIDATION_LOG_SCHEMA,
     DUPLICATE_LOG_SCHEMA,
@@ -478,6 +479,13 @@ def _read_source(cfg: Config, source: Path) -> dict[str, Any]:
         entity: read_final(cfg, entity, workbook=source)
         for entity in ("child", "family", "sponsor")
     }
+    # A workbook written before the child-grain change carries the
+    # placement on the family and sponsor rows only.  Rebuild the child
+    # rows' own assignment from them, so an imported workbook keeps its
+    # assignments instead of importing as a season with no placements.
+    backfill_child_assignments(
+        finals["family"], finals["sponsor"], finals["child"]
+    )
     raw = {
         entity: _frame_rows(source, f"raw_{entity}")
         for entity in ("sponsor", "family", "child")
@@ -1220,6 +1228,19 @@ async def _validate(
                 wb_generated == db_generated,
                 f"{wb_generated} workbook vs {db_generated} db",
             )
+            # The child is the assignment grain; the family/sponsor
+            # columns are derived from these rows.
+            wb_child_assigned = sum(
+                row.get("assigned_sponsor_id") is not None for row in wb_rows
+            )
+            db_child_assigned = sum(
+                row.get("assigned_sponsor_id") is not None for row in db_rows
+            )
+            record(
+                "child_assignment_count",
+                wb_child_assigned == db_child_assigned,
+                f"{wb_child_assigned} workbook vs {db_child_assigned} db",
+            )
             wb_pending = sum(
                 not bool(as_bool(row.get("screened"))) for row in wb_rows
             )
@@ -1248,6 +1269,10 @@ async def _validate(
                 "potential_anomoly values map to ai_screening_notes",
             )
         if entity == "family":
+            # A family is "assigned" only when all of its placed children
+            # share one sponsor; a split family has no single sponsor but
+            # still lists its placed angel ids.  Both summaries derive
+            # from the child rows.
             wb_assigned = sum(
                 row.get("assigned_sponsor_id") is not None for row in wb_rows
             )
@@ -1258,6 +1283,17 @@ async def _validate(
                 "family_assignment_count",
                 wb_assigned == db_assigned,
                 f"{wb_assigned} workbook vs {db_assigned} db",
+            )
+            wb_placed = sum(
+                bool(row.get("assigned_angel_ids")) for row in wb_rows
+            )
+            db_placed = sum(
+                bool(row.get("assigned_angel_ids")) for row in db_rows
+            )
+            record(
+                "family_placed_count",
+                wb_placed == db_placed,
+                f"{wb_placed} workbook vs {db_placed} db",
             )
         if entity == "sponsor":
             wb_assigned = sum(

@@ -150,8 +150,13 @@ def test_default_mode_uses_eligible_finals(tmp_path: Path) -> None:
     """Default mode: orphans/ignored excluded, assignments counted."""
     cfg = _prepare(tmp_path)
     children = [
-        _stats_child("c1", "2026-02-01T09:00:00Z"),
-        _stats_child("c2", "2026-02-02T09:00:00Z", gender="Female"),
+        _stats_child("c1", "2026-02-01T09:00:00Z", assigned_sponsor_id=7),
+        _stats_child(
+            "c2",
+            "2026-02-02T09:00:00Z",
+            gender="Female",
+            assigned_sponsor_id=7,
+        ),
         child_row(
             "c3",
             created="2026-02-03T09:00:00Z",
@@ -317,8 +322,13 @@ def test_requested_angels_vs_assigned_sponsors(tmp_path: Path) -> None:
     """Requested num_children and assigned sponsor counts stay distinct."""
     cfg = _prepare(tmp_path)
     children = [
-        _stats_child("c1", "2026-02-01T09:00:00Z"),
-        _stats_child("c2", "2026-02-02T09:00:00Z", gender="Female"),
+        _stats_child("c1", "2026-02-01T09:00:00Z", assigned_sponsor_id=7),
+        _stats_child(
+            "c2",
+            "2026-02-02T09:00:00Z",
+            gender="Female",
+            assigned_sponsor_id=7,
+        ),
     ]
     families = [family_row(1, assigned_sponsor_id=7)]
     sponsors = [sponsor_row(7, num_children=5, assigned_angel_ids="1A,1B")]
@@ -338,6 +348,50 @@ def test_requested_angels_vs_assigned_sponsors(tmp_path: Path) -> None:
     # "Sponsors" sums the requested num_children (5), "sponsored" counts
     # the assigned angels (2).
     assert hancock["sponsors"] == 5
+    assert hancock["sponsored"] == 2
+
+
+def test_split_family_counts_each_placed_child(tmp_path: Path) -> None:
+    """A family split across sponsors counts its placed children, not one."""
+    cfg = _prepare(tmp_path)
+    children = [
+        _stats_child(
+            "c1",
+            "2026-02-01T09:00:00Z",
+            angel_id="1A",
+            assigned_sponsor_id=7,
+        ),
+        _stats_child(
+            "c2",
+            "2026-02-02T09:00:00Z",
+            angel_id="1B",
+            assigned_sponsor_id=8,
+        ),
+    ]
+    families = [
+        family_row(1, assigned_sponsor_id=None, assigned_angel_ids="1A,1B")
+    ]
+    sponsors = [
+        sponsor_row(7, num_children=1, assigned_angel_ids="1A"),
+        sponsor_row(8, num_children=1, assigned_angel_ids="1B"),
+    ]
+    asyncio.run(
+        _seed(cfg, children=children, families=families, sponsors=sponsors)
+    )
+    result = _run(cfg, {})
+    plain = " ".join(Path(result.html_path).read_text().split())
+    assert "2 children, 1 families, 2 sponsors with assigned angels." in plain
+
+    finals = {
+        e: asyncio.run(_rows(cfg, e)) for e in ("child", "family", "sponsor")
+    }
+    enriched, family, sponsor, locations = db_stats._load_enriched(
+        cfg, finals, raw=False
+    )
+    table = stats_module._location_table(
+        enriched, family, sponsor, locations, ["male", "female"]
+    )
+    hancock = next(row for row in table if row["label"] == "Hancock")
     assert hancock["sponsored"] == 2
 
 

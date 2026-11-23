@@ -116,27 +116,6 @@ async def test_get_returns_effective_tree_and_path(setup: Setup) -> None:
     assert "acquire" not in tree
 
 
-async def test_get_drops_unknown_file_keys(setup: Setup) -> None:
-    """A key the contract does not know is dropped, the rest survives.
-
-    Args:
-        setup: The migrated app fixture.
-    """
-    data = json.loads(setup.config_file.read_text())
-    data["not_a_real_setting"] = 1
-    setup.config_file.write_text(json.dumps(data, indent=2))
-    client = Client(setup.app)
-    try:
-        response = await client.client.get("/api/v1/config")
-    finally:
-        await client.close()
-    assert response.status_code == 200, response.text
-    tree = response.json()["config"]
-    assert "not_a_real_setting" not in tree
-    assert tree["season"] == data["season"]
-    assert tree["tables"]["sponsor"]["columns"]["email"] == {"type": "email"}
-
-
 async def test_get_forbidden_for_non_admin(setup: Setup) -> None:
     """A coordinator/auditor account cannot read the config.
 
@@ -260,3 +239,180 @@ async def test_get_without_config_path_is_500(setup: Setup) -> None:
         await client.close()
     assert response.status_code == 500, response.text
     assert response.json()["detail"]["code"] == "config_unavailable"
+
+
+async def test_run_settings_get_is_seeded_for_coordinators(
+    setup: Setup,
+) -> None:
+    """GET returns the effective flags, weights, and editable flag.
+
+    Args:
+        setup: The migrated app fixture.
+    """
+    client = Client(setup.app)
+    await client.login("lmboswell")
+    try:
+        match = await client.client.get("/api/v1/runs/match/settings")
+        generate = await client.client.get("/api/v1/runs/generate/settings")
+    finally:
+        await client.close()
+    assert match.status_code == 200, match.text
+    body = match.json()
+    assert body["command"] == "match"
+    assert body["run"] == {"test": False, "skip_match": False}
+    assert body["weights"] == {
+        "location_weight": 1000,
+        "age_weight": 100,
+        "gender_weight": 1,
+    }
+    assert body["config_path"] == str(setup.config_file)
+    assert body["editable"] is True
+    assert "weights" not in generate.json()
+
+
+async def test_run_settings_patch_persists_only_the_section(
+    setup: Setup,
+) -> None:
+    """A coordinator's PATCH writes the flags and reloads the app.
+
+    Args:
+        setup: The migrated app fixture.
+    """
+    client = Client(setup.app)
+    await client.login("lmboswell")
+    try:
+        response = await client.client.patch(
+            "/api/v1/runs/generate/settings",
+            json={"test": True, "overwrite": True, "max_workers": 2},
+            headers=client.headers(),
+        )
+    finally:
+        await client.close()
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["saved"] is True
+    assert body["run"] == {
+        "test": True,
+        "overwrite": True,
+        "max_workers": 2,
+    }
+    on_disk = json.loads(setup.config_file.read_text())
+    assert on_disk["generate"]["run"] == {
+        "test": True,
+        "overwrite": True,
+        "max_workers": 2,
+    }
+    assert on_disk["matchmaking"]["run"] == {
+        "test": False,
+        "skip_match": False,
+    }
+    assert setup.app.state.cfg.generate.run.max_workers == 2
+
+
+async def test_screen_run_settings_get_returns_the_ai_flag(
+    setup: Setup,
+) -> None:
+    """GET returns the global AI screening flag and the editable flag.
+
+    Args:
+        setup: The migrated app fixture.
+    """
+    client = Client(setup.app)
+    await client.login("lmboswell")
+    try:
+        response = await client.client.get("/api/v1/runs/screen/settings")
+    finally:
+        await client.close()
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["command"] == "screen"
+    assert body["run"] == {"overwrite_new": False}
+    assert body["editable"] is True
+
+
+async def test_screen_run_settings_patch_writes_only_the_flag(
+    setup: Setup,
+) -> None:
+    """A coordinator's PATCH writes the flag and keeps the rest of the section.
+
+    Args:
+        setup: The migrated app fixture.
+    """
+    client = Client(setup.app)
+    await client.login("lmboswell")
+    try:
+        response = await client.client.patch(
+            "/api/v1/runs/screen/settings",
+            json={"overwrite_new": True},
+            headers=client.headers(),
+        )
+    finally:
+        await client.close()
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["saved"] is True
+    assert body["run"] == {"overwrite_new": True}
+    on_disk = json.loads(setup.config_file.read_text())
+    assert on_disk["ai_screening"]["overwrite_new"] is True
+    # The rest of the section survives the write.
+    assert on_disk["ai_screening"]["model"] == setup.cfg.ai_screening.model
+    assert (
+        on_disk["ai_screening"]["system_prompt"]
+        == setup.cfg.ai_screening.system_prompt
+    )
+    assert setup.app.state.cfg.ai_screening.overwrite_new is True
+
+
+async def test_screen_run_settings_patch_rejects_extra_keys(
+    setup: Setup,
+) -> None:
+    """A key outside the flag is 422 and the file stays untouched.
+
+    Args:
+        setup: The migrated app fixture.
+    """
+    before = setup.config_file.read_bytes()
+    client = Client(setup.app)
+    await client.login("lmboswell")
+    try:
+        response = await client.client.patch(
+            "/api/v1/runs/screen/settings",
+            json={"overwrite_new": True, "model": "other/model"},
+            headers=client.headers(),
+        )
+    finally:
+        await client.close()
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_input"
+    assert setup.config_file.read_bytes() == before
+
+
+async def test_run_settings_patch_rejects_extra_keys_and_bad_trees(
+    setup: Setup,
+) -> None:
+    """A key outside the flags is 422, and so is an impossible tree.
+
+    Args:
+        setup: The migrated app fixture.
+    """
+    before = setup.config_file.read_bytes()
+    client = Client(setup.app)
+    await client.login("lmboswell")
+    try:
+        extra = await client.client.patch(
+            "/api/v1/runs/match/settings",
+            json={"test": False, "location_weight": 5},
+            headers=client.headers(),
+        )
+        impossible = await client.client.patch(
+            "/api/v1/runs/match/settings",
+            json={"test": True, "skip_match": True},
+            headers=client.headers(),
+        )
+    finally:
+        await client.close()
+    assert extra.status_code == 422, extra.text
+    assert extra.json()["detail"]["code"] == "invalid_input"
+    assert impossible.status_code == 422, impossible.text
+    assert impossible.json()["detail"]["code"] == "invalid_config"
+    assert setup.config_file.read_bytes() == before

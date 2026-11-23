@@ -1250,6 +1250,17 @@
             ],
             "title": "Dropoff Location"
           },
+          "elevated_budget": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elevated Budget"
+          },
           "email": {
             "anyOf": [
               {
@@ -1458,6 +1469,17 @@
               }
             ],
             "title": "Phone"
+          },
+          "physical_packet": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Physical Packet"
           },
           "primary_email": {
             "anyOf": [
@@ -1876,6 +1898,1398 @@
         "title": "LoginRequest",
         "type": "object"
       },
+      "ManualAssignmentEntry": {
+        "additionalProperties": true,
+        "description": "One child's assignment outcome.\n\nAttributes:\n    zite_record_id: The child's key.\n    angel_id: The child's angel letter.\n    family_id: The child's family.\n    from_sponsor_id: The child's previous sponsor, when it moved.",
+        "properties": {
+          "angel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Angel Id"
+          },
+          "family_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family Id"
+          },
+          "from_sponsor_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Sponsor Id"
+          },
+          "zite_record_id": {
+            "title": "Zite Record Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "zite_record_id"
+        ],
+        "title": "ManualAssignmentEntry",
+        "type": "object"
+      },
+      "ManualAssignmentFamilySummary": {
+        "additionalProperties": true,
+        "description": "One family's assignment summary after a write.\n\nAttributes:\n    family_id: The family's key.\n    assigned_sponsor_id: The family's single sponsor, when it has one.\n    assigned_sponsor_ids: Every sponsor the family's children hold.\n    assigned_count: The number of placed children.\n    family_size: The number of non-ignored children.\n    assignment_state: \"unassigned\", \"partial\", \"split\", \"assigned\".\n    hold_released: Whether the write released the family's hold.",
+        "properties": {
+          "assigned_count": {
+            "default": 0,
+            "title": "Assigned Count",
+            "type": "integer"
+          },
+          "assigned_sponsor_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assigned Sponsor Id"
+          },
+          "assigned_sponsor_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Assigned Sponsor Ids",
+            "type": "array"
+          },
+          "assignment_state": {
+            "default": "unassigned",
+            "title": "Assignment State",
+            "type": "string"
+          },
+          "family_id": {
+            "title": "Family Id",
+            "type": "integer"
+          },
+          "family_size": {
+            "default": 0,
+            "title": "Family Size",
+            "type": "integer"
+          },
+          "hold_released": {
+            "default": false,
+            "title": "Hold Released",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "family_id"
+        ],
+        "title": "ManualAssignmentFamilySummary",
+        "type": "object"
+      },
+      "ManualAssignmentListItem": {
+        "additionalProperties": true,
+        "description": "One current assignment, as the manual list shows it.\n\nAttributes:\n    zite_record_id: The child's key.\n    angel_id: The child's angel letter.\n    family_id: The child's family.\n    sponsor_id: The child's sponsor.\n    assignment_source: \"auto\" or \"manual\".\n    last_updated_by: Who last wrote the child row.\n    last_updated_at: When the child row was last written.\n    first_name: The angel's first name.\n    age_at_xmas: The angel's age at Christmas.\n    need_1: First stated need.\n    need_2: Second stated need.\n    desire_1: First stated want.\n    desire_2: Second stated want.\n    dropoff_location: The family's gift pickup location (the angel's drop-off).",
+        "properties": {
+          "age_at_xmas": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age At Xmas"
+          },
+          "angel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Angel Id"
+          },
+          "assignment_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignment Source"
+          },
+          "desire_1": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Desire 1"
+          },
+          "desire_2": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Desire 2"
+          },
+          "dropoff_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dropoff Location"
+          },
+          "family_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family Id"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "last_updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Updated At"
+          },
+          "last_updated_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Updated By"
+          },
+          "need_1": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need 1"
+          },
+          "need_2": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need 2"
+          },
+          "sponsor_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sponsor Id"
+          },
+          "zite_record_id": {
+            "title": "Zite Record Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "zite_record_id"
+        ],
+        "title": "ManualAssignmentListItem",
+        "type": "object"
+      },
+      "ManualAssignmentListPage": {
+        "additionalProperties": true,
+        "description": "One page of the current assignment list.\n\nAttributes:\n    items: The assignments.\n    total: The number of matching assignments.\n    page: The 1-based page number.\n    page_size: The page size.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ManualAssignmentListItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "default": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "default": 25,
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "ManualAssignmentListPage",
+        "type": "object"
+      },
+      "ManualAssignmentRequest": {
+        "additionalProperties": false,
+        "description": "Assign a selection of children to a sponsor.\n\nAttributes:\n    sponsor_id: The sponsor the selection goes to.\n    family_ids: Whole families to place; the server expands each to\n        its eligible children.\n    child_ids: Individual children, by ``zite_record_id``.\n    expected_versions: The caller's expected row versions, keyed\n        ``child:<id>``, ``family:<id>``, ``sponsor:<id>``.\n    confirm: Required when a selected child already has a sponsor.\n    note: Free text recorded in the audit event.",
+        "properties": {
+          "child_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Child Ids",
+            "type": "array"
+          },
+          "confirm": {
+            "default": false,
+            "title": "Confirm",
+            "type": "boolean"
+          },
+          "expected_versions": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Expected Versions",
+            "type": "object"
+          },
+          "family_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Family Ids",
+            "type": "array"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "sponsor_id": {
+            "title": "Sponsor Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sponsor_id"
+        ],
+        "title": "ManualAssignmentRequest",
+        "type": "object"
+      },
+      "ManualAssignmentResult": {
+        "additionalProperties": true,
+        "description": "The outcome of an assign or release request.\n\nAttributes:\n    assigned: The children newly assigned.\n    reassigned: The children moved from another sponsor.\n    released: The children released.\n    unchanged: The children already held by this sponsor.\n    warnings: The advisories; they never block.\n    families: The affected families' summaries.\n    sponsors: The affected sponsors' summaries.  A release that\n        frees children on several sponsors names each of them.\n    versions: The new row versions, so the client need not reload.",
+        "properties": {
+          "assigned": {
+            "items": {
+              "$ref": "#/components/schemas/ManualAssignmentEntry"
+            },
+            "title": "Assigned",
+            "type": "array"
+          },
+          "families": {
+            "items": {
+              "$ref": "#/components/schemas/ManualAssignmentFamilySummary"
+            },
+            "title": "Families",
+            "type": "array"
+          },
+          "reassigned": {
+            "items": {
+              "$ref": "#/components/schemas/ManualAssignmentEntry"
+            },
+            "title": "Reassigned",
+            "type": "array"
+          },
+          "released": {
+            "items": {
+              "$ref": "#/components/schemas/ManualAssignmentEntry"
+            },
+            "title": "Released",
+            "type": "array"
+          },
+          "sponsors": {
+            "items": {
+              "$ref": "#/components/schemas/ManualAssignmentSponsorSummary"
+            },
+            "title": "Sponsors",
+            "type": "array"
+          },
+          "unchanged": {
+            "items": {
+              "$ref": "#/components/schemas/ManualAssignmentEntry"
+            },
+            "title": "Unchanged",
+            "type": "array"
+          },
+          "versions": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Versions",
+            "type": "object"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "title": "ManualAssignmentResult",
+        "type": "object"
+      },
+      "ManualAssignmentSponsorSummary": {
+        "additionalProperties": true,
+        "description": "One sponsor's assignment summary after a write.\n\nAttributes:\n    sponsor_id: The sponsor's key.\n    assigned_count: The number of children placed with the sponsor.\n    remaining: The free capacity; None when uncapped.",
+        "properties": {
+          "assigned_count": {
+            "default": 0,
+            "title": "Assigned Count",
+            "type": "integer"
+          },
+          "remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining"
+          },
+          "sponsor_id": {
+            "title": "Sponsor Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sponsor_id"
+        ],
+        "title": "ManualAssignmentSponsorSummary",
+        "type": "object"
+      },
+      "ManualDispatchRequest": {
+        "additionalProperties": false,
+        "description": "Dispatch a sponsor's info-sheet packets.\n\nAttributes:\n    sponsor_id: The sponsor whose packets went out.\n    expected_versions: The caller's expected row versions, keyed\n        ``sponsor:<id>``.",
+        "properties": {
+          "expected_versions": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Expected Versions",
+            "type": "object"
+          },
+          "sponsor_id": {
+            "title": "Sponsor Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sponsor_id"
+        ],
+        "title": "ManualDispatchRequest",
+        "type": "object"
+      },
+      "ManualHoldListPage": {
+        "additionalProperties": true,
+        "description": "One page of the active holds.\n\nAttributes:\n    items: The active holds.\n    total: The number of active holds.\n    page: The 1-based page number.\n    page_size: The page size.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ManualHoldResult"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "default": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "default": 25,
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "ManualHoldListPage",
+        "type": "object"
+      },
+      "ManualHoldReleaseRequest": {
+        "additionalProperties": false,
+        "description": "Release a family's hold.\n\nAttributes:\n    family_id: The family whose hold is released.",
+        "properties": {
+          "family_id": {
+            "title": "Family Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "family_id"
+        ],
+        "title": "ManualHoldReleaseRequest",
+        "type": "object"
+      },
+      "ManualHoldRequest": {
+        "additionalProperties": false,
+        "description": "Hold a family, with the reason.\n\nAttributes:\n    family_id: The family to hold.\n    note: Why the family is set aside.  Required, never blank.",
+        "properties": {
+          "family_id": {
+            "title": "Family Id",
+            "type": "integer"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          }
+        },
+        "required": [
+          "family_id",
+          "note"
+        ],
+        "title": "ManualHoldRequest",
+        "type": "object"
+      },
+      "ManualHoldResult": {
+        "additionalProperties": true,
+        "description": "One hold's state.\n\nAttributes:\n    family_id: The family's key.\n    held: Whether the family carries an active hold.\n    note: The hold's note.\n    created_by: Who set it aside.\n    created_at: When it was set aside.\n    released_at: When it was released.\n    released_by: Who released it.",
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "family_id": {
+            "title": "Family Id",
+            "type": "integer"
+          },
+          "held": {
+            "default": false,
+            "title": "Held",
+            "type": "boolean"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "released_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Released At"
+          },
+          "released_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Released By"
+          }
+        },
+        "required": [
+          "family_id"
+        ],
+        "title": "ManualHoldResult",
+        "type": "object"
+      },
+      "ManualMatchAutomaticRun": {
+        "additionalProperties": true,
+        "description": "The automatic matcher's state for the season.\n\nAttributes:\n    active: Whether a match job is queued or running.\n    job_id: The active job's id.\n    status: The active job's status.\n    started_at: When the active job started.",
+        "properties": {
+          "active": {
+            "default": false,
+            "title": "Active",
+            "type": "boolean"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "title": "ManualMatchAutomaticRun",
+        "type": "object"
+      },
+      "ManualMatchChildCard": {
+        "additionalProperties": true,
+        "description": "One child's overview line on a family card.\n\nAttributes:\n    zite_record_id: The child's key; the assignment grain.\n    angel_id: The child's angel letter.\n    first_name: The child's first name.\n    age_at_xmas: The child's age at Christmas.\n    gender: The child's gender.\n    special_needs: Whether the child has special needs.\n    need_1: First stated need.\n    need_2: Second stated need.\n    desire_1: First stated want.\n    desire_2: Second stated want.\n    interests: The child's interests.\n    other_notes: Free-text notes.\n    favorite_colors: The child's favourite colours.\n    sizes: The child's sizes, grouped for display.\n    status: The child's audit status.\n    assigned_sponsor_id: The child's sponsor, when placed.\n    assignment_source: \"auto\" or \"manual\".\n    generated_info_sheet: Whether a sheet already exists on disk.\n    row_version: The child's optimistic-concurrency version.\n    selectable: Whether the child may be assigned.\n    unselectable_reason: Why the child may not be assigned.",
+        "properties": {
+          "age_at_xmas": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age At Xmas"
+          },
+          "angel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Angel Id"
+          },
+          "assigned_sponsor_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assigned Sponsor Id"
+          },
+          "assignment_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignment Source"
+          },
+          "desire_1": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Desire 1"
+          },
+          "desire_2": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Desire 2"
+          },
+          "favorite_colors": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Favorite Colors"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "gender": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gender"
+          },
+          "generated_info_sheet": {
+            "default": false,
+            "title": "Generated Info Sheet",
+            "type": "boolean"
+          },
+          "interests": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interests"
+          },
+          "need_1": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need 1"
+          },
+          "need_2": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need 2"
+          },
+          "other_notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Other Notes"
+          },
+          "row_version": {
+            "default": 0,
+            "title": "Row Version",
+            "type": "integer"
+          },
+          "selectable": {
+            "default": true,
+            "title": "Selectable",
+            "type": "boolean"
+          },
+          "sizes": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Sizes",
+            "type": "object"
+          },
+          "special_needs": {
+            "default": false,
+            "title": "Special Needs",
+            "type": "boolean"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "unselectable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unselectable Reason"
+          },
+          "zite_record_id": {
+            "title": "Zite Record Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "zite_record_id"
+        ],
+        "title": "ManualMatchChildCard",
+        "type": "object"
+      },
+      "ManualMatchFamilyCard": {
+        "additionalProperties": true,
+        "description": "One family's card: the header plus its children.\n\nAttributes:\n    family_id: The family's key.\n    row_version: The family's optimistic-concurrency version.\n    first_name: The family's first name.\n    last_name: The family's last name.\n    primary_email: The family's email.\n    phone: The family's phone.\n    city: The family's city.\n    zip_code: The family's zip code.\n    state: The family's state.\n    gift_pickup_location: The family's pickup location label.\n    status: The family's audit status.\n    family_size: The number of non-ignored children.\n    assigned_count: The number of children with a sponsor.\n    assigned_sponsor_ids: The sponsors the family's children hold.\n    assignment_state: \"unassigned\", \"partial\", \"split\", \"assigned\".\n    children: The family's children.\n    hold: The family's active hold, if any.\n    warnings: Family-level advisories.",
+        "properties": {
+          "assigned_count": {
+            "default": 0,
+            "title": "Assigned Count",
+            "type": "integer"
+          },
+          "assigned_sponsor_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Assigned Sponsor Ids",
+            "type": "array"
+          },
+          "assignment_state": {
+            "default": "unassigned",
+            "title": "Assignment State",
+            "type": "string"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/ManualMatchChildCard"
+            },
+            "title": "Children",
+            "type": "array"
+          },
+          "city": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "City"
+          },
+          "family_id": {
+            "title": "Family Id",
+            "type": "integer"
+          },
+          "family_size": {
+            "default": 0,
+            "title": "Family Size",
+            "type": "integer"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "gift_pickup_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gift Pickup Location"
+          },
+          "hold": {
+            "$ref": "#/components/schemas/ManualMatchHold"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone"
+          },
+          "primary_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Primary Email"
+          },
+          "row_version": {
+            "default": 0,
+            "title": "Row Version",
+            "type": "integer"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          },
+          "zip_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Zip Code"
+          }
+        },
+        "required": [
+          "family_id"
+        ],
+        "title": "ManualMatchFamilyCard",
+        "type": "object"
+      },
+      "ManualMatchHold": {
+        "additionalProperties": true,
+        "description": "One family hold (manual matching).\n\nAttributes:\n    held: Whether the family carries an active hold.\n    note: Why the family was set aside; the reason, verbatim.\n    created_by: Who set it aside.\n    created_at: When it was set aside.",
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "held": {
+            "default": false,
+            "title": "Held",
+            "type": "boolean"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "title": "ManualMatchHold",
+        "type": "object"
+      },
+      "ManualMatchPoolPage": {
+        "additionalProperties": true,
+        "description": "One page of the manual-matching pool.\n\nAttributes:\n    items: The family cards.\n    total: The number of matching families.\n    page: The 1-based page number.\n    page_size: The page size.\n    automatic_run: The automatic matcher's state.",
+        "properties": {
+          "automatic_run": {
+            "$ref": "#/components/schemas/ManualMatchAutomaticRun"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ManualMatchFamilyCard"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "default": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "default": 25,
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "ManualMatchPoolPage",
+        "type": "object"
+      },
+      "ManualMatchSponsor": {
+        "additionalProperties": true,
+        "description": "One sponsor in the manual picker.\n\nAttributes:\n    sponsor_id: The sponsor's key.\n    row_version: The sponsor's optimistic-concurrency version.\n    display_name: The organization name, or the first and last name.\n    email: The sponsor's email.\n    phone: The sponsor's phone.\n    sponsor_type: \"Individual\", \"Organization\", \"Walmart\", ...\n    num_children: How many children the sponsor committed to.\n    assigned_count: How many children are placed with the sponsor.\n    remaining: The free capacity; None when uncapped.\n    age_preference: The sponsor's age preference label.\n    gender_preference: The sponsor's gender preference label.\n    dropoff_location: The sponsor's drop-off location label.\n    pref_age_min: The lowest preferred age.\n    pref_age_max: The highest preferred age.\n    status: The sponsor's audit status.\n    first_name: The sponsor contact's first name.\n    last_name: The sponsor contact's last name.\n    organization_name: The organization name, when there is one.\n    elevated_budget: The auditor's elevated-budget flag (the store\n        reads an unset flag as False).\n    physical_packet: The auditor's physical-packet flag (the store\n        reads an unset flag as False).\n    packets_dispatched: Whether the info-sheet packets were sent.\n    packets_dispatched_at: When the packets were dispatched (ISO 8601).",
+        "properties": {
+          "age_preference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age Preference"
+          },
+          "assigned_count": {
+            "default": 0,
+            "title": "Assigned Count",
+            "type": "integer"
+          },
+          "display_name": {
+            "default": "",
+            "title": "Display Name",
+            "type": "string"
+          },
+          "dropoff_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dropoff Location"
+          },
+          "elevated_budget": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elevated Budget"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "gender_preference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gender Preference"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "num_children": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Num Children"
+          },
+          "organization_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Name"
+          },
+          "packets_dispatched": {
+            "default": false,
+            "title": "Packets Dispatched",
+            "type": "boolean"
+          },
+          "packets_dispatched_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Packets Dispatched At"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone"
+          },
+          "physical_packet": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Physical Packet"
+          },
+          "pref_age_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pref Age Max"
+          },
+          "pref_age_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pref Age Min"
+          },
+          "remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining"
+          },
+          "row_version": {
+            "default": 0,
+            "title": "Row Version",
+            "type": "integer"
+          },
+          "sponsor_id": {
+            "title": "Sponsor Id",
+            "type": "integer"
+          },
+          "sponsor_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sponsor Type"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "required": [
+          "sponsor_id"
+        ],
+        "title": "ManualMatchSponsor",
+        "type": "object"
+      },
+      "ManualMatchSponsorPage": {
+        "additionalProperties": true,
+        "description": "One page of the manual sponsor picker.\n\nAttributes:\n    items: The sponsors.\n    total: The number of matching sponsors.\n    page: The 1-based page number.\n    page_size: The page size.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ManualMatchSponsor"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "default": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "default": 25,
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "title": "ManualMatchSponsorPage",
+        "type": "object"
+      },
+      "ManualReleaseRequest": {
+        "additionalProperties": false,
+        "description": "Release assignments.\n\nAttributes:\n    child_ids: Individual children to release.\n    family_ids: Families whose assigned children are all released.\n    expected_versions: The caller's expected row versions.\n    confirm: Required; releasing is destructive.\n    note: Free text recorded in the audit event.",
+        "properties": {
+          "child_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Child Ids",
+            "type": "array"
+          },
+          "confirm": {
+            "default": false,
+            "title": "Confirm",
+            "type": "boolean"
+          },
+          "expected_versions": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Expected Versions",
+            "type": "object"
+          },
+          "family_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Family Ids",
+            "type": "array"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "title": "ManualReleaseRequest",
+        "type": "object"
+      },
       "MeView": {
         "additionalProperties": true,
         "description": "The authenticated identity plus its CSRF token (\u00a78).",
@@ -1988,6 +3402,53 @@
           "season"
         ],
         "title": "Overview",
+        "type": "object"
+      },
+      "RunSettingsView": {
+        "additionalProperties": true,
+        "description": "One command's effective run settings.\n\nAttributes:\n    command: The command name.\n    run: The command's run flags.\n    weights: The matcher's tier weights; only for \"match\".\n    config_path: The configuration file the flags live in.\n    editable: Whether the caller may change them.\n    saved: True when the response follows a successful write.",
+        "properties": {
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "config_path": {
+            "default": "",
+            "title": "Config Path",
+            "type": "string"
+          },
+          "editable": {
+            "default": false,
+            "title": "Editable",
+            "type": "boolean"
+          },
+          "run": {
+            "additionalProperties": true,
+            "title": "Run",
+            "type": "object"
+          },
+          "saved": {
+            "default": false,
+            "title": "Saved",
+            "type": "boolean"
+          },
+          "weights": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weights"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "title": "RunSettingsView",
         "type": "object"
       },
       "SeasonView": {
@@ -2689,6 +4150,102 @@
         "summary": "Readyz",
         "tags": [
           "health"
+        ]
+      }
+    },
+    "/api/v1/runs/{command}/settings": {
+      "get": {
+        "description": "Return one command's run settings from the running configuration.\n\nArgs:\n    command: ``match``, ``generate``, or ``screen``.\n    request: The current request.\n    user: The authenticated identity (drives ``editable``).\n\nReturns:\n    The command's effective run settings.",
+        "operationId": "get_run_settings_api_v1_runs__command__settings_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "command",
+            "required": true,
+            "schema": {
+              "title": "Command",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSettingsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Run Settings",
+        "tags": [
+          "runs"
+        ]
+      },
+      "patch": {
+        "description": "Persist one command's run flags to the configuration file.\n\nArgs:\n    command: ``match``, ``generate``, or ``screen``.\n    body: The command's run flags.\n    request: The current request.\n    user: The authenticated editor.\n\nReturns:\n    The saved run settings.\n\nRaises:\n    ApiError: 404 for an unknown command; 422 when the body or the\n        resulting tree violates the contract; 500 when the file\n        cannot be read or written.",
+        "operationId": "patch_run_settings_api_v1_runs__command__settings_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "command",
+            "required": true,
+            "schema": {
+              "title": "Command",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSettingsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Run Settings",
+        "tags": [
+          "runs"
         ]
       }
     },
@@ -4687,6 +6244,835 @@
         "summary": "Enqueue",
         "tags": [
           "jobs"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/manual-match/assignments": {
+      "get": {
+        "description": "List the current assignments, derived from the children.\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: The 1-based page number.\n    page_size: The page size (1-200).\n    sponsor_id: Only this sponsor's children.\n    source: Only \"auto\" or \"manual\" assignments.\n    family_id: Only this family's children.\n\nReturns:\n    The assignment list page.",
+        "operationId": "get_assignments_api_v1_seasons__season__manual_match_assignments_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sponsor_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sponsor Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "manual"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
+            }
+          },
+          {
+            "in": "query",
+            "name": "family_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Family Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualAssignmentListPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Assignments",
+        "tags": [
+          "manual-match"
+        ]
+      },
+      "post": {
+        "description": "Assign the selection to a sponsor (coordinator/admin; confirmed).\n\nArgs:\n    body: The assign request.\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The outcome, or a 412 body with the fresh row.\n\nRaises:\n    ApiError: The mapped 404/409/412/422 refusal.",
+        "operationId": "post_assignments_api_v1_seasons__season__manual_match_assignments_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualAssignmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualAssignmentResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Assignments",
+        "tags": [
+          "manual-match"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/manual-match/dispatch": {
+      "post": {
+        "description": "Record a sponsor's packet dispatch (coordinator/admin).\n\nArgs:\n    body: The dispatch request.\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The sponsor's fresh row, or a 412 body with the fresh row.\n\nRaises:\n    ApiError: The mapped 404/409/412/422 refusal.",
+        "operationId": "post_dispatch_api_v1_seasons__season__manual_match_dispatch_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualDispatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualMatchSponsor"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Dispatch",
+        "tags": [
+          "manual-match"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/manual-match/holds": {
+      "get": {
+        "description": "List the active family holds, with their notes.\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: The 1-based page number.\n    page_size: The page size (1-200).\n\nReturns:\n    The hold page.",
+        "operationId": "get_holds_api_v1_seasons__season__manual_match_holds_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualHoldListPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Holds",
+        "tags": [
+          "manual-match"
+        ]
+      },
+      "post": {
+        "description": "Hold a family, with the reason (coordinator/admin).\n\nArgs:\n    body: The hold request (the note is required).\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The new hold.\n\nRaises:\n    ApiError: The mapped 404/409/422 refusal.",
+        "operationId": "post_hold_api_v1_seasons__season__manual_match_holds_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualHoldRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualHoldResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Hold",
+        "tags": [
+          "manual-match"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/manual-match/holds/release": {
+      "post": {
+        "description": "Release a family's hold (coordinator/admin; idempotent).\n\nArgs:\n    body: The release request.\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The released hold, or ``held=False`` when there was none.",
+        "operationId": "post_release_hold_api_v1_seasons__season__manual_match_holds_release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualHoldReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualHoldResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Release Hold",
+        "tags": [
+          "manual-match"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/manual-match/pool": {
+      "get": {
+        "description": "List the filtered family cards of the manual pool.\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: The 1-based page number.\n    page_size: The page size (1-200).\n    q: Free text over family name, email, city, zip, child name.\n    assignment: The family assignment state filter.\n    child_gender: The child gender filter.\n    age_min: The lowest child age at Christmas.\n    age_max: The highest child age at Christmas.\n    special_needs: Whether a child has stated special needs.\n    location: The canonical pickup-location bucket.\n    family_size_min: The smallest non-ignored family.\n    family_size_max: The largest non-ignored family.\n    child_status: The child audit-lifecycle filter.\n    all_audited: Keep only families whose every live child is audited.\n    info_sheet: Whether a child's info sheet is missing or generated.\n    hold: Whether the family carries an active hold.\n    sponsor_id: Order by fit for this sponsor; drop forbidden families.\n\nReturns:\n    The pool page.\n\nRaises:\n    ApiError: 404 for an unknown sponsor.",
+        "operationId": "get_pool_api_v1_seasons__season__manual_match_pool_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "assignment",
+            "required": false,
+            "schema": {
+              "default": "unassigned",
+              "enum": [
+                "unassigned",
+                "partial",
+                "split",
+                "assigned",
+                "any"
+              ],
+              "title": "Assignment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "child_gender",
+            "required": false,
+            "schema": {
+              "default": "any",
+              "enum": [
+                "any",
+                "Male",
+                "Female",
+                "Non-binary"
+              ],
+              "title": "Child Gender",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "age_min",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Age Min"
+            }
+          },
+          {
+            "in": "query",
+            "name": "age_max",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Age Max"
+            }
+          },
+          {
+            "in": "query",
+            "name": "special_needs",
+            "required": false,
+            "schema": {
+              "default": "any",
+              "enum": [
+                "any",
+                "yes",
+                "no"
+              ],
+              "title": "Special Needs",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "location",
+            "required": false,
+            "schema": {
+              "default": "any",
+              "enum": [
+                "any",
+                "hancock",
+                "calumet"
+              ],
+              "title": "Location",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "family_size_min",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Family Size Min"
+            }
+          },
+          {
+            "in": "query",
+            "name": "family_size_max",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Family Size Max"
+            }
+          },
+          {
+            "in": "query",
+            "name": "child_status",
+            "required": false,
+            "schema": {
+              "default": "any",
+              "enum": [
+                "any",
+                "audited",
+                "in_progress",
+                "needs_clarification",
+                "new"
+              ],
+              "title": "Child Status",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_audited",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "All Audited",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "info_sheet",
+            "required": false,
+            "schema": {
+              "default": "any",
+              "enum": [
+                "any",
+                "missing",
+                "generated"
+              ],
+              "title": "Info Sheet",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "hold",
+            "required": false,
+            "schema": {
+              "default": "not_held",
+              "enum": [
+                "any",
+                "held",
+                "not_held"
+              ],
+              "title": "Hold",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sponsor_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sponsor Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualMatchPoolPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Pool",
+        "tags": [
+          "manual-match"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/manual-match/release": {
+      "post": {
+        "description": "Release assignments (coordinator/admin; confirmed).\n\nArgs:\n    body: The release request.\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The outcome, or a 412 body with the fresh row.\n\nRaises:\n    ApiError: 422 without confirmation; mapped refusals otherwise.",
+        "operationId": "post_release_api_v1_seasons__season__manual_match_release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualAssignmentResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Release",
+        "tags": [
+          "manual-match"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/manual-match/sponsors": {
+      "get": {
+        "description": "List the sponsor picker with capacity.\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: The 1-based page number.\n    page_size: The page size (1-200).\n    q: Free text over name, organization, and email.\n    affiliation: The exact sponsor type filter.\n    has_capacity: True for sponsors with room, False for full ones.\n\nReturns:\n    The sponsor page.",
+        "operationId": "get_sponsors_api_v1_seasons__season__manual_match_sponsors_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "affiliation",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Affiliation"
+            }
+          },
+          {
+            "in": "query",
+            "name": "has_capacity",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Has Capacity"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualMatchSponsorPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Sponsors",
+        "tags": [
+          "manual-match"
         ]
       }
     },

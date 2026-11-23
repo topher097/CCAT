@@ -530,6 +530,39 @@ def test_match_wrapper_reports_unmatched_and_report_rows(
     assert result.report_rows >= 1
 
 
+def test_match_wrapper_split_family_is_not_unmatched(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A family whose children span two sponsors is split, not unmatched."""
+    from ccat import match as match_module
+    from test_match import (
+        _seed_match_workbook,
+        child_row,
+        family_row,
+        sponsor_row,
+    )
+
+    _seed_match_workbook(
+        cfg,
+        [sponsor_row(1, num_children=1), sponsor_row(2, num_children=1)],
+        [family_row(1), family_row(2)],
+        [
+            {**child_row("1A", 1, 8), "assigned_sponsor_id": 1},
+            {**child_row("1B", 1, 8), "assigned_sponsor_id": 2},
+            child_row("2A", 2, 8),
+        ],
+    )
+    monkeypatch.setattr(match_module, "run", lambda *a, **k: None)
+
+    result = pipeline.match(cfg)
+
+    assert result.matched_families == 0
+    # Family 1 has placed children, so it is not "unassigned"; family 2
+    # has none.
+    assert result.unmatched_family_ids == [2]
+    assert result.split_family_ids == [1]
+
+
 def test_screen_wrapper_reports_targets_and_reconcile_counts(
     screen_cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
