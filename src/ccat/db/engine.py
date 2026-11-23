@@ -14,6 +14,9 @@ from typing import Any
 
 from alembic import command
 from alembic.config import Config as AlembicConfig
+from alembic.util.exc import CommandError
+
+from ccat.db.errors import MigrationStateError
 from sqlalchemy import (
     Engine,
     create_engine as _sa_create_engine,
@@ -140,8 +143,23 @@ def run_migrations(url: str) -> None:
 
     Args:
         url: Sync SQLAlchemy URL; async URLs are converted.
+
+    Raises:
+        MigrationStateError: When the database is at a revision this
+            build does not contain.
     """
     config = AlembicConfig()
     config.set_main_option("script_location", str(ALEMBIC_DIR))
     config.set_main_option("sqlalchemy.url", sync_url_from(url))
-    command.upgrade(config, "head")
+    try:
+        command.upgrade(config, "head")
+    except CommandError as error:
+        message = str(error)
+        if "Can't locate revision" in message or "No such revision" in message:
+            raise MigrationStateError(
+                f"the database is at a revision this build does not contain"
+                f" ({message}); the build and the database are out of step."
+                " Deploy the branch that owns the migration, or stamp the"
+                " database to this build's head"
+            ) from error
+        raise

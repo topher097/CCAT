@@ -779,6 +779,32 @@ def _copy_atomic(source: Path, destination: Path) -> None:
     os.replace(temporary, destination)
 
 
+def _require_writable_packet_dir(directory: Path) -> None:
+    """Make sure the packet directory can be written, or say why not.
+
+    A packet directory left behind by a container that ran as another
+    user cannot be written, and the failure would otherwise surface as a
+    bare ``PermissionError`` deep in the build.
+
+    Args:
+        directory: The packet directory.
+
+    Raises:
+        SponsorPacketError: When the directory cannot be written.
+    """
+    probe = directory / f".write-probe-{os.getpid()}"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe.touch()
+        probe.unlink()
+    except OSError as error:
+        raise SponsorPacketError(
+            f"the packet directory {directory} is not writable by this"
+            " process; the artifacts volume must be owned by the runtime"
+            " user"
+        ) from error
+
+
 def _packet_manifest(
     cfg: "Config",
     packet: "dict[str, Any]",
@@ -910,10 +936,10 @@ def _build_packets(
             )
             skipped += 1
             continue
-        packet_dir.mkdir(parents=True, exist_ok=True)
+        _require_writable_packet_dir(packet_dir)
         if html_path.exists():
             manual = packet_dir / f"{html_path.stem}.manual.html"
-            shutil.copy2(html_path, manual)
+            _write_atomic(manual, html_path.read_bytes())
             files.append(
                 (
                     manual,

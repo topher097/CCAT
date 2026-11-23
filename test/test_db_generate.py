@@ -7,6 +7,7 @@ through the module's convert seam, faked with pypdf-written tiny PDFs
 """
 
 import asyncio
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -792,6 +793,45 @@ def test_packet_artifacts_registered(
         "sponsor_packet",
         "sponsor_instructions",
     }
+
+
+def test_packet_backup_replaces_a_read_only_previous_copy(
+    tmp_path: Path,
+    packets_cfg: Any,
+    fake_convert: list[str],
+) -> None:
+    """A read-only backup from an earlier run does not break the next one."""
+    cfg = packets_cfg(_prepare(tmp_path))
+    _full_seed(cfg, tmp_path)
+    _run(cfg, {})
+    packet_dir = tmp_path / "artifacts" / "sponsor_packets" / "7"
+    manual = packet_dir / "sponsor_packet_7.manual.html"
+    manual.write_text("<html>previous draft</html>")
+    manual.chmod(0o444)
+    result = _run(cfg, {"overwrite": True})
+    assert result.packets_built == 1
+    assert manual.is_file()
+    assert "previous draft" not in manual.read_text()
+
+
+def test_packet_build_reports_an_unwritable_packet_directory(
+    tmp_path: Path,
+    packets_cfg: Any,
+    fake_convert: list[str],
+) -> None:
+    """An unwritable packet directory is named, not a bare PermissionError."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores the directory mode")
+    cfg = packets_cfg(_prepare(tmp_path))
+    _full_seed(cfg, tmp_path)
+    _run(cfg, {})
+    packet_dir = tmp_path / "artifacts" / "sponsor_packets" / "7"
+    packet_dir.chmod(0o555)
+    try:
+        with pytest.raises(SponsorPacketError, match="not writable"):
+            _run(cfg, {"overwrite": True})
+    finally:
+        packet_dir.chmod(0o755)
 
 
 def test_packet_split_family_two_sponsors(
