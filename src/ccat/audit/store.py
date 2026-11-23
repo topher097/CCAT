@@ -76,6 +76,11 @@ CHILD_ASSIGNMENT_COLUMNS = (
 #: imports.
 OPTIONAL_FINAL_COLUMNS: dict[str, tuple[str, ...]] = {
     "child": CHILD_ASSIGNMENT_COLUMNS,
+    "sponsor": (
+        "elevated_budget",
+        "physical_packet",
+        "packets_dispatched_at",
+    ),
 }
 
 #: Pre-filled clarification note for orphaned children (§8.7).
@@ -332,6 +337,9 @@ FINAL_SPONSOR_COLUMNS: tuple[str, ...] = (
     "pref_age_max",
     "assigned_angel_ids",
     "num_angels_assigned",
+    "elevated_budget",
+    "physical_packet",
+    "packets_dispatched_at",
     *CONTROL_COLUMNS,
 )
 
@@ -357,6 +365,9 @@ FINAL_SPONSOR_SCHEMA: dict[str, PolarsDataType] = {
     "pref_age_max": pl.Int64,
     "assigned_angel_ids": pl.String,
     "num_angels_assigned": pl.Int64,
+    "elevated_budget": pl.Boolean,
+    "physical_packet": pl.Boolean,
+    "packets_dispatched_at": pl.String,
     "status": pl.String,
     "ignore": pl.Boolean,
     "clarification_notes": pl.String,
@@ -381,7 +392,11 @@ SPONSOR_EDITABLE_COLUMNS = (
     "age_preference",
     "gender_preference",
     "dropoff_location",
+    "elevated_budget",
+    "physical_packet",
 )
+#: Owned by the manual matcher's dispatch; audit saves preserve it.
+SPONSOR_DISPATCH_COLUMNS = ("packets_dispatched_at",)
 SPONSOR_COMPUTED_COLUMNS = ("pref_age_min", "pref_age_max")
 SPONSOR_ASSIGNMENT_COLUMNS = ("assigned_angel_ids", "num_angels_assigned")
 SPONSOR_SAVE_FIELDS = (
@@ -1818,7 +1833,11 @@ def _module_owned_columns(entity: str) -> tuple[str, ...]:
         )
     if entity == "family":
         return (*FAMILY_ASSIGNMENT_COLUMNS, "potential_duplicate")
-    return (*SPONSOR_ASSIGNMENT_COLUMNS, "potential_duplicate")
+    return (
+        *SPONSOR_ASSIGNMENT_COLUMNS,
+        *SPONSOR_DISPATCH_COLUMNS,
+        "potential_duplicate",
+    )
 
 
 def _seed_row_from_baseline(

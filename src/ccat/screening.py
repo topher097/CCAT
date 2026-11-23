@@ -852,6 +852,11 @@ def dense_final_row(
     equals the baseline, other fields keep the existing adj values, and
     the existing controls and module-owned columns are preserved.
 
+    ``config.ai_screening.overwrite_new`` lifts the human-edit
+    protection for children whose status is still ``new``: the model's
+    correction then replaces whatever the row holds.  A child that has
+    moved past ``new`` keeps its human edits either way.
+
     Args:
         child: One prepared child row as a dict.
         corrections: The validated model response (sparse: non-null
@@ -883,12 +888,19 @@ def dense_final_row(
             "potential_duplicate",
         ):
             row[column] = existing.get(column)
+    overwrite_new = (
+        cfg.ai_screening.overwrite_new
+        and existing is not None
+        and existing.get("status") == STATUS_NEW
+    )
     for column in CHILD_EDITABLE_COLUMNS:
         value = corrections.get(column)
         if value is None:
             continue
-        if existing is not None and not _values_equal(
-            existing.get(column), child.get(column)
+        if (
+            existing is not None
+            and not overwrite_new
+            and not _values_equal(existing.get(column), child.get(column))
         ):
             # The human already changed this field; leave it alone (§7.3).
             continue

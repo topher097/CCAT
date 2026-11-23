@@ -5,6 +5,10 @@ button with a pop-up menu.  The menu is seeded from the configuration
 file, and a changed flag is written back to it, so the flags live in
 the configuration file next to the command's other settings.
 
+The screening command's AI flag follows the same rule: the ``/screen``
+page reads it from the configuration file and writes a change back to
+it, so the flag is one global setting rather than a per-run option.
+
 The route owns the command-to-section mapping, so it cannot be talked
 into writing an arbitrary part of the configuration tree.
 """
@@ -28,10 +32,12 @@ from ccat.api.dto import (
     GenerateRunSettings,
     MatchRunSettings,
     RunSettingsView,
+    ScreenRunSettings,
 )
 from ccat.api.errors import ApiError
 from ccat.api.routes.config import _config_path
 from ccat.config import (
+    AIScreeningSpec,
     ConfigError,
     GenerateRunSpec,
     MatchRunSpec,
@@ -60,12 +66,16 @@ class RunSettingsSpec:
         payload: The request DTO; it rejects keys outside the flags.
         per_run: Fields accepted by the job options but never written
             to the configuration file.
+        leaf: When set, the write replaces this one key inside
+            ``section`` instead of the whole section; the payload's
+            single value is written to it.
     """
 
     section: tuple[str, ...]
     model: type[BaseModel]
     payload: type[BaseModel]
     per_run: tuple[str, ...] = ()
+    leaf: str | None = None
 
 
 #: The backend's command-to-section mapping; never derived from input.
@@ -80,6 +90,12 @@ RUN_SETTINGS: dict[str, RunSettingsSpec] = {
         model=GenerateRunSpec,
         payload=GenerateRunSettings,
         per_run=("sponsor",),
+    ),
+    "screen": RunSettingsSpec(
+        section=("ai_screening",),
+        model=AIScreeningSpec,
+        payload=ScreenRunSettings,
+        leaf="overwrite_new",
     ),
 }
 
@@ -158,10 +174,17 @@ def _view(
             key: getattr(cfg.matchmaking, key)
             for key in ("location_weight", "age_weight", "gender_weight")
         }
-    section = spec.model.model_validate(_section(cfg, spec.section))
+    if spec.leaf is not None:
+        # A leaf spec owns one flag; the view carries that flag alone.
+        run: dict[str, Any] = {
+            spec.leaf: getattr(_section(cfg, spec.section), spec.leaf)
+        }
+    else:
+        section = spec.model.model_validate(_section(cfg, spec.section))
+        run = section.model_dump()
     return RunSettingsView(
         command=command,
-        run=section.model_dump(),
+        run=run,
         weights=weights,
         config_path=str(path),
         editable=editable,
@@ -258,7 +281,7 @@ async def get_run_settings(
     """Return one command's run settings from the running configuration.
 
     Args:
-        command: ``match`` or ``generate``.
+        command: ``match``, ``generate``, or ``screen``.
         request: The current request.
         user: The authenticated identity (drives ``editable``).
 
@@ -290,7 +313,7 @@ async def patch_run_settings(
     """Persist one command's run flags to the configuration file.
 
     Args:
-        command: ``match`` or ``generate``.
+        command: ``match``, ``generate``, or ``screen``.
         body: The command's run flags.
         request: The current request.
         user: The authenticated editor.
@@ -324,7 +347,18 @@ async def patch_run_settings(
         values.pop(field, None)
     path = _config_path(request)
     tree, _dropped = _effective_tree(path, request.app.state.cfg)
-    before = _replace_section(tree, spec.section, values)
+    if spec.leaf is not None:
+        # A leaf spec replaces one key inside its section; the rest of
+        # the section (model, prompt, other flags) stays as it is.
+        section = tree
+        for key in spec.section:
+            section = section[key]
+        before = section.get(spec.leaf)
+        section[spec.leaf] = values[spec.leaf]
+        after: Any = {spec.leaf: values[spec.leaf]}
+    else:
+        before = _replace_section(tree, spec.section, values)
+        after = values
     cfg = _save_tree(path, tree)
     request.app.state.cfg = cfg
     await record_event(
@@ -333,7 +367,7 @@ async def patch_run_settings(
         user_id=user.id,
         object_type="config",
         object_id=path.name,
-        details={"command": command, "before": before, "after": values},
+        details={"command": command, "before": before, "after": after},
     )
     return _view(command, spec, cfg, path, True, saved=True)
 

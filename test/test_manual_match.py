@@ -495,6 +495,45 @@ async def test_pool_card_payload_and_sponsor_fit(
 # ---------------------------------------------------------------------------
 
 
+async def test_pool_all_audited_and_info_sheet_filters(
+    app: Any, client: Client
+) -> None:
+    """all_audited is family-level; info_sheet is existential."""
+    await _seed(
+        app,
+        children=[
+            child("1A", family_id=1, generated_info_sheet=True),
+            child("1B", family_id=1, generated_info_sheet=True),
+            child("2A", family_id=2, generated_info_sheet=True),
+            child("2B", family_id=2, status="in_progress"),
+            child("3A", family_id=3, status="new"),
+            child("4A", family_id=4, gender="Female"),
+        ],
+        families=[family(1), family(2), family(3), family(4)],
+        sponsors=[sponsor(1)],
+    )
+
+    async def ids(**params: Any) -> list[int]:
+        response = await client.client.get(
+            f"{BASE}/pool", params={"assignment": "any", **params}
+        )
+        assert response.status_code == 200, response.text
+        return [item["family_id"] for item in response.json()["items"]]
+
+    assert await ids() == [1, 2, 3, 4]
+    assert await ids(all_audited="false") == [1, 2, 3, 4]
+    assert await ids(all_audited="true") == [1, 4]
+    assert await ids(info_sheet="any") == [1, 2, 3, 4]
+    assert await ids(info_sheet="missing") == [2, 3, 4]
+    assert await ids(info_sheet="generated") == [1, 2]
+    assert await ids(all_audited="true", info_sheet="missing") == [4]
+    assert await ids(all_audited="true", child_gender="Female") == [4]
+    response = await client.client.get(
+        f"{BASE}/pool", params={"info_sheet": "bogus"}
+    )
+    assert response.status_code == 422
+
+
 async def test_assign_whole_family_writes_summaries_and_audit(
     app: Any, client: Client
 ) -> None:
@@ -929,6 +968,44 @@ async def test_sponsor_picker_and_assignment_list(
     ]
 
 
+async def test_assignment_list_carries_the_angel_details(
+    app: Any, client: Client
+) -> None:
+    """The list carries each angel's name, age, needs, wishes and drop-off."""
+    await _seed(
+        app,
+        children=[
+            child(
+                "1A",
+                family_id=1,
+                assigned_sponsor_id=1,
+                first_name="Alice",
+                age_at_xmas=10,
+                need_1="coat",
+                need_2="boots",
+                desire_1="lego",
+                desire_2="puzzle",
+            ),
+            child("2A", family_id=99, assigned_sponsor_id=1),
+        ],
+        families=[family(1, gift_pickup_location="Calumet")],
+        sponsors=[sponsor(1)],
+    )
+    response = await client.client.get(
+        f"{BASE}/assignments", params={"sponsor_id": 1}
+    )
+    assert response.status_code == 200, response.text
+    items = {item["zite_record_id"]: item for item in response.json()["items"]}
+    assert items["1A"]["first_name"] == "Alice"
+    assert items["1A"]["age_at_xmas"] == 10
+    assert items["1A"]["need_1"] == "coat"
+    assert items["1A"]["need_2"] == "boots"
+    assert items["1A"]["desire_1"] == "lego"
+    assert items["1A"]["desire_2"] == "puzzle"
+    assert items["1A"]["dropoff_location"] == "Calumet"
+    assert items["2A"]["dropoff_location"] is None
+
+
 async def test_release_requires_confirm(app: Any, client: Client) -> None:
     """Releasing without confirm is a 422 and writes nothing."""
     await _seed(
@@ -1191,3 +1268,230 @@ async def test_hold_release_lands_with_the_assignment(
     assert [event.action for event in await _manual_events(app)] == [
         "manual_assignment"
     ]
+
+
+# ---------------------------------------------------------------------------
+# Sponsor flags and packet dispatch.
+# ---------------------------------------------------------------------------
+
+DISPATCHED_AT = "2026-11-20T12:00:00+00:00"
+
+
+async def _dispatch(
+    app: Any, client: Client, sponsor_id: int, versions: dict | None = None
+) -> Any:
+    """POST one dispatch with live (or the given) expected versions."""
+    if versions is None:
+        versions = {
+            f"sponsor:{sponsor_id}": (
+                await _store(app, "sponsor", "sponsor_id", sponsor_id)
+            )["_row_version"]
+        }
+    return await client.client.post(
+        f"{BASE}/dispatch",
+        json={"sponsor_id": sponsor_id, "expected_versions": versions},
+        headers=client.headers(),
+    )
+
+
+async def test_sponsors_expose_flags_and_dispatch_fields(
+    app: Any, client: Client
+) -> None:
+    """The picker carries the name parts, flags and dispatch state."""
+    await _seed(
+        app,
+        children=[],
+        families=[],
+        sponsors=[
+            sponsor(
+                1,
+                organization_name="Acme",
+                elevated_budget=True,
+                physical_packet=False,
+            ),
+            sponsor(2, packets_dispatched_at=DISPATCHED_AT),
+        ],
+    )
+    response = await client.client.get(f"{BASE}/sponsors")
+    assert response.status_code == 200, response.text
+    items = {item["sponsor_id"]: item for item in response.json()["items"]}
+    assert items[1]["display_name"] == "Acme"
+    assert items[1]["first_name"] == "Mary"
+    assert items[1]["last_name"] == "Sponsor1"
+    assert items[1]["organization_name"] == "Acme"
+    assert items[1]["elevated_budget"] is True
+    assert items[1]["physical_packet"] is False
+    assert items[1]["packets_dispatched"] is False
+    assert items[1]["packets_dispatched_at"] is None
+    assert items[2]["organization_name"] is None
+    # The store coerces every boolean column, so "undecided" reads False.
+    assert items[2]["elevated_budget"] is False
+    assert items[2]["physical_packet"] is False
+    assert items[2]["packets_dispatched"] is True
+    assert items[2]["packets_dispatched_at"] == DISPATCHED_AT
+
+
+async def test_audit_patch_sets_sponsor_flags(app: Any, client: Client) -> None:
+    """An audit save writes the two flags and keeps the dispatch stamp."""
+    await _seed(
+        app,
+        children=[],
+        families=[],
+        sponsors=[
+            sponsor(1, status="new", packets_dispatched_at=DISPATCHED_AT)
+        ],
+    )
+    version = (await _store(app, "sponsor", "sponsor_id", 1))["_row_version"]
+    response = await client.client.patch(
+        "/api/v1/seasons/2026/sponsors/1",
+        json={"elevated_budget": True, "physical_packet": False},
+        headers=client.headers() | {"If-Match": str(version)},
+    )
+    assert response.status_code == 200, response.text
+    stored = await _store(app, "sponsor", "sponsor_id", 1)
+    assert stored["elevated_budget"] is True
+    assert stored["physical_packet"] is False
+    assert stored["packets_dispatched_at"] == DISPATCHED_AT
+    assert stored["_row_version"] == version + 1
+
+
+async def test_dispatch_success(app: Any, client: Client) -> None:
+    """A full sponsor dispatches: stamp, version bump, event, fresh DTO."""
+    await _seed(
+        app,
+        children=[child("1A", family_id=1, assigned_sponsor_id=1)],
+        families=[family(1)],
+        sponsors=[sponsor(1, num_children=1)],
+    )
+    before = await _store(app, "sponsor", "sponsor_id", 1)
+    response = await _dispatch(app, client, 1)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["sponsor_id"] == 1
+    assert body["packets_dispatched"] is True
+    assert body["packets_dispatched_at"]
+    assert body["row_version"] == before["_row_version"] + 1
+    assert body["assigned_count"] == 1
+    stored = await _store(app, "sponsor", "sponsor_id", 1)
+    assert stored["packets_dispatched_at"] == body["packets_dispatched_at"]
+    assert stored["_row_version"] == before["_row_version"] + 1
+    events = await _manual_events(app)
+    assert [event.action for event in events] == ["manual_dispatch"]
+    assert events[0].object_type == "sponsor"
+    assert events[0].object_id == "1"
+    assert (events[0].details or {})["sponsor_id"] == 1
+
+
+async def test_dispatch_refusals(app: Any, client: Client) -> None:
+    """Unfilled, uncapped, already-dispatched, unknown and ignored refuse."""
+    await _seed(
+        app,
+        children=[
+            child("1A", family_id=1, assigned_sponsor_id=1),
+            child("2A", family_id=2, assigned_sponsor_id=2),
+            child("3A", family_id=3, assigned_sponsor_id=3),
+        ],
+        families=[family(1), family(2), family(3)],
+        sponsors=[
+            sponsor(1, num_children=2),
+            sponsor(2, num_children=None),
+            sponsor(3, num_children=1, packets_dispatched_at=DISPATCHED_AT),
+            sponsor(4, num_children=1, ignore=True, status="ignored"),
+        ],
+    )
+    not_full = await _dispatch(app, client, 1)
+    assert not_full.status_code == 409
+    assert not_full.json()["detail"]["code"] == "conflict"
+    assert "slots must be filled" in not_full.json()["detail"]["message"]
+    uncapped = await _dispatch(app, client, 2)
+    assert uncapped.status_code == 409
+    assert "slots must be filled" in uncapped.json()["detail"]["message"]
+    again = await _dispatch(app, client, 3)
+    assert again.status_code == 409
+    assert "already dispatched" in again.json()["detail"]["message"]
+    ignored = await _dispatch(app, client, 4)
+    assert ignored.status_code == 409
+    unknown = await _dispatch(app, client, 99, {"sponsor:99": 1})
+    assert unknown.status_code == 404
+    assert await _manual_events(app) == []
+
+
+async def test_dispatch_match_running_and_stale(
+    app: Any, client: Client
+) -> None:
+    """A running match is 409; a stale sponsor version is 412."""
+    await _seed(
+        app,
+        children=[child("1A", family_id=1, assigned_sponsor_id=1)],
+        families=[family(1)],
+        sponsors=[sponsor(1, num_children=1)],
+    )
+    version = (await _store(app, "sponsor", "sponsor_id", 1))["_row_version"]
+    stale = await _dispatch(app, client, 1, {"sponsor:1": version + 7})
+    assert stale.status_code == 412
+    assert stale.json()["detail"]["code"] == "stale_version"
+    missing = await _dispatch(app, client, 1, {})
+    assert missing.status_code == 422
+
+    await _active_match_job(app)
+    running = await _dispatch(app, client, 1, {"sponsor:1": version})
+    assert running.status_code == 409
+    assert running.json()["detail"]["code"] == "match_running"
+    stored = await _store(app, "sponsor", "sponsor_id", 1)
+    assert stored["packets_dispatched_at"] is None
+
+
+async def test_dispatched_sponsor_freezes_assign_and_release(
+    app: Any, client: Client
+) -> None:
+    """Assign to, move from, or release from a dispatched sponsor is 409."""
+    await _seed(
+        app,
+        children=[
+            child("1A", family_id=1, assigned_sponsor_id=1),
+            child("2A", family_id=2),
+        ],
+        families=[family(1), family(2)],
+        sponsors=[
+            sponsor(1, num_children=1, packets_dispatched_at=DISPATCHED_AT),
+            sponsor(2),
+        ],
+    )
+    to_dispatched = await client.client.post(
+        f"{BASE}/assignments",
+        json={
+            "sponsor_id": 1,
+            "child_ids": ["2A"],
+            "expected_versions": await _versions(app, ["2A"], 1),
+        },
+        headers=client.headers(),
+    )
+    assert to_dispatched.status_code == 409
+    detail = to_dispatched.json()["detail"]
+    assert detail["code"] == "packets_dispatched"
+    assert detail["sponsor_id"] == 1
+
+    moved_away = await client.client.post(
+        f"{BASE}/assignments",
+        json={
+            "sponsor_id": 2,
+            "child_ids": ["1A"],
+            "confirm": True,
+            "expected_versions": await _versions(app, ["1A"], 2),
+        },
+        headers=client.headers(),
+    )
+    assert moved_away.status_code == 409
+    assert moved_away.json()["detail"]["code"] == "packets_dispatched"
+    assert moved_away.json()["detail"]["sponsor_id"] == 1
+
+    released = await client.client.post(
+        f"{BASE}/release",
+        json={"child_ids": ["1A"], "confirm": True},
+        headers=client.headers(),
+    )
+    assert released.status_code == 409
+    assert released.json()["detail"]["code"] == "packets_dispatched"
+    stored = await _store(app, "child", "zite_record_id", "1A")
+    assert stored["assigned_sponsor_id"] == 1
+    assert await _manual_events(app) == []

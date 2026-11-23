@@ -309,6 +309,84 @@ async def test_run_settings_patch_persists_only_the_section(
     assert setup.app.state.cfg.generate.run.max_workers == 2
 
 
+async def test_screen_run_settings_get_returns_the_ai_flag(
+    setup: Setup,
+) -> None:
+    """GET returns the global AI screening flag and the editable flag.
+
+    Args:
+        setup: The migrated app fixture.
+    """
+    client = Client(setup.app)
+    await client.login("lmboswell")
+    try:
+        response = await client.client.get("/api/v1/runs/screen/settings")
+    finally:
+        await client.close()
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["command"] == "screen"
+    assert body["run"] == {"overwrite_new": False}
+    assert body["editable"] is True
+
+
+async def test_screen_run_settings_patch_writes_only_the_flag(
+    setup: Setup,
+) -> None:
+    """A coordinator's PATCH writes the flag and keeps the rest of the section.
+
+    Args:
+        setup: The migrated app fixture.
+    """
+    client = Client(setup.app)
+    await client.login("lmboswell")
+    try:
+        response = await client.client.patch(
+            "/api/v1/runs/screen/settings",
+            json={"overwrite_new": True},
+            headers=client.headers(),
+        )
+    finally:
+        await client.close()
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["saved"] is True
+    assert body["run"] == {"overwrite_new": True}
+    on_disk = json.loads(setup.config_file.read_text())
+    assert on_disk["ai_screening"]["overwrite_new"] is True
+    # The rest of the section survives the write.
+    assert on_disk["ai_screening"]["model"] == setup.cfg.ai_screening.model
+    assert (
+        on_disk["ai_screening"]["system_prompt"]
+        == setup.cfg.ai_screening.system_prompt
+    )
+    assert setup.app.state.cfg.ai_screening.overwrite_new is True
+
+
+async def test_screen_run_settings_patch_rejects_extra_keys(
+    setup: Setup,
+) -> None:
+    """A key outside the flag is 422 and the file stays untouched.
+
+    Args:
+        setup: The migrated app fixture.
+    """
+    before = setup.config_file.read_bytes()
+    client = Client(setup.app)
+    await client.login("lmboswell")
+    try:
+        response = await client.client.patch(
+            "/api/v1/runs/screen/settings",
+            json={"overwrite_new": True, "model": "other/model"},
+            headers=client.headers(),
+        )
+    finally:
+        await client.close()
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_input"
+    assert setup.config_file.read_bytes() == before
+
+
 async def test_run_settings_patch_rejects_extra_keys_and_bad_trees(
     setup: Setup,
 ) -> None:

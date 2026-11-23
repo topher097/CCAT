@@ -3,9 +3,9 @@ import { flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import ManualMatchView from '../src/views/ManualMatchView.vue'
-import SponsorPicker from '../src/components/SponsorPicker.vue'
 import { useSessionStore } from '../src/stores/session'
 import type {
+  ManualAssignmentListItem,
   ManualMatchChildCard,
   ManualMatchFamilyCard,
   ManualMatchSponsor,
@@ -99,6 +99,13 @@ function sponsor(
     pref_age_min: 5,
     pref_age_max: 12,
     status: 'audited',
+    first_name: 'Ada',
+    last_name: 'Lovelace',
+    organization_name: null,
+    elevated_budget: false,
+    physical_packet: false,
+    packets_dispatched: false,
+    packets_dispatched_at: null,
     ...overrides,
   }
 }
@@ -144,6 +151,46 @@ function sponsorsHandler(
       : undefined
 }
 
+/** One assignment row as the angels popup endpoint returns it. */
+function angelItem(
+  overrides: Partial<ManualAssignmentListItem> = {},
+): ManualAssignmentListItem {
+  return {
+    zite_record_id: '7A',
+    angel_id: 'A12',
+    family_id: 7,
+    sponsor_id: 42,
+    assignment_source: 'manual',
+    first_name: 'Riley',
+    age_at_xmas: 8,
+    need_1: 'bike',
+    need_2: 'helmet',
+    desire_1: 'Lego set',
+    desire_2: 'art kit',
+    dropoff_location: 'Hancock',
+    last_updated_by: null,
+    last_updated_at: null,
+    ...overrides,
+  }
+}
+
+function assignmentsHandler(
+  items: ManualAssignmentListItem[],
+): (url: string, init: RequestInit) => Response | undefined {
+  return (url, init) =>
+    url.includes('/manual-match/assignments') && (init.method ?? 'GET') === 'GET'
+      ? jsonResponse(200, {
+          items,
+          total: items.length,
+          page: 1,
+          page_size: 200,
+        })
+      : undefined
+}
+
+/** Deep link: the page opens already shopping for sponsor 42. */
+const SHOPPING_PATH = '/match/manual?sponsor_id=42'
+
 async function mountPage(
   handlers: Array<
     (url: string, init: RequestInit) => Response | undefined
@@ -151,7 +198,7 @@ async function mountPage(
 ) {
   const fetchMock = mockRoutes(handlers)
   const { wrapper, router } = await mountRouted(ManualMatchView, {
-    path: '/match/manual',
+    path: SHOPPING_PATH,
     setup: withSeason,
   })
   await flushPromises()
@@ -214,9 +261,11 @@ describe('manual matching page', () => {
     expect(params.get('q')).toBe('doe')
     expect(params.get('assignment')).toBe('split')
     expect(params.get('hold')).toBe('not_held')
+    expect(params.get('sponsor_id')).toBe('42')
 
     expect(router.currentRoute.value.query.q).toBe('doe')
     expect(router.currentRoute.value.query.assignment).toBe('split')
+    expect(router.currentRoute.value.query.sponsor_id).toBe('42')
   })
 
   it('selects every selectable child from the card select-all control', async () => {
@@ -240,7 +289,7 @@ describe('manual matching page', () => {
     expect(wrapper.get('[data-testid="selection-count"]').text()).toContain(
       '2 selected',
     )
-    const boxes = wrapper.findAll('input[type="checkbox"]')
+    const boxes = wrapper.findAll('[data-testid="family-card"] input[type="checkbox"]')
     expect(boxes).toHaveLength(3)
     expect((boxes[0]!.element as HTMLInputElement).checked).toBe(true)
     expect((boxes[1]!.element as HTMLInputElement).checked).toBe(true)
@@ -271,14 +320,12 @@ describe('manual matching page', () => {
           : undefined,
     ])
     const { wrapper } = await mountRouted(ManualMatchView, {
-      path: '/match/manual',
+      path: SHOPPING_PATH,
       setup: withSeason,
     })
     await flushPromises()
 
     await wrapper.get('[data-testid="select-all"]').trigger('click')
-    await wrapper.get('[data-testid="sponsor-picker"]').setValue('42')
-    await flushPromises()
     await wrapper.get('[data-testid="assign"]').trigger('click')
     await flushPromises()
 
@@ -326,7 +373,7 @@ describe('manual matching page', () => {
       sponsorsHandler([sponsor()]),
     ])
 
-    await wrapper.findAll('input[type="checkbox"]')[0]!.setValue(true)
+    await wrapper.findAll('[data-testid="family-card"] input[type="checkbox"]')[0]!.setValue(true)
     expect(wrapper.get('[data-testid="selection-count"]').text()).toContain(
       '1 selected',
     )
@@ -355,13 +402,12 @@ describe('manual matching page', () => {
           : undefined,
     ])
     const { wrapper } = await mountRouted(ManualMatchView, {
-      path: '/match/manual',
+      path: SHOPPING_PATH,
       setup: withSeason,
     })
     await flushPromises()
 
     await wrapper.get('[data-testid="select-all"]').trigger('click')
-    await wrapper.get('[data-testid="sponsor-picker"]').setValue('42')
     await wrapper.get('[data-testid="assign"]').trigger('click')
     await flushPromises()
 
@@ -399,12 +445,12 @@ describe('manual matching page', () => {
           : undefined,
     ])
     const { wrapper } = await mountRouted(ManualMatchView, {
-      path: '/match/manual',
+      path: SHOPPING_PATH,
       setup: withSeason,
     })
     await flushPromises()
 
-    await wrapper.findAll('input[type="checkbox"]')[0]!.setValue(true)
+    await wrapper.findAll('[data-testid="family-card"] input[type="checkbox"]')[0]!.setValue(true)
     await wrapper.get('[data-testid="release"]').trigger('click')
     await flushPromises()
 
@@ -496,14 +542,11 @@ describe('manual matching page', () => {
       sponsorsHandler([full]),
     ])
 
-    const option = wrapper
-      .findAll('[data-testid="sponsor-picker"] option')
-      .find((entry) => entry.text().includes('Ada Lovelace — full'))!
-    expect(option.attributes('disabled')).toBeDefined()
+    const radio = wrapper.get('[data-testid="sponsor-row-radio"][value="42"]')
+    expect(radio.attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="sponsor-row-full"]').exists()).toBe(true)
 
-    wrapper.getComponent(SponsorPicker).vm.$emit('update:modelValue', 42)
-    await flushPromises()
-
+    // The deep link still lands on the full sponsor: the cap is explained.
     expect(wrapper.get('[data-testid="cap-warning"]').text()).toContain('full')
     expect(
       wrapper.get('[data-testid="assign"]').attributes('disabled'),
@@ -529,7 +572,7 @@ describe('manual matching page', () => {
           : undefined,
     ])
     const { wrapper } = await mountRouted(ManualMatchView, {
-      path: '/match/manual',
+      path: SHOPPING_PATH,
       setup: withSeason,
     })
     await flushPromises()
@@ -539,7 +582,7 @@ describe('manual matching page', () => {
     expect(cardText).toContain('cmendres')
     expect(wrapper.find('[data-testid="release-hold"]').exists()).toBe(true)
 
-    await wrapper.findAll('input[type="checkbox"]')[0]!.setValue(true)
+    await wrapper.findAll('[data-testid="family-card"] input[type="checkbox"]')[0]!.setValue(true)
     await wrapper.get('[data-testid="hold-family"]').trigger('click')
     await flushPromises()
 
@@ -554,5 +597,482 @@ describe('manual matching page', () => {
     const posts = postsTo(fetchMock, '/manual-match/holds')
     expect(posts).toHaveLength(1)
     expect(bodyOf(posts[0]!)).toEqual({ family_id: 7, note: 'moved away' })
+  })
+
+  it('does not fetch the pool until a sponsor is chosen', async () => {
+    const fetchMock = mockRoutes([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor()]),
+    ])
+    const { wrapper } = await mountRouted(ManualMatchView, {
+      path: '/match/manual',
+      setup: withSeason,
+    })
+    await flushPromises()
+
+    expect(poolCalls(fetchMock)).toHaveLength(0)
+    expect(wrapper.find('[data-testid="pick-sponsor-first"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="family-card"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="list-empty"]').exists()).toBe(false)
+    expect(wrapper.find('.pagination').exists()).toBe(false)
+  })
+
+  it('fetches the pool with sponsor_id once a sponsor is picked', async () => {
+    const fetchMock = mockRoutes([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor()]),
+    ])
+    const { wrapper, router } = await mountRouted(ManualMatchView, {
+      path: '/match/manual',
+      setup: withSeason,
+    })
+    await flushPromises()
+
+    await wrapper
+      .get('[data-testid="sponsor-row-radio"][value="42"]')
+      .setValue()
+    await flushPromises()
+
+    const last = poolCalls(fetchMock).at(-1)!
+    const params = new URL(String(last[0]), 'http://localhost').searchParams
+    expect(params.get('sponsor_id')).toBe('42')
+    expect(router.currentRoute.value.query.sponsor_id).toBe('42')
+    expect(wrapper.find('[data-testid="pick-sponsor-first"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="family-card"]').exists()).toBe(true)
+  })
+
+  it('sends all_audited by default and omits it once unchecked', async () => {
+    const { wrapper, router, fetchMock } = await mountPage([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor()]),
+    ])
+    const paramsOf = (call: unknown[]) =>
+      new URL(String(call[0]), 'http://localhost').searchParams
+    expect(paramsOf(poolCalls(fetchMock).at(-1)!).get('all_audited')).toBe('true')
+
+    await wrapper.get('form.filters input[type="checkbox"]').setValue(false)
+    await flushPromises()
+
+    expect(paramsOf(poolCalls(fetchMock).at(-1)!).has('all_audited')).toBe(false)
+    expect(router.currentRoute.value.query.all_audited).toBe('0')
+  })
+
+  it('sends info_sheet when a non-default option is selected', async () => {
+    const { wrapper, router, fetchMock } = await mountPage([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor()]),
+    ])
+    const select = wrapper
+      .findAll('form.filters select')
+      .find((entry) =>
+        entry.findAll('option').some((option) => option.text() === 'missing'),
+      )!
+    await select.setValue('missing')
+    await flushPromises()
+
+    const last = poolCalls(fetchMock).at(-1)!
+    const params = new URL(String(last[0]), 'http://localhost').searchParams
+    expect(params.get('info_sheet')).toBe('missing')
+    expect(router.currentRoute.value.query.info_sheet).toBe('missing')
+  })
+
+  it('opens the family details modal and closes it again', async () => {
+    mockRoutes([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor()]),
+      (url) =>
+        url.includes('/families/7')
+          ? jsonResponse(200, {
+              entity: 'family',
+              key: '7',
+              row: { family_id: 7, first_name: 'Jane', last_name: 'Doe' },
+              baseline: {},
+              submissions: [],
+              status: 'audited',
+              row_version: 3,
+              last_updated_by: null,
+              last_updated_at: null,
+              audited_at: null,
+              diagnostics: {},
+            })
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(ManualMatchView, {
+      path: SHOPPING_PATH,
+      setup: withSeason,
+    })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="entity-modal"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="open-family-details"]').trigger('click')
+    await flushPromises()
+    const modal = wrapper.get('[data-testid="entity-modal"]')
+    expect(modal.attributes('aria-label')).toBe('Jane Doe')
+
+    await wrapper.get('[data-testid="entity-modal-close"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="entity-modal"]').exists()).toBe(false)
+  })
+
+  it('opens the sponsor details modal from a sponsor row and closes it', async () => {
+    mockRoutes([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor()]),
+      (url) =>
+        url.includes('/sponsors/42') && !url.includes('/manual-match/')
+          ? jsonResponse(200, {
+              entity: 'sponsor',
+              key: '42',
+              row: { sponsor_id: 42, first_name: 'Ada', last_name: 'Lovelace' },
+              baseline: {},
+              submissions: [],
+              status: 'audited',
+              row_version: 5,
+              last_updated_by: null,
+              last_updated_at: null,
+              audited_at: null,
+              diagnostics: {},
+            })
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(ManualMatchView, {
+      path: SHOPPING_PATH,
+      setup: withSeason,
+    })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="entity-modal"]').exists()).toBe(false)
+
+    await wrapper
+      .get('[data-sponsor-id="42"] [data-testid="open-sponsor-details"]')
+      .trigger('click')
+    await flushPromises()
+    const modal = wrapper.get('[data-testid="entity-modal"]')
+    expect(modal.attributes('aria-label')).toContain('Ada Lovelace')
+
+    await wrapper.get('[data-testid="entity-modal-close"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="entity-modal"]').exists()).toBe(false)
+  })
+
+  it('clears the selection when the sponsor changes', async () => {
+    const { wrapper } = await mountPage([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor(), sponsor({ sponsor_id: 43, display_name: 'Bob' })]),
+    ])
+    await wrapper.get('[data-testid="select-all"]').trigger('click')
+    expect(wrapper.get('[data-testid="selection-count"]').text()).toContain(
+      '2 selected',
+    )
+
+    await wrapper
+      .get('[data-testid="sponsor-row-radio"][value="43"]')
+      .setValue()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="selection-count"]').text()).toContain(
+      '0 selected',
+    )
+  })
+
+  it('dispatches a full sponsor after confirmation and shows the badge', async () => {
+    let dispatched = false
+    const fetchMock = mockRoutes([
+      poolHandler(() => pool([family()])),
+      (url, init) =>
+        url.includes('/manual-match/sponsors') && (init.method ?? 'GET') === 'GET'
+          ? jsonResponse(200, {
+              items: [
+                sponsor({
+                  assigned_count: 3,
+                  remaining: 0,
+                  packets_dispatched: dispatched,
+                }),
+                sponsor({ sponsor_id: 43, display_name: 'Bob' }),
+              ],
+              total: 2,
+              page: 1,
+              page_size: 200,
+            })
+          : undefined,
+      (url, init) => {
+        if (!url.endsWith('/manual-match/dispatch') || init.method !== 'POST') {
+          return undefined
+        }
+        dispatched = true
+        return jsonResponse(200, sponsor({ packets_dispatched: true }))
+      },
+    ])
+    const { wrapper } = await mountRouted(ManualMatchView, {
+      path: '/match/manual?sponsor_id=43',
+      setup: withSeason,
+    })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="sponsor-row-dispatched"]').exists()).toBe(false)
+
+    await wrapper
+      .get('[data-sponsor-id="42"] [data-testid="dispatch-packets"]')
+      .trigger('click')
+    await flushPromises()
+    expect(postsTo(fetchMock, '/manual-match/dispatch')).toHaveLength(0)
+
+    await wrapper.get('[data-testid="confirm"]').trigger('click')
+    await flushPromises()
+
+    const posts = postsTo(fetchMock, '/manual-match/dispatch')
+    expect(posts).toHaveLength(1)
+    expect(bodyOf(posts[0]!)).toEqual({
+      sponsor_id: 42,
+      expected_versions: { 'sponsor:42': 5 },
+    })
+    expect(wrapper.get('[data-testid="write-notice"]').text()).toContain(
+      'Packets dispatched for sponsor 42',
+    )
+    expect(
+      wrapper
+        .get('[data-sponsor-id="42"]')
+        .find('[data-testid="sponsor-row-dispatched"]')
+        .exists(),
+    ).toBe(true)
+  })
+
+  it('locks Assign and Release when the selected sponsor is dispatched', async () => {
+    const assigned = family({
+      assigned_count: 1,
+      assigned_sponsor_ids: [42],
+      assignment_state: 'partial',
+      children: [
+        child({ assigned_sponsor_id: 42, assignment_source: 'manual' }),
+        child({ zite_record_id: '7B' }),
+      ],
+    })
+    const { wrapper } = await mountPage([
+      poolHandler(() => pool([assigned])),
+      sponsorsHandler([sponsor({ packets_dispatched: true })]),
+    ])
+
+    expect(wrapper.find('[data-testid="pick-sponsor-first"]').exists()).toBe(false)
+    await wrapper
+      .findAll('[data-testid="family-card"] input[type="checkbox"]')[0]!
+      .setValue(true)
+
+    expect(wrapper.get('[data-testid="dispatched-warning"]').text()).toContain(
+      'dispatched',
+    )
+    expect(wrapper.get('[data-testid="assign"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="release"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('surfaces a packets_dispatched refusal from the dispatch call', async () => {
+    mockRoutes([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor({ assigned_count: 3, remaining: 0 })]),
+      (url, init) =>
+        url.endsWith('/manual-match/dispatch') && init.method === 'POST'
+          ? jsonResponse(409, {
+              detail: {
+                code: 'packets_dispatched',
+                message: 'packets already dispatched for sponsor 42',
+              },
+            })
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(ManualMatchView, {
+      path: SHOPPING_PATH,
+      setup: withSeason,
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="dispatch-packets"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="assign-error"]').text()).toContain(
+      'already dispatched',
+    )
+  })
+})
+
+describe('assigned angels popup', () => {
+  it('lists every angel detail and fetches with the sponsor filter', async () => {
+    const { wrapper, fetchMock } = await mountPage([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor()]),
+      assignmentsHandler([
+        angelItem(),
+        angelItem({
+          zite_record_id: '7B',
+          angel_id: 'B7',
+          first_name: 'Sam',
+          age_at_xmas: 11,
+          need_1: 'coat',
+          need_2: null,
+          desire_1: 'puzzle',
+          desire_2: null,
+          dropoff_location: 'Calumet',
+        }),
+      ]),
+    ])
+
+    await wrapper.get('[data-testid="assigned-angels-trigger"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="sponsor-angels-heading"]').text()).toBe(
+      'Angels assigned to Ada Lovelace',
+    )
+    const rows = wrapper.findAll('[data-testid="sponsor-angel-row"]')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.get('[data-testid="sponsor-angel-id"]').text()).toBe('A12')
+    expect(rows[0]!.get('[data-testid="sponsor-angel-name"]').text()).toBe('Riley')
+    expect(rows[0]!.get('[data-testid="sponsor-angel-age"]').text()).toBe('8')
+    expect(rows[0]!.get('[data-testid="sponsor-angel-needs"]').text()).toBe('bike | helmet')
+    expect(rows[0]!.get('[data-testid="sponsor-angel-wishes"]').text()).toBe('Lego set | art kit')
+    expect(rows[0]!.get('[data-testid="sponsor-angel-dropoff"]').text()).toBe('Hancock')
+    expect(rows[1]!.get('[data-testid="sponsor-angel-id"]').text()).toBe('B7')
+    expect(rows[1]!.get('[data-testid="sponsor-angel-name"]').text()).toBe('Sam')
+    expect(rows[1]!.get('[data-testid="sponsor-angel-age"]').text()).toBe('11')
+    expect(rows[1]!.get('[data-testid="sponsor-angel-needs"]').text()).toBe('coat')
+    expect(rows[1]!.get('[data-testid="sponsor-angel-wishes"]').text()).toBe('puzzle')
+    expect(rows[1]!.get('[data-testid="sponsor-angel-dropoff"]').text()).toBe('Calumet')
+
+    const calls = fetchMock.mock.calls.filter((call) =>
+      String(call[0]).includes('/manual-match/assignments'),
+    )
+    expect(calls).toHaveLength(1)
+    const params = new URL(String(calls[0]![0]), 'http://localhost').searchParams
+    expect(params.get('sponsor_id')).toBe('42')
+    expect(params.get('page_size')).toBe('200')
+  })
+
+  it('opens the child audit popup on top of the angels list', async () => {
+    const { wrapper } = await mountPage([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor()]),
+      assignmentsHandler([angelItem()]),
+      (url) =>
+        url.includes('/children/7A')
+          ? jsonResponse(200, {
+              entity: 'child',
+              key: '7A',
+              row: {
+                zite_record_id: '7A',
+                angel_id: 'A12',
+                first_name: 'Riley',
+                family_id: 7,
+              },
+              baseline: {},
+              submissions: [],
+              status: 'audited',
+              row_version: 1,
+              last_updated_by: null,
+              last_updated_at: null,
+              audited_at: null,
+              diagnostics: {},
+            })
+          : undefined,
+    ])
+
+    await wrapper.get('[data-testid="assigned-angels-trigger"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="entity-modal"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="sponsor-angel-row"]').trigger('click')
+    await flushPromises()
+
+    const modal = wrapper.get('[data-testid="entity-modal"]')
+    expect(modal.attributes('aria-label')).toBe('Riley')
+    // The angels list stays open behind the audit popup.
+    expect(wrapper.find('[data-testid="sponsor-angels-dialog"]').exists()).toBe(true)
+  })
+
+  it('shows the empty state for a sponsor with no assigned angels', async () => {
+    const { wrapper } = await mountPage([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor({ assigned_count: 0 })]),
+      assignmentsHandler([]),
+    ])
+
+    await wrapper.get('[data-testid="assigned-angels-trigger"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="sponsor-angels-empty"]').text()).toBe(
+      'No angels assigned.',
+    )
+    expect(wrapper.find('[data-testid="sponsor-angel-row"]').exists()).toBe(false)
+  })
+
+  it('keeps the popup open with a retry when the request fails', async () => {
+    let fail = true
+    const { wrapper } = await mountPage([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor()]),
+      (url, init) => {
+        if (
+          !url.includes('/manual-match/assignments') ||
+          (init.method ?? 'GET') !== 'GET'
+        ) {
+          return undefined
+        }
+        return fail
+          ? jsonResponse(500, {
+              detail: { code: 'server_error', message: 'angels exploded' },
+            })
+          : jsonResponse(200, {
+              items: [angelItem()],
+              total: 1,
+              page: 1,
+              page_size: 200,
+            })
+      },
+    ])
+
+    await wrapper.get('[data-testid="assigned-angels-trigger"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="sponsor-angels-error"]').text()).toContain(
+      'angels exploded',
+    )
+
+    fail = false
+    await wrapper.get('[data-testid="sponsor-angels-retry"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="sponsor-angels-error"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="sponsor-angel-row"]')).toHaveLength(1)
+  })
+
+  it('follows pagination until every angel is collected', async () => {
+    const pageOne = Array.from({ length: 200 }, (_, i) =>
+      angelItem({ zite_record_id: `C${i}`, angel_id: `A${i}` }),
+    )
+    const { wrapper, fetchMock } = await mountPage([
+      poolHandler(() => pool([family()])),
+      sponsorsHandler([sponsor()]),
+      (url, init) => {
+        if (
+          !url.includes('/manual-match/assignments') ||
+          (init.method ?? 'GET') !== 'GET'
+        ) {
+          return undefined
+        }
+        const page = new URL(url, 'http://localhost').searchParams.get('page')
+        return jsonResponse(200, {
+          items:
+            page === '2'
+              ? [angelItem({ zite_record_id: 'C200', angel_id: 'A200' })]
+              : pageOne,
+          total: 201,
+          page: Number(page ?? 1),
+          page_size: 200,
+        })
+      },
+    ])
+
+    await wrapper.get('[data-testid="assigned-angels-trigger"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-testid="sponsor-angel-row"]')).toHaveLength(201)
+    const calls = fetchMock.mock.calls.filter((call) =>
+      String(call[0]).includes('/manual-match/assignments'),
+    )
+    expect(calls).toHaveLength(2)
   })
 })

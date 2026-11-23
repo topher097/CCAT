@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 
     from ccat.api.dto import (
         ManualAssignmentRequest,
+        ManualDispatchRequest,
         ManualHoldReleaseRequest,
         ManualHoldRequest,
         ManualReleaseRequest,
@@ -76,6 +77,7 @@ SPONSOR_FULL = "sponsor_full"
 MATCH_RUNNING = "match_running"
 STALE_VERSION = "stale_version"
 INVALID_INPUT = "invalid_input"
+PACKETS_DISPATCHED = "packets_dispatched"
 
 
 class ManualMatchError(Exception):
@@ -115,6 +117,8 @@ class PoolParams:
     family_size_min: int | None = None
     family_size_max: int | None = None
     child_status: str = "any"
+    all_audited: bool = False
+    info_sheet: str = "any"
     hold: str = "not_held"
     sponsor_id: int | None = None
 
@@ -219,6 +223,18 @@ def _int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _flag(value: Any) -> bool | None:
+    """Render a stored tri-state flag, keeping "undecided" as None.
+
+    Args:
+        value: The stored value.
+
+    Returns:
+        The boolean, or None when the flag was never set.
+    """
+    return None if value is None else as_bool(value)
 
 
 def _sizes(child: dict[str, Any]) -> dict[str, str | None]:
@@ -341,6 +357,10 @@ def _child_matches(
         params.child_status
     ):
         return False
+    if params.info_sheet != "any" and as_bool(
+        child.get("generated_info_sheet")
+    ) != (params.info_sheet == "generated"):
+        return False
     return True
 
 
@@ -403,9 +423,14 @@ def _family_matches(
         or params.age_max is not None
         or params.special_needs != "any"
         or params.child_status != "any"
+        or params.info_sheet != "any"
     )
     if child_filters and not any(
         _child_matches(child, params) for child in children
+    ):
+        return False
+    if params.all_audited and any(
+        child.get("status") != "audited" for child in children
     ):
         return False
     return True
@@ -728,10 +753,18 @@ def _sponsor_dto(
             )
             if part
         )
+    dispatched_at = _text(row.get("packets_dispatched_at"))
     return ManualMatchSponsor(
         sponsor_id=sponsor_id,
         row_version=_int(row.get("_row_version")) or 0,
         display_name=name,
+        first_name=_text(row.get("first_name")),
+        last_name=_text(row.get("last_name")),
+        organization_name=_text(row.get("organization_name")),
+        elevated_budget=_flag(row.get("elevated_budget")),
+        physical_packet=_flag(row.get("physical_packet")),
+        packets_dispatched=dispatched_at is not None,
+        packets_dispatched_at=dispatched_at,
         email=_text(row.get("email")),
         phone=_text(row.get("phone")),
         sponsor_type=_text(row.get("sponsor_type")),
@@ -1284,6 +1317,31 @@ async def _guard_match_running(repo: SeasonStoreRepository) -> None:
         )
 
 
+def _guard_not_dispatched(
+    sponsor_rows: list[dict[str, Any]], sponsor_ids: Iterable[int | None]
+) -> None:
+    """Refuse a change to a sponsor whose packets already went out.
+
+    Args:
+        sponsor_rows: The complete sponsor store.
+        sponsor_ids: The sponsors the write would change.
+
+    Raises:
+        ManualMatchError: 409 ``packets_dispatched`` for the first
+            dispatched sponsor.
+    """
+    index = _row_index(sponsor_rows, "sponsor_id")
+    for sponsor_id in sorted({sid for sid in sponsor_ids if sid is not None}):
+        row = index.get(sponsor_id)
+        if row is not None and _text(row.get("packets_dispatched_at")):
+            raise ManualMatchError(
+                PACKETS_DISPATCHED,
+                f"sponsor {sponsor_id} packets dispatched; the info sheets"
+                " were sent to the sponsor",
+                sponsor_id=sponsor_id,
+            )
+
+
 async def assign(
     repo: SeasonStoreRepository,
     cfg: Config,
@@ -1314,6 +1372,10 @@ async def assign(
     child_rows, family_rows, sponsor_rows = await _stores(repo)
     sponsor = _resolve_sponsor(sponsor_rows, request.sponsor_id)
     selected = _expand_selection(request, child_rows, family_rows)
+    _guard_not_dispatched(
+        sponsor_rows,
+        [request.sponsor_id, *(child_sponsor(child) for child in selected)],
+    )
     _require_versions(selected, request.sponsor_id, request.expected_versions)
     _check_expected_versions(
         request.expected_versions, child_rows, family_rows, sponsor_rows
@@ -1492,6 +1554,9 @@ async def release(
             selected.append(child)
     if not selected:
         raise ManualMatchError(INVALID_INPUT, "the selection is empty")
+    _guard_not_dispatched(
+        sponsor_rows, [child_sponsor(child) for child in selected]
+    )
     _check_expected_versions(
         request.expected_versions, child_rows, family_rows, sponsor_rows
     )
@@ -1551,6 +1616,92 @@ async def release(
         family_ids,
         set(),
         sorted(old_sponsors),
+    )
+
+
+async def dispatch_packets(
+    repo: SeasonStoreRepository,
+    cfg: Config,
+    actor: str,
+    user_id: int | None,
+    request: ManualDispatchRequest,
+) -> ManualMatchSponsor:
+    """Record that a sponsor's info-sheet packets went out.
+
+    Only a sponsor whose child slots are all filled may be dispatched.
+    The stamp freezes the sponsor: :func:`assign` and :func:`release`
+    refuse to touch its children afterwards.
+
+    Args:
+        repo: The season-bound repository.
+        cfg: Pipeline configuration.
+        actor: The acting identity's username.
+        user_id: The acting user's id.
+        request: The dispatch request.
+
+    Returns:
+        The sponsor's fresh picker row.
+
+    Raises:
+        ManualMatchError: 404 unknown; 409 ignored, match running,
+            already dispatched, or quota not filled; 412 stale version;
+            422 when the sponsor's expected version is missing.
+    """
+    await _guard_match_running(repo)
+    child_rows, family_rows, sponsor_rows = await _stores(repo)
+    sponsor = _resolve_sponsor(sponsor_rows, request.sponsor_id)
+    key = f"sponsor:{request.sponsor_id}"
+    if key not in request.expected_versions:
+        raise ManualMatchError(
+            INVALID_INPUT, f"expected_versions is missing {key}; re-read"
+        )
+    _check_expected_versions(
+        request.expected_versions, child_rows, family_rows, sponsor_rows
+    )
+    if _text(sponsor.get("packets_dispatched_at")):
+        raise ManualMatchError(
+            CONFLICT,
+            f"sponsor {request.sponsor_id} packets already dispatched",
+            sponsor_id=request.sponsor_id,
+        )
+    count = _sponsor_assigned_counts(child_rows).get(request.sponsor_id, 0)
+    limit = _int(sponsor.get("num_children"))
+    if limit is None or count < limit:
+        raise ManualMatchError(
+            CONFLICT,
+            "all child slots must be filled before dispatch",
+            sponsor_id=request.sponsor_id,
+            limit=limit,
+            assigned_count=count,
+        )
+    now = datetime.now(UTC)
+    sponsor["packets_dispatched_at"] = now.isoformat()
+    event = _audit_event(
+        "manual_dispatch",
+        str(request.sponsor_id),
+        user_id,
+        cfg.season,
+        {
+            "actor": actor,
+            "sponsor_id": request.sponsor_id,
+            "assigned_count": count,
+            "num_children": limit,
+        },
+    )
+    event["object_type"] = "sponsor"
+    await repo.commit_assignments(
+        "manual_match",
+        child_rows,
+        family_rows,
+        sponsor_rows,
+        actor,
+        {key: request.expected_versions[key]},
+        [event],
+    )
+    child_rows, _families, sponsor_rows = await _stores(repo)
+    return _sponsor_dto(
+        _row_index(sponsor_rows, "sponsor_id")[request.sponsor_id],
+        _sponsor_assigned_counts(child_rows),
     )
 
 
@@ -1634,7 +1785,12 @@ async def assignments(
     Returns:
         The assignment list page.
     """
-    child_rows, _families, _sponsors = await _stores(repo)
+    child_rows, family_rows, _sponsors = await _stores(repo)
+    # The angel's drop-off is the family's pickup location, not the sponsor's.
+    location_by_family = {
+        row.get("family_id"): _text(row.get("gift_pickup_location"))
+        for row in family_rows
+    }
     items: list[ManualAssignmentListItem] = []
     for child in child_rows:
         if as_bool(child.get("ignore")):
@@ -1661,6 +1817,13 @@ async def assignments(
                 assignment_source=source,
                 last_updated_by=_text(child.get("_last_updated_by")),
                 last_updated_at=_text(child.get("_last_updated_at")),
+                first_name=_text(child.get("first_name")),
+                age_at_xmas=_int(child.get("age_at_xmas")),
+                need_1=_text(child.get("need_1")),
+                need_2=_text(child.get("need_2")),
+                desire_1=_text(child.get("desire_1")),
+                desire_2=_text(child.get("desire_2")),
+                dropoff_location=location_by_family.get(child.get("family_id")),
             )
         )
     items.sort(key=lambda item: item.zite_record_id)
@@ -1829,12 +1992,14 @@ __all__ = [
     "MATCH_RUNNING",
     "ManualMatchError",
     "NOT_FOUND",
+    "PACKETS_DISPATCHED",
     "PoolParams",
     "SPONSOR_FULL",
     "STALE_VERSION",
     "SponsorParams",
     "assign",
     "assignments",
+    "dispatch_packets",
     "hold_family",
     "list_holds",
     "pool",

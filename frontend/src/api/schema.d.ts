@@ -429,7 +429,7 @@ export interface paths {
          * @description Return one command's run settings from the running configuration.
          *
          *     Args:
-         *         command: ``match`` or ``generate``.
+         *         command: ``match``, ``generate``, or ``screen``.
          *         request: The current request.
          *         user: The authenticated identity (drives ``editable``).
          *
@@ -447,7 +447,7 @@ export interface paths {
          * @description Persist one command's run flags to the configuration file.
          *
          *     Args:
-         *         command: ``match`` or ``generate``.
+         *         command: ``match``, ``generate``, or ``screen``.
          *         body: The command's run flags.
          *         request: The current request.
          *         user: The authenticated editor.
@@ -1446,6 +1446,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/seasons/{season}/manual-match/dispatch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Dispatch
+         * @description Record a sponsor's packet dispatch (coordinator/admin).
+         *
+         *     Args:
+         *         body: The dispatch request.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The sponsor's fresh row, or a 412 body with the fresh row.
+         *
+         *     Raises:
+         *         ApiError: The mapped 404/409/412/422 refusal.
+         */
+        post: operations["post_dispatch_api_v1_seasons__season__manual_match_dispatch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/seasons/{season}/manual-match/holds": {
         parameters: {
             query?: never;
@@ -1546,6 +1578,8 @@ export interface paths {
          *         family_size_min: The smallest non-ignored family.
          *         family_size_max: The largest non-ignored family.
          *         child_status: The child audit-lifecycle filter.
+         *         all_audited: Keep only families whose every live child is audited.
+         *         info_sheet: Whether a child's info sheet is missing or generated.
          *         hold: Whether the family carries an active hold.
          *         sponsor_id: Order by fit for this sponsor; drop forbidden families.
          *
@@ -2446,6 +2480,8 @@ export interface components {
             dob?: string | null;
             /** Dropoff Location */
             dropoff_location?: string | null;
+            /** Elevated Budget */
+            elevated_budget?: boolean | null;
             /** Email */
             email?: string | null;
             /** Favorite Colors */
@@ -2484,6 +2520,8 @@ export interface components {
             pant_waist_size?: string | null;
             /** Phone */
             phone?: string | null;
+            /** Physical Packet */
+            physical_packet?: boolean | null;
             /** Primary Email */
             primary_email?: string | null;
             /** Prior Assigned Angel Ids */
@@ -2698,18 +2736,39 @@ export interface components {
          *         assignment_source: "auto" or "manual".
          *         last_updated_by: Who last wrote the child row.
          *         last_updated_at: When the child row was last written.
+         *         first_name: The angel's first name.
+         *         age_at_xmas: The angel's age at Christmas.
+         *         need_1: First stated need.
+         *         need_2: Second stated need.
+         *         desire_1: First stated want.
+         *         desire_2: Second stated want.
+         *         dropoff_location: The family's gift pickup location (the angel's drop-off).
          */
         ManualAssignmentListItem: {
+            /** Age At Xmas */
+            age_at_xmas?: number | null;
             /** Angel Id */
             angel_id?: string | null;
             /** Assignment Source */
             assignment_source?: string | null;
+            /** Desire 1 */
+            desire_1?: string | null;
+            /** Desire 2 */
+            desire_2?: string | null;
+            /** Dropoff Location */
+            dropoff_location?: string | null;
             /** Family Id */
             family_id?: number | null;
+            /** First Name */
+            first_name?: string | null;
             /** Last Updated At */
             last_updated_at?: string | null;
             /** Last Updated By */
             last_updated_by?: string | null;
+            /** Need 1 */
+            need_1?: string | null;
+            /** Need 2 */
+            need_2?: string | null;
             /** Sponsor Id */
             sponsor_id?: number | null;
             /** Zite Record Id */
@@ -2839,6 +2898,23 @@ export interface components {
             sponsor_id: number;
         } & {
             [key: string]: unknown;
+        };
+        /**
+         * ManualDispatchRequest
+         * @description Dispatch a sponsor's info-sheet packets.
+         *
+         *     Attributes:
+         *         sponsor_id: The sponsor whose packets went out.
+         *         expected_versions: The caller's expected row versions, keyed
+         *             ``sponsor:<id>``.
+         */
+        ManualDispatchRequest: {
+            /** Expected Versions */
+            expected_versions?: {
+                [key: string]: number;
+            };
+            /** Sponsor Id */
+            sponsor_id: number;
         };
         /**
          * ManualHoldListPage
@@ -3195,6 +3271,15 @@ export interface components {
          *         pref_age_min: The lowest preferred age.
          *         pref_age_max: The highest preferred age.
          *         status: The sponsor's audit status.
+         *         first_name: The sponsor contact's first name.
+         *         last_name: The sponsor contact's last name.
+         *         organization_name: The organization name, when there is one.
+         *         elevated_budget: The auditor's elevated-budget flag (the store
+         *             reads an unset flag as False).
+         *         physical_packet: The auditor's physical-packet flag (the store
+         *             reads an unset flag as False).
+         *         packets_dispatched: Whether the info-sheet packets were sent.
+         *         packets_dispatched_at: When the packets were dispatched (ISO 8601).
          */
         ManualMatchSponsor: {
             /** Age Preference */
@@ -3211,14 +3296,31 @@ export interface components {
             display_name: string;
             /** Dropoff Location */
             dropoff_location?: string | null;
+            /** Elevated Budget */
+            elevated_budget?: boolean | null;
             /** Email */
             email?: string | null;
+            /** First Name */
+            first_name?: string | null;
             /** Gender Preference */
             gender_preference?: string | null;
+            /** Last Name */
+            last_name?: string | null;
             /** Num Children */
             num_children?: number | null;
+            /** Organization Name */
+            organization_name?: string | null;
+            /**
+             * Packets Dispatched
+             * @default false
+             */
+            packets_dispatched: boolean;
+            /** Packets Dispatched At */
+            packets_dispatched_at?: string | null;
             /** Phone */
             phone?: string | null;
+            /** Physical Packet */
+            physical_packet?: boolean | null;
             /** Pref Age Max */
             pref_age_max?: number | null;
             /** Pref Age Min */
@@ -5069,6 +5171,41 @@ export interface operations {
             };
         };
     };
+    post_dispatch_api_v1_seasons__season__manual_match_dispatch_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualDispatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManualMatchSponsor"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_holds_api_v1_seasons__season__manual_match_holds_get: {
         parameters: {
             query?: {
@@ -5188,6 +5325,8 @@ export interface operations {
                 family_size_min?: number | null;
                 family_size_max?: number | null;
                 child_status?: "any" | "audited" | "in_progress" | "needs_clarification" | "new";
+                all_audited?: boolean;
+                info_sheet?: "any" | "missing" | "generated";
                 hold?: "any" | "held" | "not_held";
                 sponsor_id?: number | null;
             };

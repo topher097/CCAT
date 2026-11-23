@@ -14,6 +14,7 @@ export type ManualAssignmentRequest = Schemas['ManualAssignmentRequest']
 export type ManualReleaseRequest = Schemas['ManualReleaseRequest']
 export type ManualAssignmentResult = Schemas['ManualAssignmentResult']
 export type ManualAssignmentListPage = Schemas['ManualAssignmentListPage']
+export type ManualAssignmentListItem = Schemas['ManualAssignmentListItem']
 export type ManualHoldRequest = Schemas['ManualHoldRequest']
 export type ManualHoldReleaseRequest = Schemas['ManualHoldReleaseRequest']
 export type ManualHoldResult = Schemas['ManualHoldResult']
@@ -47,6 +48,8 @@ export type PoolParams = {
   child_status?: string
   hold?: 'any' | 'held' | 'not_held'
   sponsor_id?: number
+  all_audited?: boolean
+  info_sheet?: 'any' | 'missing' | 'generated'
 }
 
 /** The sponsor picker's filters. */
@@ -108,6 +111,26 @@ export function listAssignments(
   )
 }
 
+/** GET every assignment of one sponsor, following pagination to the end. */
+export async function listSponsorAngels(
+  season: string,
+  sponsorId: number,
+): Promise<ManualAssignmentListItem[]> {
+  const angels: ManualAssignmentListItem[] = []
+  let page = 1
+  for (;;) {
+    const result = await listAssignments(season, {
+      sponsor_id: sponsorId,
+      page,
+      page_size: 200,
+    })
+    const items = result.items ?? []
+    angels.push(...items)
+    if (items.length === 0 || angels.length >= result.total) return angels
+    page += 1
+  }
+}
+
 /** Place the selection with a sponsor. */
 export function assign(
   season: string,
@@ -126,6 +149,17 @@ export function release(
 ): Promise<ManualAssignmentResult> {
   return api.post(
     `/api/v1/seasons/${seasonPath(season)}/manual-match/release`,
+    body,
+  )
+}
+
+/** Mark a sponsor's packets dispatched; freezes their assignments. */
+export function dispatchPackets(
+  season: string,
+  body: { sponsor_id: number; expected_versions: Record<string, number> },
+): Promise<ManualMatchSponsor> {
+  return api.post(
+    `/api/v1/seasons/${seasonPath(season)}/manual-match/dispatch`,
     body,
   )
 }

@@ -287,6 +287,12 @@ class FinalSponsor(RowVersionMixin, Base):
     #: Comma-joined legacy spelling preserved at the boundary.
     assigned_angel_ids: OptionalStr = mapped_column(Text)
     num_angels_assigned: OptionalInt = mapped_column(Integer)
+    #: Auditor flags; NULL means "not decided".
+    elevated_budget: OptionalBool = mapped_column(Boolean)
+    physical_packet: OptionalBool = mapped_column(Boolean)
+    #: ISO 8601 stamp of the packet dispatch; set once the info sheets
+    #: went to the sponsor, after which the sponsor's children are frozen.
+    packets_dispatched_at: OptionalStr = mapped_column(Text)
     status: OptionalStr = mapped_column(Text)
     clarification_notes: OptionalStr = mapped_column(Text)
     audited_at: OptionalStr = mapped_column(Text)

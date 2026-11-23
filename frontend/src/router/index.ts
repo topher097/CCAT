@@ -42,6 +42,8 @@ declare module 'vue-router' {
     /** Admin-only route (nav hidden and guard enforced). */
     admin?: boolean
     title?: string
+    /** Page uses the full viewport width (see .app-main--wide). */
+    wide?: boolean
   }
 }
 
@@ -141,7 +143,7 @@ export const routes: RouteRecordRaw[] = [
     path: '/match/manual',
     name: 'match-manual',
     component: ManualMatchView,
-    meta: { title: 'Manual matching' },
+    meta: { title: 'Manual matching', wide: true },
   },
   {
     path: '/generate',

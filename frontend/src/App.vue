@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { RouterLink, RouterView, useRouter } from 'vue-router'
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
 import { useSessionStore } from './stores/session'
 import { useOverviewStore } from './stores/overview'
@@ -8,6 +8,7 @@ import { useOverviewStore } from './stores/overview'
 const session = useSessionStore()
 const overview = useOverviewStore()
 const router = useRouter()
+const route = useRoute()
 const online = ref(typeof navigator === 'undefined' ? true : navigator.onLine)
 
 const nav = [
@@ -86,7 +87,7 @@ onUnmounted(() => {
       Loading…
     </div>
 
-    <main class="app-main">
+    <main class="app-main" :class="{ 'app-main--wide': route.meta.wide }">
       <RouterView />
     </main>
   </div>

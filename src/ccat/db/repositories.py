@@ -63,6 +63,7 @@ from ccat.audit.store import (
     FAMILY_EDITABLE_COLUMNS,
     SPONSOR_ASSIGNMENT_COLUMNS,
     SPONSOR_COMPUTED_COLUMNS,
+    SPONSOR_DISPATCH_COLUMNS,
     SPONSOR_EDITABLE_COLUMNS,
     _as_int,
     _as_text,
@@ -180,7 +181,14 @@ ALLOWED_CHANGES: dict[str, dict[str, frozenset[str] | None]] = {
                 "num_angels_in_family",
             )
         ),
-        "sponsor": frozenset(("assigned_angel_ids", "num_angels_assigned")),
+        # The dispatch stamp freezes a sponsor once the packets went out.
+        "sponsor": frozenset(
+            (
+                "assigned_angel_ids",
+                "num_angels_assigned",
+                *SPONSOR_DISPATCH_COLUMNS,
+            )
+        ),
     },
     "generate": {"child": frozenset(CHILD_MODULE_COLUMNS)},
     "acquire": {},

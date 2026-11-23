@@ -132,6 +132,11 @@ class AIScreeningSpec(BaseModel):
         temperature: Sampling temperature (0.0 = deterministic).
         max_workers: Concurrent LLM requests during batch screening.
             One opencode session is created per worker thread.
+        overwrite_new: Let the model's corrections overwrite the
+            existing values of children whose status is still ``new``.
+            Off by default, so the human-edit protection of §7.3 keeps
+            holding; on, a re-screened ``new`` child takes the model's
+            value even where a human already edited that field.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -140,6 +145,7 @@ class AIScreeningSpec(BaseModel):
     system_prompt: str
     temperature: float = 0.0
     max_workers: int = 4
+    overwrite_new: bool = False
 
     @field_validator("max_workers")
     @classmethod

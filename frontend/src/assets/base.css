@@ -100,6 +100,10 @@ button.primary {
   overflow-x: auto;
 }
 
+.app-main--wide {
+  max-width: none;
+}
+
 .banner {
   padding: 0.5rem 1.2rem;
   font-weight: 500;
@@ -180,6 +184,25 @@ button.primary {
   display: grid;
   gap: 1rem;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
+/* Family listing: 3 equal columns, 2 on medium, 1 on narrow screens.
+   minmax(0, 1fr) keeps long values from stretching a column. */
+.grid.grid--families {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+}
+
+@media (max-width: 1200px) {
+  .grid.grid--families {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .grid.grid--families {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .muted {

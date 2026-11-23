@@ -13,9 +13,11 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { ApiError } from '../api/client'
 import {
   assign,
+  dispatchPackets,
   holdFamily,
   listPool,
   listSponsors,
+  listSponsorAngels,
   release,
   releaseHold,
   type AssignmentState,
@@ -30,9 +32,11 @@ import { enqueueJob } from '../api/jobs'
 import { getRunSettings } from '../api/runs'
 import { useSessionStore } from '../stores/session'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import EntityModal from '../components/EntityModal.vue'
 import FamilyCard from '../components/FamilyCard.vue'
 import HoldDialog from '../components/HoldDialog.vue'
-import SponsorPicker from '../components/SponsorPicker.vue'
+import SponsorAngelsModal, { type SponsorAngel } from '../components/SponsorAngelsModal.vue'
+import SponsorCardList from '../components/SponsorCardList.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -49,6 +53,7 @@ const ASSIGNMENT_STATES: Array<AssignmentState | 'any'> = [
 ]
 const HOLD_STATES = ['not_held', 'held', 'any'] as const
 const GENDERS = ['Male', 'Female', 'Non-binary']
+const INFO_SHEETS = ['any', 'missing', 'generated'] as const
 const CHILD_STATUSES = [
   'audited',
   'in_progress',
@@ -68,6 +73,8 @@ const location = ref<'any' | 'hancock' | 'calumet'>('any')
 const familySizeMin = ref('')
 const familySizeMax = ref('')
 const childStatus = ref('any')
+const allAudited = ref(true)
+const infoSheet = ref<'any' | 'missing' | 'generated'>('any')
 const hold = ref<'any' | 'held' | 'not_held'>('not_held')
 const page = ref(1)
 const pageSize = ref(PAGE_SIZE)
@@ -92,6 +99,7 @@ const error = ref<string | null>(null)
 /** Selection lives in the page, not the URL or a store (§11.4). */
 const selection = ref<Set<string>>(new Set())
 const wholeFamilies = ref<Set<number>>(new Set())
+/** The sponsor being shopped for; the pool stays hidden until one is chosen. */
 const sponsorId = ref<number | null>(null)
 
 type ChildInfo = {
@@ -130,7 +138,27 @@ const generating = ref(false)
 const reassignOpen = ref(false)
 const releaseOpen = ref(false)
 const holdOpen = ref(false)
+const dispatchOpen = ref(false)
+const dispatchTargetId = ref<number | null>(null)
 const holdTargetId = ref<number | null>(null)
+const details = ref<null | {
+  entity: 'family' | 'child' | 'sponsor'
+  key: string
+  title: string
+}>(null)
+
+/** Assigned-angels popup; the page owns the data, the dialog only shows it. */
+const assignedSponsorId = ref<number | null>(null)
+const assignedAngels = ref<SponsorAngel[]>([])
+const assignedAngelsLoading = ref(false)
+const assignedAngelsError = ref<string | null>(null)
+
+const assignedSponsorName = computed(() => {
+  const id = assignedSponsorId.value
+  if (id === null) return ''
+  const found = sponsors.value.find((s) => s.sponsor_id === id)
+  return found?.display_name || `Sponsor ${id}`
+})
 
 /** The last automatic run's report, for the side panel. */
 const reportCount = ref<number | null>(null)
@@ -155,6 +183,16 @@ const sponsorFull = computed(() => {
   )
 })
 
+const sponsorDispatched = computed(
+  () => selectedSponsor.value?.packets_dispatched === true,
+)
+
+const dispatchedMessage = computed(() => {
+  const sponsor = selectedSponsor.value
+  if (!sponsorDispatched.value || !sponsor) return ''
+  return `Packets are dispatched for ${sponsor.display_name}; assigning and releasing are locked for this sponsor.`
+})
+
 const capMessage = computed(() => {
   const sponsor = selectedSponsor.value
   if (!sponsorFull.value || !sponsor) return ''
@@ -170,6 +208,7 @@ const assignedSelectedIds = computed(() =>
 
 const assignBlockedReason = computed(() => {
   if (automaticRun.value.active) return 'An automatic match is running.'
+  if (sponsorDispatched.value) return dispatchedMessage.value
   if (selection.value.size === 0) return 'Select at least one child.'
   if (sponsorId.value === null) return 'Choose a sponsor.'
   if (sponsorFull.value) return capMessage.value
@@ -181,6 +220,7 @@ const canAssign = computed(
 const canRelease = computed(
   () =>
     assignedSelectedIds.value.length > 0 &&
+    !sponsorDispatched.value &&
     !automaticRun.value.active &&
     !pending.value,
 )
@@ -322,6 +362,13 @@ function readUrl(): void {
   familySizeMin.value = String(route.query.family_size_min ?? '')
   familySizeMax.value = String(route.query.family_size_max ?? '')
   childStatus.value = String(route.query.child_status ?? 'any')
+  allAudited.value = String(route.query.all_audited ?? '1') !== '0'
+  infoSheet.value = String(route.query.info_sheet ?? 'any') as
+    | 'any'
+    | 'missing'
+    | 'generated'
+  const sponsor = Number(route.query.sponsor_id)
+  sponsorId.value = Number.isInteger(sponsor) && sponsor > 0 ? sponsor : null
   page.value = Math.max(1, Number(route.query.page ?? 1) || 1)
   pageSize.value = Math.max(
     1,
@@ -342,6 +389,9 @@ function writeUrl(): void {
   if (familySizeMin.value !== '') next.family_size_min = familySizeMin.value
   if (familySizeMax.value !== '') next.family_size_max = familySizeMax.value
   if (childStatus.value !== 'any') next.child_status = childStatus.value
+  if (!allAudited.value) next.all_audited = '0'
+  if (infoSheet.value !== 'any') next.info_sheet = infoSheet.value
+  if (sponsorId.value !== null) next.sponsor_id = String(sponsorId.value)
   if (page.value > 1) next.page = String(page.value)
   if (pageSize.value !== PAGE_SIZE) next.page_size = String(pageSize.value)
   void router.replace({ path: route.path, query: next })
@@ -368,6 +418,9 @@ function poolParams(): PoolParams {
     params.family_size_max = Number(familySizeMax.value)
   }
   if (childStatus.value !== 'any') params.child_status = childStatus.value
+  if (allAudited.value) params.all_audited = true
+  if (infoSheet.value !== 'any') params.info_sheet = infoSheet.value
+  if (sponsorId.value !== null) params.sponsor_id = sponsorId.value
   return params
 }
 
@@ -449,7 +502,12 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    await fetchPool()
+    if (sponsorId.value === null) {
+      items.value = []
+      total.value = 0
+    } else {
+      await fetchPool()
+    }
     await loadSponsors()
   } catch (failure) {
     error.value =
@@ -462,6 +520,86 @@ async function load(): Promise<void> {
 function submitSearch(): void {
   page.value = 1
   writeUrl()
+}
+
+/** Shopping for a new sponsor starts a fresh search with no selection. */
+function chooseSponsor(next: number | null): void {
+  if (next === sponsorId.value) return
+  sponsorId.value = next
+  clearSelection()
+  page.value = 1
+  writeUrl()
+}
+
+function openSponsorDetails(sponsorId: number): void {
+  const found = sponsors.value.find((s) => s.sponsor_id === sponsorId)
+  details.value = {
+    entity: 'sponsor',
+    key: String(sponsorId),
+    title: found?.display_name || `Sponsor ${sponsorId}`,
+  }
+}
+
+function openFamilyDetails(familyId: number): void {
+  const card = items.value.find((entry) => entry.family_id === familyId)
+  const name = card
+    ? [card.first_name, card.last_name].filter(Boolean).join(' ')
+    : ''
+  details.value = {
+    entity: 'family',
+    key: String(familyId),
+    title: name || `Family ${familyId}`,
+  }
+}
+
+function openChildDetails(childId: string): void {
+  details.value = {
+    entity: 'child',
+    key: childId,
+    title: childInfo.value.get(childId)?.name ?? `Child ${childId}`,
+  }
+}
+
+/** Load every angel assigned to one sponsor for the assigned-angels popup. */
+async function loadAssignedAngels(sponsorId: number): Promise<void> {
+  assignedAngelsLoading.value = true
+  assignedAngelsError.value = null
+  try {
+    const items = await listSponsorAngels(seasonName.value, sponsorId)
+    assignedAngels.value = items.map((item) => ({
+      childId: item.zite_record_id,
+      angelId: item.angel_id ?? null,
+      name: item.first_name ?? 'Unnamed child',
+      age: item.age_at_xmas ?? null,
+      needs: [item.need_1, item.need_2].filter(Boolean).join(' | '),
+      wishes: [item.desire_1, item.desire_2].filter(Boolean).join(' | '),
+      dropoff: item.dropoff_location ?? null,
+    }))
+  } catch (failure) {
+    assignedAngelsError.value =
+      failure instanceof Error
+        ? failure.message
+        : 'assigned angels request failed'
+  } finally {
+    assignedAngelsLoading.value = false
+  }
+}
+
+function openAssignments(sponsorId: number): void {
+  assignedSponsorId.value = sponsorId
+  assignedAngels.value = []
+  void loadAssignedAngels(sponsorId)
+}
+
+function retryAssignedAngels(): void {
+  if (assignedSponsorId.value !== null) {
+    void loadAssignedAngels(assignedSponsorId.value)
+  }
+}
+
+/** A row in the angels popup opens the child's audit editor on top of it. */
+function openAssignedChild(child: { id: string; name: string }): void {
+  details.value = { entity: 'child', key: child.id, title: child.name }
 }
 
 function applyFilters(): void {
@@ -641,6 +779,32 @@ async function submitRelease(): Promise<void> {
   }
 }
 
+function onDispatch(sponsorId: number): void {
+  resetWriteState()
+  dispatchTargetId.value = sponsorId
+  dispatchOpen.value = true
+}
+
+async function submitDispatch(): Promise<void> {
+  dispatchOpen.value = false
+  const id = dispatchTargetId.value
+  const target = sponsors.value.find((s) => s.sponsor_id === id)
+  if (id === null || !target || !seasonName.value) return
+  pending.value = true
+  try {
+    await dispatchPackets(seasonName.value, {
+      sponsor_id: id,
+      expected_versions: { [`sponsor:${id}`]: target.row_version },
+    })
+    notice.value = `Packets dispatched for sponsor ${id} — assignments are now locked.`
+    await loadSponsors()
+  } catch (failure) {
+    handleWriteError(failure)
+  } finally {
+    pending.value = false
+  }
+}
+
 async function submitHold(note: string): Promise<void> {
   holdOpen.value = false
   const familyId = holdTargetId.value
@@ -717,7 +881,9 @@ watch(
 function startPolling(): void {
   stopPolling()
   pollTimer = setInterval(() => {
-    if (document.hidden || !seasonName.value) return
+    if (document.hidden || !seasonName.value || sponsorId.value === null) {
+      return
+    }
     void fetchPool().catch(() => undefined)
   }, POLL_MS)
 }
@@ -769,6 +935,19 @@ onBeforeUnmount(() => {
       </span>
       <RouterLink to="/match">Open the match report</RouterLink>
     </p>
+
+    <div class="sponsor-first" data-testid="sponsor-first">
+      <h2>Shopping for sponsor</h2>
+      <SponsorCardList
+        :sponsors="sponsors"
+        :model-value="sponsorId"
+        :disabled="automaticRun.active"
+        @update:model-value="chooseSponsor"
+        @dispatch="onDispatch"
+        @open-details="openSponsorDetails"
+        @open-assignments="openAssignments"
+      />
+    </div>
 
     <form class="filters" @submit.prevent="submitSearch">
       <input
@@ -839,6 +1018,18 @@ onBeforeUnmount(() => {
           </option>
         </select>
       </label>
+      <label class="muted">
+        <input v-model="allAudited" type="checkbox" @change="applyFilters" />
+        All children audited
+      </label>
+      <label class="muted">
+        Info sheet
+        <select v-model="infoSheet" @change="applyFilters">
+          <option v-for="option in INFO_SHEETS" :key="option" :value="option">
+            {{ option }}
+          </option>
+        </select>
+      </label>
     </form>
 
     <div class="filters" role="group" aria-label="Assignment state">
@@ -870,7 +1061,15 @@ onBeforeUnmount(() => {
       <span class="muted" data-testid="pool-total">{{ total }} families</span>
     </div>
 
-    <p v-if="loading" role="status">Loading the pool…</p>
+    <p
+      v-if="sponsorId === null"
+      class="muted pick-sponsor"
+      data-testid="pick-sponsor-first"
+    >
+      Choose a sponsor above to shop for. The pool shows only the families
+      that sponsor can take.
+    </p>
+    <p v-else-if="loading" role="status">Loading the pool…</p>
     <p v-else-if="error" class="error-text" role="alert" data-testid="list-error">
       {{ error }} <button type="button" @click="load">Retry</button>
     </p>
@@ -878,7 +1077,7 @@ onBeforeUnmount(() => {
       No families match these filters.
     </p>
 
-    <div v-else class="grid" role="list">
+    <div v-else class="grid grid--families" role="list">
       <FamilyCard
         v-for="card in items"
         :key="card.family_id"
@@ -888,10 +1087,12 @@ onBeforeUnmount(() => {
         @toggle="toggleChild"
         @select-all="selectFamily"
         @release-hold="onReleaseHold"
+        @open-details="openFamilyDetails"
+        @open-child-details="openChildDetails"
       />
     </div>
 
-    <div class="pagination">
+    <div v-if="sponsorId !== null" class="pagination">
       <button type="button" :disabled="page <= 1" @click="go(page - 1)">
         Previous
       </button>
@@ -916,11 +1117,6 @@ onBeforeUnmount(() => {
         <span role="status" data-testid="selection-count">
           {{ selection.size }} selected
         </span>
-        <SponsorPicker
-          v-model="sponsorId"
-          :sponsors="sponsors"
-          :disabled="automaticRun.active"
-        />
       </div>
 
       <p
@@ -933,7 +1129,11 @@ onBeforeUnmount(() => {
         {{ automaticRun.status ?? 'running' }}); manual assignment is paused.
       </p>
 
-      <p v-if="sponsorFull" class="error-text" data-testid="cap-warning">
+      <p v-if="sponsorDispatched" class="error-text" data-testid="dispatched-warning">
+        {{ dispatchedMessage }}
+      </p>
+
+      <p v-else-if="sponsorFull" class="error-text" data-testid="cap-warning">
         {{ capMessage }}
       </p>
 
@@ -1029,6 +1229,33 @@ onBeforeUnmount(() => {
       @confirm="submitRelease"
       @cancel="releaseOpen = false"
     />
+    <!-- Immediately before EntityModal: the child audit popup paints on top. -->
+    <SponsorAngelsModal
+      :open="assignedSponsorId !== null"
+      :sponsor-name="assignedSponsorName"
+      :angels="assignedAngels"
+      :loading="assignedAngelsLoading"
+      :error="assignedAngelsError"
+      @close="assignedSponsorId = null"
+      @retry="retryAssignedAngels"
+      @open-child="openAssignedChild"
+    />
+    <EntityModal
+      :open="details !== null"
+      :entity="details?.entity ?? 'family'"
+      :entity-key="details?.key ?? ''"
+      :title="details?.title"
+      @close="details = null"
+    />
+    <ConfirmDialog
+      :open="dispatchOpen"
+      title="Dispatch packets?"
+      message="The children's info sheets have been sent to this sponsor. Their assignments can no longer be changed for this sponsor."
+      confirm-label="Dispatch"
+      dangerous
+      @confirm="submitDispatch"
+      @cancel="dispatchOpen = false"
+    />
     <HoldDialog
       :open="holdOpen"
       :family-label="holdLabel"
@@ -1039,6 +1266,28 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.sponsor-first {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.8rem 1rem;
+  margin-bottom: 1rem;
+  background: #eef4fa;
+  border: 2px solid #12324f;
+  border-radius: 6px;
+}
+
+.sponsor-first h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.pick-sponsor {
+  padding: 2rem 1rem;
+  text-align: center;
+}
+
 .selection-tray {
   position: sticky;
   bottom: 0;

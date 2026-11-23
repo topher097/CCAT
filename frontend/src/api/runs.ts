@@ -22,20 +22,28 @@ export type GenerateRunSettings = {
   max_workers: number
 }
 
+/** The screening command's global AI flag. */
+export type ScreenRunSettings = {
+  overwrite_new: boolean
+}
+
 /** The commands the run menu drives. */
 export type RunCommand = 'match' | 'generate'
 
+/** The screening command's own settings command. */
+export type ScreenCommand = 'screen'
+
 /** GET one command's effective run settings. */
 export function getRunSettings(
-  command: RunCommand,
+  command: RunCommand | ScreenCommand,
 ): Promise<RunSettingsView> {
   return api.get(`/api/v1/runs/${command}/settings`)
 }
 
 /** Persist one command's run settings to the configuration file. */
 export function saveRunSettings(
-  command: RunCommand,
-  body: MatchRunSettings | GenerateRunSettings,
+  command: RunCommand | ScreenCommand,
+  body: MatchRunSettings | GenerateRunSettings | ScreenRunSettings,
 ): Promise<RunSettingsView> {
   return api.patch(`/api/v1/runs/${command}/settings`, body)
 }

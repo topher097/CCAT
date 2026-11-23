@@ -16,7 +16,8 @@ import SpecialNeedsEditor from './SpecialNeedsEditor.vue'
 import ConflictPanel from './ConflictPanel.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 
-const props = defineProps<{ entity: Entity; entityKey: string }>()
+/** `embedded`: shown in a popup on another page, so no previous/next neighbours. */
+const props = defineProps<{ entity: Entity; entityKey: string; embedded?: boolean }>()
 
 const session = useSessionStore()
 const detail = ref<EntityDetail | null>(null)
@@ -44,6 +45,8 @@ const fieldSpecs = computed<FieldSpec[]>(() =>
 /** The list's filters, carried in the URL, decide the neighbours. */
 const { query: carriedQuery } = useAuditNav('/audit')
 const listFilters = computed(() => {
+  // The host page's query belongs to the host, not to an audit list.
+  if (props.embedded) return { q: '', status: null }
   const params = new URLSearchParams(carriedQuery.value)
   return { q: params.get('q') ?? '', status: params.get('status') }
 })
@@ -53,6 +56,12 @@ const labels = computed<Record<string, string>>(() =>
       (spec) => [spec.field, spec.label],
     ),
   ),
+)
+const BOOLEAN_FIELDS = computed(
+  () =>
+    new Set(
+      fieldSpecs.value.filter((spec) => spec.kind === 'boolean').map((spec) => spec.field),
+    ),
 )
 const neutralFields = computed(() =>
   fieldSpecs.value.filter((spec) => spec.neutral).map((spec) => spec.field),
@@ -178,19 +187,42 @@ function setField(field: string, value: unknown): void {
 function payload(): EntityPatch {
   const body: Record<string, unknown> = {}
   for (const field of touched.value) {
-    body[field] = NUMERIC_FIELDS.has(field)
-      ? toAge(draft[field])
-      : normalizeValue(draft[field])
-        ? String(draft[field])
-        : null
+    body[field] = BOOLEAN_FIELDS.value.has(field)
+      ? draft[field] === true
+      : NUMERIC_FIELDS.has(field)
+        ? toAge(draft[field])
+        : normalizeValue(draft[field])
+          ? String(draft[field])
+          : null
   }
   if (pendingStatus.value) body.status = pendingStatus.value
   return body as EntityPatch
 }
 
+/**
+ * Whether the draft differs from the baseline. A checkbox cannot say
+ * "unset", so for boolean fields null and false count as the same value.
+ */
+function fieldDiffers(spec: FieldSpec): boolean {
+  const current = draft[spec.field]
+  const baseline = detail.value?.baseline[spec.field]
+  return spec.kind === 'boolean'
+    ? (current === true) !== (baseline === true)
+    : differs(current, baseline)
+}
+
+/** The baseline cell text; booleans read Yes/No, unset stays a dash. */
+function baselineText(spec: FieldSpec): string {
+  const value = detail.value?.baseline[spec.field]
+  if (spec.kind === 'boolean' && typeof value === 'boolean') {
+    return value ? 'Yes' : 'No'
+  }
+  return show(value)
+}
+
 function diffClass(spec: FieldSpec): string {
   if (!detail.value) return ''
-  if (!differs(draft[spec.field], detail.value.baseline[spec.field])) return ''
+  if (!fieldDiffers(spec)) return ''
   return spec.neutral ? 'diff-neutral' : 'diff-changed'
 }
 
@@ -503,7 +535,7 @@ onMounted(() => void load())
       <p v-if="notice" class="notice" data-testid="save-notice">{{ notice }}</p>
 
       <p
-        v-if="entity === 'sponsor'"
+        v-if="entity === 'sponsor' && !embedded"
         class="muted"
         data-testid="manual-matching-pointer"
       >
@@ -541,22 +573,31 @@ onMounted(() => void load())
                 {{ spec.label }}
                 <span v-if="spec.neutral" class="badge">control</span>
                 <span
-                  v-if="
-                    differs(draft[spec.field], detail.baseline[spec.field])
-                  "
+                  v-if="fieldDiffers(spec)"
                   class="badge"
                   data-testid="diff-marker"
                 >
                   differs{{ spec.neutral ? ' (not status-relevant)' : '' }}
                 </span>
               </td>
-              <td>{{ show(detail.baseline[spec.field]) }}</td>
+              <td>{{ baselineText(spec) }}</td>
               <td>
                 <SpecialNeedsEditor
                   v-if="spec.field === 'special_needs'"
                   :model-value="(draft.special_needs as string | null)"
                   :disabled="isAudited"
                   @update:model-value="setField('special_needs', $event)"
+                />
+                <input
+                  v-else-if="spec.kind === 'boolean'"
+                  :name="spec.field"
+                  type="checkbox"
+                  :aria-label="spec.label"
+                  :checked="draft[spec.field] === true"
+                  :disabled="isAudited"
+                  @change="
+                    setField(spec.field, ($event.target as HTMLInputElement).checked)
+                  "
                 />
                 <textarea
                   v-else-if="spec.kind === 'textarea'"
@@ -627,7 +668,7 @@ onMounted(() => void load())
         </span>
       </div>
 
-      <div class="status-line" style="margin-top: 0.75rem">
+      <div v-if="!embedded" class="status-line" style="margin-top: 0.75rem">
         <RouterLink
           v-if="detail.previous"
           class="chip"

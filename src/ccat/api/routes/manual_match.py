@@ -19,11 +19,13 @@ from ccat.api.dto import (
     ManualAssignmentListPage,
     ManualAssignmentRequest,
     ManualAssignmentResult,
+    ManualDispatchRequest,
     ManualHoldListPage,
     ManualHoldReleaseRequest,
     ManualHoldRequest,
     ManualHoldResult,
     ManualMatchPoolPage,
+    ManualMatchSponsor,
     ManualMatchSponsorPage,
     ManualReleaseRequest,
 )
@@ -46,6 +48,7 @@ _STATUS: dict[str, int] = {
     db_manual_match.CONFLICT: 409,
     db_manual_match.SPONSOR_FULL: 409,
     db_manual_match.MATCH_RUNNING: 409,
+    db_manual_match.PACKETS_DISPATCHED: 409,
     db_manual_match.STALE_VERSION: 412,
     db_manual_match.INVALID_INPUT: 422,
 }
@@ -65,6 +68,7 @@ LocationFilter = Literal["any", "hancock", "calumet"]
 ChildStatusFilter = Literal[
     "any", "audited", "in_progress", "needs_clarification", "new"
 ]
+InfoSheetFilter = Literal["any", "missing", "generated"]
 SourceFilter = Literal["auto", "manual"]
 
 
@@ -145,6 +149,8 @@ async def get_pool(
     family_size_min: int | None = None,
     family_size_max: int | None = None,
     child_status: ChildStatusFilter = "any",
+    all_audited: bool = False,
+    info_sheet: InfoSheetFilter = "any",
     hold: HoldFilter = "not_held",
     sponsor_id: int | None = None,
 ) -> Any:
@@ -165,6 +171,8 @@ async def get_pool(
         family_size_min: The smallest non-ignored family.
         family_size_max: The largest non-ignored family.
         child_status: The child audit-lifecycle filter.
+        all_audited: Keep only families whose every live child is audited.
+        info_sheet: Whether a child's info sheet is missing or generated.
         hold: Whether the family carries an active hold.
         sponsor_id: Order by fit for this sponsor; drop forbidden families.
 
@@ -192,6 +200,8 @@ async def get_pool(
                 family_size_min=family_size_min,
                 family_size_max=family_size_max,
                 child_status=child_status,
+                all_audited=all_audited,
+                info_sheet=info_sheet,
                 hold=hold,
                 sponsor_id=sponsor_id,
             ),
@@ -342,6 +352,42 @@ async def post_release(
     cfg: Config = request.app.state.cfg
     try:
         return await db_manual_match.release(
+            repo, cfg, user.username, user.id, body
+        )
+    except ManualMatchError as error:
+        raise _error(error) from error
+    except StaleRowVersionError as error:
+        return await _stale_response(repo, error)
+
+
+@router.post(
+    "/dispatch",
+    response_model=ManualMatchSponsor,
+    dependencies=[Depends(require_csrf)],
+)
+async def post_dispatch(
+    body: ManualDispatchRequest,
+    request: Request,
+    repo: SeasonStoreRepository = Depends(season_repo),
+    user: AuthUser = Depends(require_roles("coordinator", "admin")),
+) -> Any:
+    """Record a sponsor's packet dispatch (coordinator/admin).
+
+    Args:
+        body: The dispatch request.
+        request: The current request.
+        repo: The season-bound repository.
+        user: The authenticated identity.
+
+    Returns:
+        The sponsor's fresh row, or a 412 body with the fresh row.
+
+    Raises:
+        ApiError: The mapped 404/409/412/422 refusal.
+    """
+    cfg: Config = request.app.state.cfg
+    try:
+        return await db_manual_match.dispatch_packets(
             repo, cfg, user.username, user.id, body
         )
     except ManualMatchError as error:

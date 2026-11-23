@@ -717,11 +717,27 @@ class ManualMatchSponsor(StrictModel):
         pref_age_min: The lowest preferred age.
         pref_age_max: The highest preferred age.
         status: The sponsor's audit status.
+        first_name: The sponsor contact's first name.
+        last_name: The sponsor contact's last name.
+        organization_name: The organization name, when there is one.
+        elevated_budget: The auditor's elevated-budget flag (the store
+            reads an unset flag as False).
+        physical_packet: The auditor's physical-packet flag (the store
+            reads an unset flag as False).
+        packets_dispatched: Whether the info-sheet packets were sent.
+        packets_dispatched_at: When the packets were dispatched (ISO 8601).
     """
 
     sponsor_id: int
     row_version: int = 0
     display_name: str = ""
+    first_name: str | None = None
+    last_name: str | None = None
+    organization_name: str | None = None
+    elevated_budget: bool | None = None
+    physical_packet: bool | None = None
+    packets_dispatched: bool = False
+    packets_dispatched_at: str | None = None
     email: str | None = None
     phone: str | None = None
     sponsor_type: str | None = None
@@ -794,6 +810,21 @@ class ManualReleaseRequest(StrictModel):
     expected_versions: dict[str, int] = Field(default_factory=dict)
     confirm: bool = False
     note: str | None = None
+
+
+class ManualDispatchRequest(StrictModel):
+    """Dispatch a sponsor's info-sheet packets.
+
+    Attributes:
+        sponsor_id: The sponsor whose packets went out.
+        expected_versions: The caller's expected row versions, keyed
+            ``sponsor:<id>``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sponsor_id: int
+    expected_versions: dict[str, int] = Field(default_factory=dict)
 
 
 class ManualAssignmentEntry(StrictModel):
@@ -884,6 +915,13 @@ class ManualAssignmentListItem(StrictModel):
         assignment_source: "auto" or "manual".
         last_updated_by: Who last wrote the child row.
         last_updated_at: When the child row was last written.
+        first_name: The angel's first name.
+        age_at_xmas: The angel's age at Christmas.
+        need_1: First stated need.
+        need_2: Second stated need.
+        desire_1: First stated want.
+        desire_2: Second stated want.
+        dropoff_location: The family's gift pickup location (the angel's drop-off).
     """
 
     zite_record_id: str
@@ -893,6 +931,13 @@ class ManualAssignmentListItem(StrictModel):
     assignment_source: str | None = None
     last_updated_by: str | None = None
     last_updated_at: str | None = None
+    first_name: str | None = None
+    age_at_xmas: int | None = None
+    need_1: str | None = None
+    need_2: str | None = None
+    desire_1: str | None = None
+    desire_2: str | None = None
+    dropoff_location: str | None = None
 
 
 class ManualAssignmentListPage(StrictModel):
@@ -1006,6 +1051,19 @@ class GenerateRunSettings(StrictModel):
     max_workers: int = 4
 
 
+class ScreenRunSettings(StrictModel):
+    """The screening command's rememberable AI flag.
+
+    Attributes:
+        overwrite_new: Let the model's corrections overwrite the
+            existing values of children whose status is still ``new``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    overwrite_new: bool = False
+
+
 class RunSettingsView(StrictModel):
     """One command's effective run settings.
 
@@ -1076,6 +1134,7 @@ __all__ = [
     "NeighbourView",
     "Overview",
     "RunSettingsView",
+    "ScreenRunSettings",
     "SeasonView",
     "UserCreate",
     "UserPatch",

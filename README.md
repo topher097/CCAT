@@ -90,6 +90,12 @@ blanket data replacement: human edits, controls, and module-owned fields
 retain their protections. Failed or interrupted AI/PDF work remains
 retryable; completed work remains complete.
 
+The one exception to the human-edit protection is the global setting
+`ai_screening.overwrite_new` (off by default). With it on, AI screening
+replaces every value of a child whose status is still `new`; children that
+have moved past `new` keep their human edits either way. The `/screen`
+page toggles it, and the flag applies to every screening run.
+
 Duplicates are flagged, never merged. ZeroBounce and Nominatim reuse their
 logs, so reruns do not repeat successful external checks; complete verbatim
 responses remain stored.
