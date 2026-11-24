@@ -4476,7 +4476,7 @@
     },
     "/api/v1/artifacts/{artifact_id}/download": {
       "get": {
-        "description": "Download one artifact (any authenticated role; no-store).\n\nThe id resolves only to a path inside the canonical artifact root\n(:func:`ccat.db.artifacts.resolve_download`); sensitive kinds are\nrecorded in the security-audit events (\u00a78).\n\nArgs:\n    artifact_id: The artifact id.\n    request: The current request.\n    _user: Authenticated identity.\n    _csrf: CSRF guard.\n\nReturns:\n    The file response (attachment disposition).\n\nRaises:\n    ApiError: 404 unknown artifact/missing file; 403 path escape.",
+        "description": "Download one artifact (any authenticated role; no-store).\n\nThe id resolves only to a path inside the canonical artifact root\n(:func:`ccat.db.artifacts.resolve_download`); sensitive kinds are\nrecorded in the security-audit events (\u00a78).\n\nArgs:\n    artifact_id: The artifact id.\n    request: The current request.\n    inline: Display PDF artifacts inline instead of downloading.\n    _user: Authenticated identity.\n    _csrf: CSRF guard.\n\nReturns:\n    The file response.\n\nRaises:\n    ApiError: 404 unknown artifact/missing file; 403 path escape.",
         "operationId": "download_artifact_api_v1_artifacts__artifact_id__download_get",
         "parameters": [
           {
@@ -4486,6 +4486,16 @@
             "schema": {
               "title": "Artifact Id",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "inline",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Inline",
+              "type": "boolean"
             }
           }
         ],
@@ -6197,6 +6207,63 @@
           }
         },
         "summary": "Post Drafts",
+        "tags": [
+          "dispatch"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/dispatch/sheets.zip": {
+      "get": {
+        "description": "Download child information sheets as a ZIP archive.\n\nThe archive holds the same child PII as a single ``child_sheet``\nartifact download, so the download is recorded in the security-audit\nevents (\u00a78).\n\nArgs:\n    season: The season in the route.\n    request: The current request.\n    sponsor_id: Optional sponsor to scope the archive to.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The ZIP archive response.\n\nRaises:\n    ApiError: The mapped refusal when no sheets are available.",
+        "operationId": "get_sheets_zip_api_v1_seasons__season__dispatch_sheets_zip_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sponsor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sponsor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Sheets Zip",
         "tags": [
           "dispatch"
         ]

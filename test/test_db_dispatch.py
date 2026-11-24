@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import threading
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1422,3 +1424,169 @@ async def test_dispatch_routes_auth_roles_and_csrf(
     assert transport.requests == []
     # Seed has no auditor-only/read-only user. Thus a forbidden-draft case
     # cannot use dev auth; lmboswell covers the important send restriction.
+
+
+# ---------------------------------------------------------------------------
+# Child information sheet bundle download.
+# ---------------------------------------------------------------------------
+
+
+async def _register_sheets(
+    app: FastAPI, sheets: list[tuple[int, str, str]]
+) -> list[Path]:
+    """Write and register child-sheet artifacts for the given sponsors.
+
+    Args:
+        app: The application owning the artifact root.
+        sheets: Sponsor id, angel id, and file name for each sheet.
+
+    Returns:
+        The physical paths of the registered sheets.
+    """
+    cfg = app.state.cfg
+    root = Path(cfg.storage.artifact_root)
+    paths: list[Path] = []
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "generator") as repo:
+            for sponsor_id, angel_id, filename in sheets:
+                path = root / "child_sheets" / filename
+                path.parent.mkdir(parents=True, exist_ok=True)
+                payload = f"sheet for {angel_id}".encode()
+                path.write_bytes(payload)
+                await repo.register_artifact(
+                    "child_sheet",
+                    str(path.relative_to(root)),
+                    filename,
+                    "application/pdf",
+                    len(payload),
+                    hashlib.sha256(payload).hexdigest(),
+                    "generator",
+                    meta={"angel_id": angel_id, "sponsor_id": sponsor_id},
+                )
+                paths.append(path)
+    finally:
+        await engine.dispose()
+    return paths
+
+
+def _zip_names(payload: bytes) -> list[str]:
+    """Read the member names out of a downloaded archive.
+
+    Args:
+        payload: The downloaded ZIP bytes.
+
+    Returns:
+        The archive member names.
+    """
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        return archive.namelist()
+
+
+async def test_sheets_zip_is_scoped_to_sponsor(
+    app: FastAPI, client: Client
+) -> None:
+    """The scoped archive holds only that sponsor's sheets.
+
+    Args:
+        app: The application under test.
+        client: The authenticated coordinator client.
+    """
+    await _register_sheets(
+        app,
+        [
+            (1, "1A", "AT2026_1A.pdf"),
+            (1, "1B", "AT2026_1B.pdf"),
+            (2, "2A", "AT2026_2A.pdf"),
+        ],
+    )
+
+    response = await client.client.get(f"{BASE}/sheets.zip?sponsor=1")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/zip"
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="child_info_sheets_2026_sponsor1.zip"'
+    )
+    assert _zip_names(response.content) == ["AT2026_1A.pdf", "AT2026_1B.pdf"]
+
+
+async def test_sheets_zip_without_sponsor_holds_every_sheet(
+    app: FastAPI, client: Client
+) -> None:
+    """The unscoped archive holds every registered sheet.
+
+    Args:
+        app: The application under test.
+        client: The authenticated coordinator client.
+    """
+    await _register_sheets(
+        app,
+        [(1, "1A", "AT2026_1A.pdf"), (2, "2A", "AT2026_2A.pdf")],
+    )
+
+    response = await client.client.get(f"{BASE}/sheets.zip")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="child_info_sheets_2026.zip"'
+    )
+    assert _zip_names(response.content) == ["AT2026_1A.pdf", "AT2026_2A.pdf"]
+
+
+async def test_sheets_zip_without_matches_returns_404(client: Client) -> None:
+    """A sponsor without sheets is a 404, not an empty archive.
+
+    Args:
+        client: The authenticated coordinator client.
+    """
+    response = await client.client.get(f"{BASE}/sheets.zip?sponsor=99")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "not_found"
+
+
+async def test_sheets_zip_skips_artifact_missing_from_disk(
+    app: FastAPI, client: Client
+) -> None:
+    """A sheet deleted from disk is skipped; the rest still downloads.
+
+    Args:
+        app: The application under test.
+        client: The authenticated coordinator client.
+    """
+    paths = await _register_sheets(
+        app,
+        [(1, "1A", "AT2026_1A.pdf"), (2, "2A", "AT2026_2A.pdf")],
+    )
+    paths[0].unlink()
+
+    response = await client.client.get(f"{BASE}/sheets.zip")
+
+    assert response.status_code == 200, response.text
+    assert _zip_names(response.content) == ["AT2026_2A.pdf"]
+
+
+async def test_sheets_zip_download_is_audited(
+    app: FastAPI, client: Client
+) -> None:
+    """The archive download lands in the security-audit events.
+
+    Args:
+        app: The application under test.
+        client: The authenticated coordinator client.
+    """
+    await _register_sheets(app, [(1, "1A", "AT2026_1A.pdf")])
+
+    response = await client.client.get(f"{BASE}/sheets.zip?sponsor=1")
+
+    assert response.status_code == 200, response.text
+    events = [
+        event
+        for event in await _audit_rows(app)
+        if event.action == "artifact_download"
+    ]
+    assert len(events) == 1
+    assert events[0].object_type == "child_sheet_zip"
+    assert events[0].object_id == "1"
+    assert events[0].season == "2026"

@@ -4,6 +4,7 @@ import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
 import { useSessionStore } from './stores/session'
 import { useOverviewStore } from './stores/overview'
+import JobPopup from './components/JobPopup.vue'
 
 const session = useSessionStore()
 const overview = useOverviewStore()
@@ -30,6 +31,9 @@ const nav = [
 const visibleNav = computed(() =>
   nav.filter((item) => !('admin' in item) || session.hasRole('admin')),
 )
+
+/** An embedded view (the job pop-up) shows no section navigation. */
+const embedded = computed(() => route.query.embed === '1')
 
 const seasonName = computed(() => session.season?.name ?? '—')
 
@@ -61,7 +65,7 @@ onUnmounted(() => {
 
 <template>
   <div class="app">
-    <header v-if="session.authenticated" class="app-header">
+    <header v-if="session.authenticated && !embedded" class="app-header">
       <div class="brand">
         <strong>CCAT</strong>
         <span class="season" data-testid="header-season">{{ seasonName }}</span>
@@ -73,7 +77,11 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <nav v-if="session.authenticated" class="app-nav" aria-label="Sections">
+    <nav
+      v-if="session.authenticated && !embedded"
+      class="app-nav"
+      aria-label="Sections"
+    >
       <RouterLink v-for="item in visibleNav" :key="item.to" :to="item.to">
         {{ item.label }}
       </RouterLink>
@@ -89,5 +97,6 @@ onUnmounted(() => {
     <main class="app-main" :class="{ 'app-main--wide': route.meta.wide }">
       <RouterView />
     </main>
+    <JobPopup />
   </div>
 </template>

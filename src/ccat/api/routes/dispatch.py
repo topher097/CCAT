@@ -13,9 +13,9 @@ the program's rule is that only an admin sends it.
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Query, Request, Response
 
-from ccat.api.auth import AuthUser, require_csrf, require_roles
+from ccat.api.auth import AuthUser, record_event, require_csrf, require_roles
 from ccat.api.deps import season_repo
 from ccat.api.dto import (
     DispatchChildListView,
@@ -133,6 +133,62 @@ async def get_dispatch_children(
     """
     cfg: Config = request.app.state.cfg
     return await db_dispatch.list_children(repo, cfg)
+
+
+@router.get("/sheets.zip")
+async def get_sheets_zip(
+    season: str,
+    request: Request,
+    sponsor_id: int | None = Query(default=None, alias="sponsor"),
+    repo: SeasonStoreRepository = Depends(season_repo),
+    user: AuthUser = Depends(
+        require_roles("read_only", "auditor", "coordinator", "admin")
+    ),
+) -> Response:
+    """Download child information sheets as a ZIP archive.
+
+    The archive holds the same child PII as a single ``child_sheet``
+    artifact download, so the download is recorded in the security-audit
+    events (§8).
+
+    Args:
+        season: The season in the route.
+        request: The current request.
+        sponsor_id: Optional sponsor to scope the archive to.
+        repo: The season-bound repository.
+        user: The authenticated identity.
+
+    Returns:
+        The ZIP archive response.
+
+    Raises:
+        ApiError: The mapped refusal when no sheets are available.
+    """
+    cfg: Config = request.app.state.cfg
+    try:
+        payload, filename = await db_dispatch.build_sheets_zip(
+            repo, cfg, sponsor_id
+        )
+    except DispatchError as error:
+        raise _error(error) from error
+    uow = request.app.state.uow
+    await record_event(
+        uow.session_factory,
+        "artifact_download",
+        user_id=user.id,
+        object_type="child_sheet_zip",
+        object_id=str(sponsor_id) if sponsor_id is not None else "all",
+        season=season,
+        details={"kind": "child_sheet", "sponsor_id": sponsor_id},
+    )
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
 
 
 @router.post(

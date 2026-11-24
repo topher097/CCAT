@@ -2,20 +2,24 @@
 /** /dispatch: generate packets, then review and send sponsor email. */
 
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 
 import {
   draftDispatchEmails,
   getDispatchDraft,
   listDispatch,
+  listDispatchChildren,
   patchDispatchDraft,
   sendDispatchEmail,
+  type DispatchChild,
   type DispatchDraft,
   type DispatchDraftRequest,
   type DispatchListView,
   type DispatchRow,
 } from '../api/dispatch'
+import { artifactDownloadUrl } from '../api/commands'
 import { ApiError } from '../api/client'
+import { dispatchPackets } from '../api/manual-match'
 import {
   enqueueJob,
   isActive,
@@ -25,20 +29,32 @@ import {
 } from '../api/jobs'
 import DispatchGenerationBar from '../components/DispatchGenerationBar.vue'
 import DispatchSponsorTable from '../components/DispatchSponsorTable.vue'
+import PopupFrame from '../components/PopupFrame.vue'
 import SponsorEmailModal from '../components/SponsorEmailModal.vue'
 import { useSessionStore } from '../stores/session'
 import { personName } from '../utils/sponsor'
+import { useJobPopup } from '../composables/useJobPopup'
 
 const UNKNOWN_SEND_MESSAGE =
   'We do not know whether this email was accepted. Check the sent mail before sending again.'
 
 const session = useSessionStore()
-const router = useRouter()
+const route = useRoute()
+const { openJob } = useJobPopup()
 const seasonName = computed(() => session.season?.name ?? '')
+const focusSponsorId = computed(() => {
+  const query = route.query.sponsor
+  const value = Array.isArray(query) ? query[0] : query
+  if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) return null
+  const id = Number(value)
+  return Number.isSafeInteger(id) ? id : null
+})
 const data = ref<DispatchListView | null>(null)
+const children = ref<DispatchChild[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const notice = ref<string | null>(null)
+const dispatchActionError = ref<string | null>(null)
 const activeJob = ref<Job | null>(null)
 const generationBar = ref<InstanceType<typeof DispatchGenerationBar> | null>(null)
 const enqueueing = ref(false)
@@ -47,6 +63,17 @@ const conflictJobId = ref<number | null>(null)
 
 const emailOpen = ref(false)
 const selectedRow = ref<DispatchRow | null>(null)
+const packetRow = ref<DispatchRow | null>(null)
+const packetTitle = computed(() =>
+  packetRow.value
+    ? `Sponsor #${packetRow.value.sponsor_id} packet — ${personName(packetRow.value)}`
+    : '',
+)
+const packetSrc = computed(() =>
+  packetRow.value?.packet_pdf_artifact_id != null
+    ? `${artifactDownloadUrl(packetRow.value.packet_pdf_artifact_id)}?inline=true`
+    : '',
+)
 const draft = ref<DispatchDraft | null>(null)
 const draftLoading = ref(false)
 const draftError = ref<string | null>(null)
@@ -59,6 +86,11 @@ let pollTimer: number | undefined
 
 const canSend = computed(
   () => Boolean(data.value?.can_send && session.hasRole('admin')),
+)
+// Marking a sponsor dispatched writes to the sponsor row, so it needs the
+// coordinator role the manual-match dispatch endpoint requires.
+const canMarkDispatched = computed(() =>
+  session.hasRole('coordinator', 'admin'),
 )
 const jobProgress = computed(() =>
   activeJob.value ? progressOf(activeJob.value) : null,
@@ -84,6 +116,15 @@ async function load(): Promise<void> {
   }
 }
 
+async function loadChildren(): Promise<void> {
+  if (!seasonName.value) return
+  try {
+    children.value = (await listDispatchChildren(seasonName.value)).rows
+  } catch {
+    children.value = []
+  }
+}
+
 async function pollJobs(): Promise<void> {
   if (pollTimer !== undefined) window.clearTimeout(pollTimer)
   pollTimer = undefined
@@ -105,6 +146,7 @@ async function pollJobs(): Promise<void> {
 
 function refresh(): void {
   void load()
+  void loadChildren()
   void pollJobs()
 }
 
@@ -132,7 +174,7 @@ async function enqueueGenerate(options: Record<string, unknown>): Promise<void> 
   try {
     const job = await enqueueJob(season, 'generate', options)
     activeJob.value = job
-    await router.push(`/jobs/${job.id}`)
+    openJob(job.id)
   } catch (failure) {
     if (!(failure instanceof ApiError)) {
       generationError.value = 'Enqueue failed.'
@@ -153,6 +195,32 @@ async function enqueueGenerate(options: Record<string, unknown>): Promise<void> 
 
 function generatePacket(sponsorId: number, overwrite: boolean): void {
   generationBar.value?.requestSponsor(sponsorId, overwrite)
+}
+
+async function markDispatched(row: DispatchRow): Promise<void> {
+  const season = seasonName.value
+  if (!season) return
+  dispatchActionError.value = null
+  notice.value = null
+  try {
+    await dispatchPackets(season, {
+      sponsor_id: row.sponsor_id,
+      expected_versions: {
+        [`sponsor:${row.sponsor_id}`]: row.sponsor_row_version,
+      },
+    })
+    await load()
+    notice.value = `Sponsor #${row.sponsor_id} marked dispatched.`
+  } catch (failure) {
+    dispatchActionError.value = failureMessage(
+      failure,
+      'Could not mark sponsor dispatched.',
+    )
+  }
+}
+
+function openPacket(row: DispatchRow): void {
+  packetRow.value = row
 }
 
 function patchRow(sponsorId: number, patch: Partial<DispatchRow>): void {
@@ -332,11 +400,19 @@ onUnmounted(() => {
       <span>
         {{ jobProgress?.completed ?? 0 }} / {{ jobProgress?.total ?? '—' }}
       </span>
-      <RouterLink :to="`/jobs/${activeJob.id}`">Open job</RouterLink>
+      <button type="button" @click="openJob(activeJob.id)">Open job</button>
     </div>
 
     <p v-if="notice" class="notice" role="status" data-testid="send-notice">
       {{ notice }}
+    </p>
+    <p
+      v-if="dispatchActionError"
+      class="error-text"
+      role="alert"
+      data-testid="dispatch-action-error"
+    >
+      {{ dispatchActionError }}
     </p>
 
     <p v-if="!seasonName" class="muted">No active season loaded.</p>
@@ -367,11 +443,17 @@ onUnmounted(() => {
       <DispatchSponsorTable
         v-else
         :rows="data.rows"
+        :season="seasonName"
+        :focus-sponsor-id="focusSponsorId"
+        :children="children"
         :can-send="canSend"
+        :can-mark-dispatched="canMarkDispatched"
         :mail-configured="data.mail_configured"
         style="margin-top: 1rem"
         @open-email="openEmail"
         @generate-packet="generatePacket"
+        @view-packet="openPacket"
+        @mark-dispatched="markDispatched"
       />
     </template>
 
@@ -390,6 +472,12 @@ onUnmounted(() => {
       @reload="reloadDraft"
       @save="saveDraft"
       @send="sendEmail"
+    />
+    <PopupFrame
+      :open="packetRow !== null"
+      :title="packetTitle"
+      :src="packetSrc"
+      @close="packetRow = null"
     />
   </section>
 </template>

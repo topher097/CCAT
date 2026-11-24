@@ -31,9 +31,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import logging
+import io
 import json
+import logging
 import uuid
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -643,6 +645,78 @@ async def list_children(
     return {"rows": rows}
 
 
+async def build_sheets_zip(
+    repo: SeasonStoreRepository, cfg: Config, sponsor_id: int | None
+) -> tuple[bytes, str]:
+    """Build a ZIP containing the selected child information sheets.
+
+    Args:
+        repo: The season-bound repository.
+        cfg: Pipeline configuration.
+        sponsor_id: Optional sponsor to scope the sheets to.
+
+    Returns:
+        The ZIP bytes and download filename.
+
+    Raises:
+        DispatchError: When no matching sheet artifacts exist.
+    """
+    root = artifact_root(cfg).resolve()
+    sheets = []
+    for row in await repo.artifact_rows():
+        if row.get("kind") != "child_sheet":
+            continue
+        meta = row.get("meta")
+        meta = meta if isinstance(meta, dict) else {}
+        if sponsor_id is not None and meta.get("sponsor_id") != sponsor_id:
+            continue
+        sheets.append(row)
+
+    if not sheets:
+        raise DispatchError(NOT_FOUND, "no child information sheets found")
+
+    members: list[tuple[str, bytes]] = []
+    used_names: set[str] = set()
+    for row in sorted(
+        sheets,
+        key=lambda item: (
+            str(item.get("filename") or ""),
+            str((item.get("meta") or {}).get("sponsor_id") or ""),
+            str(item.get("path") or ""),
+            int(item.get("id") or 0),
+        ),
+    ):
+        target = (root / str(row.get("path") or "")).resolve()
+        if not target.is_relative_to(root) or not target.is_file():
+            logger.warning(
+                "skipping unavailable child sheet artifact %s", row.get("id")
+            )
+            continue
+        filename = str(row.get("filename") or target.name)
+        member_name = filename
+        if member_name in used_names:
+            meta = row.get("meta")
+            meta = meta if isinstance(meta, dict) else {}
+            member_name = f"{meta.get('sponsor_id')}_{filename}"
+        used_names.add(member_name)
+        members.append((member_name, target.read_bytes()))
+
+    if not members:
+        raise DispatchError(NOT_FOUND, "no child information sheets found")
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(
+        output, mode="w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        for name, payload in sorted(members, key=lambda item: item[0]):
+            archive.writestr(name, payload)
+
+    filename = f"child_info_sheets_{cfg.season}"
+    if sponsor_id is not None:
+        filename += f"_sponsor{sponsor_id}"
+    return output.getvalue(), f"{filename}.zip"
+
+
 async def draft_sponsors(
     repo: SeasonStoreRepository,
     cfg: Config,
@@ -1149,6 +1223,7 @@ __all__ = [
     "NOT_FOUND",
     "STALE_VERSION",
     "DispatchError",
+    "build_sheets_zip",
     "draft_sponsors",
     "get_draft",
     "list_children",

@@ -366,6 +366,14 @@ def _pending_rows(
         pending = frame.filter(~pl.col("generated_info_sheet"))
     audited = pending.filter(pl.col("status") == STATUS_AUDITED)
     if audited.height < pending.height:
+        for row in pending.filter(
+            pl.col("status") != STATUS_AUDITED
+        ).to_dicts():
+            logger.warning(
+                "skipping child %s: not audited (status: %s); no info sheet",
+                row.get("angel_id"),
+                row.get("status"),
+            )
         logger.info(
             "skipping %d child(ren) not yet audited (status gate, §7.5)",
             pending.height - audited.height,

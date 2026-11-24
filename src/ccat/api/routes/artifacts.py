@@ -62,6 +62,7 @@ async def list_artifacts(
 async def download_artifact(
     artifact_id: int,
     request: Request,
+    inline: bool = Query(False),
     _user: AuthUser = Depends(current_user),
     _csrf: None = Depends(require_csrf),
 ) -> FileResponse:
@@ -74,11 +75,12 @@ async def download_artifact(
     Args:
         artifact_id: The artifact id.
         request: The current request.
+        inline: Display PDF artifacts inline instead of downloading.
         _user: Authenticated identity.
         _csrf: CSRF guard.
 
     Returns:
-        The file response (attachment disposition).
+        The file response.
 
     Raises:
         ApiError: 404 unknown artifact/missing file; 403 path escape.
@@ -108,13 +110,18 @@ async def download_artifact(
             season=season_name,
             details={"kind": kind},
         )
+    disposition = (
+        "inline"
+        if inline and content_type == "application/pdf"
+        else "attachment"
+    )
     return FileResponse(
         path,
         media_type=content_type,
         filename=filename,
         headers={
             "Cache-Control": "no-store",
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": f'{disposition}; filename="{filename}"',
         },
     )
 

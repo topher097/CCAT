@@ -2,7 +2,7 @@
 /** /clarify/:familyId — draft edit, contact toggles, safe text preview. */
 
 import { computed, onMounted, ref } from 'vue'
-import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import {
@@ -19,10 +19,11 @@ import { useSessionStore } from '../stores/session'
 import { formatTime } from '../utils/format'
 import type { ConflictInfo } from '../utils/conflict'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import { useJobPopup } from '../composables/useJobPopup'
 import ConflictPanel from '../components/ConflictPanel.vue'
 
 const route = useRoute()
-const router = useRouter()
+const { openJob } = useJobPopup()
 const session = useSessionStore()
 
 const familyId = computed(() => String(route.params.familyId ?? ''))
@@ -295,7 +296,7 @@ async function enqueueAndOpen(
   jobBusy.value = true
   try {
     const job = await enqueue()
-    await router.push(`/jobs/${job.id}`)
+    openJob(job.id)
   } catch (failure) {
     jobError.value =
       failure instanceof ApiError

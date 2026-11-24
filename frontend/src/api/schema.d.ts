@@ -82,11 +82,12 @@ export interface paths {
          *     Args:
          *         artifact_id: The artifact id.
          *         request: The current request.
+         *         inline: Display PDF artifacts inline instead of downloading.
          *         _user: Authenticated identity.
          *         _csrf: CSRF guard.
          *
          *     Returns:
-         *         The file response (attachment disposition).
+         *         The file response.
          *
          *     Raises:
          *         ApiError: 404 unknown artifact/missing file; 403 path escape.
@@ -1101,6 +1102,43 @@ export interface paths {
          *         ApiError: The mapped refusal.
          */
         post: operations["post_drafts_api_v1_seasons__season__dispatch_drafts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/dispatch/sheets.zip": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Sheets Zip
+         * @description Download child information sheets as a ZIP archive.
+         *
+         *     The archive holds the same child PII as a single ``child_sheet``
+         *     artifact download, so the download is recorded in the security-audit
+         *     events (§8).
+         *
+         *     Args:
+         *         season: The season in the route.
+         *         request: The current request.
+         *         sponsor_id: Optional sponsor to scope the archive to.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The ZIP archive response.
+         *
+         *     Raises:
+         *         ApiError: The mapped refusal when no sheets are available.
+         */
+        get: operations["get_sheets_zip_api_v1_seasons__season__dispatch_sheets_zip_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4354,7 +4392,9 @@ export interface operations {
     };
     download_artifact_api_v1_artifacts__artifact_id__download_get: {
         parameters: {
-            query?: never;
+            query?: {
+                inline?: boolean;
+            };
             header?: never;
             path: {
                 artifact_id: number;
@@ -5450,6 +5490,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DispatchListView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sheets_zip_api_v1_seasons__season__dispatch_sheets_zip_get: {
+        parameters: {
+            query?: {
+                sponsor?: number | null;
+            };
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

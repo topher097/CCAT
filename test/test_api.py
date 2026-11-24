@@ -1630,6 +1630,7 @@ async def test_artifact_list_download_headers(app: Any) -> None:
     root = Path(cfg.storage.artifact_root) / "csv_export"
     root.mkdir(parents=True, exist_ok=True)
     (root / "export.csv").write_text("a,b\n1,2\n")
+    (root / "packet.pdf").write_bytes(b"%PDF-1.4 test")
     engine = create_async_engine(cfg.storage.database_url)
     from ccat.db.engine import async_session_factory
 
@@ -1650,8 +1651,25 @@ async def test_artifact_list_download_headers(app: Any) -> None:
                 created_by="system",
             )
         )
+        session.add(
+            Artifact(
+                season_id=1,
+                kind="sponsor_packet",
+                path="csv_export/packet.pdf",
+                filename="packet.pdf",
+                content_type="application/pdf",
+                size_bytes=13,
+                sha256="x",
+                created_by="system",
+            )
+        )
         await session.commit()
-        artifact_id = await session.scalar(sa_select(Artifact.id))
+        artifact_id = await session.scalar(
+            sa_select(Artifact.id).where(Artifact.filename == "export.csv")
+        )
+        pdf_artifact_id = await session.scalar(
+            sa_select(Artifact.id).where(Artifact.filename == "packet.pdf")
+        )
     await engine.dispose()
     read_only = Client(app)
     await read_only.login("lmboswell")
@@ -1667,6 +1685,21 @@ async def test_artifact_list_download_headers(app: Any) -> None:
     assert download.headers["cache-control"] == "no-store"
     assert "attachment" in download.headers["content-disposition"]
     assert download.text == "a,b\n1,2\n"
+    inline_pdf = await read_only.client.get(
+        f"/api/v1/artifacts/{pdf_artifact_id}/download?inline=true"
+    )
+    assert inline_pdf.status_code == 200
+    assert inline_pdf.headers["content-disposition"].startswith("inline")
+    attached_pdf = await read_only.client.get(
+        f"/api/v1/artifacts/{pdf_artifact_id}/download"
+    )
+    assert attached_pdf.status_code == 200
+    assert attached_pdf.headers["content-disposition"].startswith("attachment")
+    inline_csv = await read_only.client.get(
+        f"/api/v1/artifacts/{artifact_id}/download?inline=true"
+    )
+    assert inline_csv.status_code == 200
+    assert inline_csv.headers["content-disposition"].startswith("attachment")
     await read_only.close()
 
 

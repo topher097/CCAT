@@ -1,13 +1,13 @@
 <script setup lang="ts">
 /**
  * Filterable, sortable single-select sponsor list for manual matching, with a
- * dispatch button per row. Filtering and sorting are client-side over `sponsors`.
+ * dispatch link per row. Filtering and sorting are client-side over `sponsors`.
  */
 
 import { computed, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 
 import {
-  dispatchBlock,
   organization,
   personName,
   remainingOf,
@@ -50,7 +50,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: number | null]
-  dispatch: [sponsorId: number]
   openDetails: [sponsorId: number]
   openAssignments: [sponsorId: number]
 }>()
@@ -407,16 +406,13 @@ const visible = computed(() => props.sponsors.filter(matches).sort(compare))
             >
               ↗
             </button>
-            <button
-              type="button"
+            <RouterLink
+              :to="{ path: '/dispatch', query: { sponsor: sponsor.sponsor_id } }"
               class="dispatch"
               data-testid="dispatch-packets"
-              :disabled="disabled || dispatchBlock(sponsor) !== ''"
-              :title="dispatchBlock(sponsor) || 'Dispatch this sponsor\'s packets'"
-              @click="emit('dispatch', sponsor.sponsor_id)"
             >
-              Dispatch packets
-            </button>
+              View dispatch
+            </RouterLink>
           </span>
         </div>
       </div>

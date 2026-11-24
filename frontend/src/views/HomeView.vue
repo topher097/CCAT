@@ -6,9 +6,11 @@ import { useOverviewStore } from '../stores/overview'
 import { useSessionStore } from '../stores/session'
 import { STATUSES } from '../utils/status'
 import { formatTime, isStale, statusLabel } from '../utils/format'
+import { useJobPopup } from '../composables/useJobPopup'
 
 const session = useSessionStore()
 const overview = useOverviewStore()
+const { openJob } = useJobPopup()
 
 type EntityCounts = {
   total?: number
@@ -241,7 +243,14 @@ onUnmounted(() => overview.stopPolling())
               <td>{{ job.status ?? 'unknown' }}</td>
               <td>{{ formatTime(job.created_at) }}</td>
               <td>
-                <RouterLink :to="`/jobs?job=${job.id ?? ''}`">open job</RouterLink>
+                <button
+                  v-if="job.id != null"
+                  type="button"
+                  @click="openJob(job.id)"
+                >
+                  open job
+                </button>
+                <span v-else class="muted">—</span>
               </td>
             </tr>
           </tbody>

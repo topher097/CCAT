@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import ClarifyListView from '../src/views/ClarifyListView.vue'
 import ClarifyDetailView from '../src/views/ClarifyDetailView.vue'
+import { useJobPopup } from '../src/composables/useJobPopup'
 import { useSessionStore } from '../src/stores/session'
 import {
   bodyOf,
@@ -56,7 +57,11 @@ function withSeason(): void {
   useSessionStore().season = { id: 1, name: '2026', xmas_date: '2026-12-25' }
 }
 
-beforeEach(() => setActivePinia(createPinia()))
+beforeEach(() => {
+  setActivePinia(createPinia())
+  useJobPopup().closeJob()
+  expect(useJobPopup().jobId.value).toBe(null)
+})
 
 describe('clarify list', () => {
   it('lists flagged families and shows a blank contact explicitly', async () => {
@@ -302,7 +307,8 @@ describe('clarify detail', () => {
         String(entry[0]).endsWith('/seasons/2026/clarify-export'),
       ),
     ).toBe(true)
-    expect(router.currentRoute.value.path).toBe('/jobs/31')
+    expect(useJobPopup().jobId.value).toBe(31)
+    expect(router.currentRoute.value.path).toBe('/clarify/1')
   })
 
   it('enqueues a draft regeneration job with confirm', async () => {

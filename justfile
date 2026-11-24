@@ -41,3 +41,17 @@ run profile="dev":
             exit 2
             ;;
     esac
+
+# Store the Google service account key in .envrc.private as
+# GOOGLE_SERVICE_ACCOUNT_KEY (base64 of the key file). Existing value wins.
+google-cred-to-envrc-private:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="{{ justfile_directory() }}/.envrc.private"
+    key="{{ justfile_directory() }}/secrets/ccat-web-service-account-key.json"
+    if grep -Eq '^[[:space:]]*(export[[:space:]]+)?GOOGLE_SERVICE_ACCOUNT_KEY[[:space:]]*=' "$target" 2>/dev/null; then
+        echo "GOOGLE_SERVICE_ACCOUNT_KEY already set in $target; leaving it untouched." >&2
+        exit 0
+    fi
+    { printf '\nexport GOOGLE_SERVICE_ACCOUNT_KEY="'; base64 < "$key" | tr -d '\n'; printf '"\n'; } >> "$target"
+    echo "Wrote GOOGLE_SERVICE_ACCOUNT_KEY to $target" >&2

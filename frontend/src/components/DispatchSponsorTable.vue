@@ -1,10 +1,11 @@
 <script setup lang="ts">
 /** Filterable sponsor packet work list; all data stays in the parent view. */
 
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import type { DispatchRow } from '../api/dispatch'
+import { artifactDownloadUrl } from '../api/commands'
+import { sheetsZipUrl, type DispatchChild, type DispatchRow } from '../api/dispatch'
 import { formatTime } from '../utils/format'
 import {
   dispatchBlock,
@@ -16,15 +17,21 @@ import {
 const props = withDefaults(
   defineProps<{
     rows: DispatchRow[]
+    season: string
+    children: DispatchChild[]
     canSend: boolean
     mailConfigured?: boolean
+    focusSponsorId?: number | null
+    canMarkDispatched?: boolean
   }>(),
-  { mailConfigured: true },
+  { mailConfigured: true, focusSponsorId: null, canMarkDispatched: true },
 )
 
 const emit = defineEmits<{
   openEmail: [row: DispatchRow]
   generatePacket: [sponsorId: number, overwrite: boolean]
+  viewPacket: [row: DispatchRow]
+  markDispatched: [row: DispatchRow]
 }>()
 
 type AssignmentFilter = 'any' | 'filled' | 'unfilled'
@@ -58,11 +65,12 @@ const BLOCKERS: Record<string, string> = {
   mail_not_configured: 'Mail account not configured',
 }
 
-const search = ref('')
+const search = ref(props.focusSponsorId ? String(props.focusSponsorId) : '')
 const affiliation = ref('')
 const assignment = ref<AssignmentFilter>('any')
 const sort = ref<SortKey>('readiness')
-const chips = ref<ChipKey[]>(['needs-action'])
+const chips = ref<ChipKey[]>(props.focusSponsorId ? [] : ['needs-action'])
+const tableElement = ref<HTMLTableElement | null>(null)
 
 const affiliations = computed(() =>
   [
@@ -110,6 +118,9 @@ function matchesChip(row: DispatchRow, chip: ChipKey): boolean {
 }
 
 function matches(row: DispatchRow): boolean {
+  if (props.focusSponsorId !== null && row.sponsor_id !== props.focusSponsorId) {
+    return false
+  }
   const needle = search.value.trim().toLowerCase()
   if (needle) {
     const haystack = [
@@ -157,6 +168,56 @@ function compare(a: DispatchRow, b: DispatchRow): number {
 }
 
 const visible = computed(() => props.rows.filter(matches).sort(compare))
+
+async function scrollToFocusedRow(): Promise<void> {
+  await nextTick()
+  const row = tableElement.value?.querySelector<HTMLTableRowElement>(
+    `[data-sponsor-id="${props.focusSponsorId}"]`,
+  )
+  row?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+}
+
+watch(
+  () => props.focusSponsorId,
+  (sponsorId) => {
+    if (sponsorId === null) {
+      search.value = ''
+      chips.value = ['needs-action']
+      return
+    }
+    search.value = String(sponsorId)
+    affiliation.value = ''
+    assignment.value = 'any'
+    chips.value = []
+    void scrollToFocusedRow()
+  },
+  { immediate: true },
+)
+
+watch(
+  () => props.rows,
+  () => {
+    if (props.focusSponsorId !== null) void scrollToFocusedRow()
+  },
+  { flush: 'post' },
+)
+
+const childrenBySponsor = computed(() => {
+  const grouped = new Map<number, DispatchChild[]>()
+  for (const child of props.children) {
+    if (child.sponsor_id === null || child.sponsor_id === undefined) continue
+    const children = grouped.get(child.sponsor_id) ?? []
+    children.push(child)
+    grouped.set(child.sponsor_id, children)
+  }
+  return grouped
+})
+
+function childSheets(sponsorId: number): DispatchChild[] {
+  return (childrenBySponsor.value.get(sponsorId) ?? []).filter(
+    (child) => child.sheet_artifact_id !== null && child.sheet_artifact_id !== undefined,
+  )
+}
 
 function toggleChip(chip: ChipKey): void {
   chips.value = chips.value.includes(chip)
@@ -267,9 +328,19 @@ function emailClass(row: DispatchRow): string {
       <span class="muted" role="status" data-testid="dispatch-count">
         Showing {{ visible.length }} of {{ props.rows.length }} sponsors
       </span>
-      <button type="button" data-testid="clear-filters" @click="clearFilters">
-        Clear filters
-      </button>
+      <div class="status-line">
+        <a
+          v-if="props.rows.some((row) => row.sheets_ready_count > 0)"
+          :href="sheetsZipUrl(props.season)"
+          download
+          data-testid="download-all-sheets-zip"
+        >
+          Download all sheets (.zip)
+        </a>
+        <button type="button" data-testid="clear-filters" @click="clearFilters">
+          Clear filters
+        </button>
+      </div>
     </div>
 
     <p v-if="visible.length === 0" class="muted" data-testid="dispatch-no-match">
@@ -277,7 +348,12 @@ function emailClass(row: DispatchRow): string {
       <button type="button" @click="clearFilters">Clear filters</button>
     </p>
 
-    <table v-else class="data dispatch-table" data-testid="dispatch-table">
+    <table
+      v-else
+      ref="tableElement"
+      class="data dispatch-table"
+      data-testid="dispatch-table"
+    >
       <thead>
         <tr>
           <th>Sponsor</th>
@@ -295,6 +371,7 @@ function emailClass(row: DispatchRow): string {
           :key="row.sponsor_id"
           data-testid="dispatch-row"
           :data-sponsor-id="row.sponsor_id"
+          :data-focused="props.focusSponsorId === row.sponsor_id ? 'true' : undefined"
         >
           <td>
             <strong>#{{ row.sponsor_id }} {{ personName(row) }}</strong>
@@ -324,6 +401,18 @@ function emailClass(row: DispatchRow): string {
             </span>
             <div v-if="row.missing_sheet_angel_ids.length" class="muted">
               Missing: {{ row.missing_sheet_angel_ids.join(', ') }}
+            </div>
+            <div v-if="childSheets(row.sponsor_id).length" class="child-sheet-links">
+              <a
+                v-for="child in childSheets(row.sponsor_id)"
+                :key="child.zite_record_id"
+                :href="artifactDownloadUrl(child.sheet_artifact_id!)"
+                download
+                class="muted"
+                data-testid="download-sheet"
+              >
+                {{ child.angel_id }}
+              </a>
             </div>
           </td>
           <td>
@@ -355,6 +444,24 @@ function emailClass(row: DispatchRow): string {
           <td>
             <div class="actions">
               <button
+                v-if="
+                  props.canMarkDispatched &&
+                  row.packet_status === 'ready' &&
+                  !row.packets_dispatched
+                "
+                type="button"
+                data-testid="mark-dispatched"
+                :disabled="row.blockers.includes('slots_not_filled')"
+                :title="
+                  row.blockers.includes('slots_not_filled')
+                    ? 'Fill all child slots before marking dispatched.'
+                    : 'Mark this sponsor as dispatched.'
+                "
+                @click="emit('markDispatched', row)"
+              >
+                Mark dispatched
+              </button>
+              <button
                 v-if="row.packet_status !== 'ready'"
                 type="button"
                 data-testid="generate-packet"
@@ -370,6 +477,32 @@ function emailClass(row: DispatchRow): string {
                 @click="emit('generatePacket', row.sponsor_id, true)"
               >
                 Regenerate
+              </button>
+              <a
+                v-if="row.sheets_ready_count > 0"
+                :href="sheetsZipUrl(props.season, row.sponsor_id)"
+                download
+                class="muted"
+                data-testid="download-sheets-zip"
+              >
+                Download sheets (.zip)
+              </a>
+              <a
+                v-if="row.packet_pdf_artifact_id != null"
+                :href="artifactDownloadUrl(row.packet_pdf_artifact_id)"
+                download
+                class="muted"
+                data-testid="download-packet-pdf"
+              >
+                Download packet (PDF)
+              </a>
+              <button
+                v-if="row.packet_status === 'ready' && row.packet_pdf_artifact_id != null"
+                type="button"
+                data-testid="view-packet"
+                @click="emit('viewPacket', row)"
+              >
+                View packet
               </button>
               <button
                 v-if="row.email_status === 'sent'"
@@ -406,11 +539,23 @@ function emailClass(row: DispatchRow): string {
   margin-top: 0.75rem;
 }
 
+.dispatch-table tr[data-focused='true'] {
+  background: #fff4d6;
+  box-shadow: inset 4px 0 0 #b7791f;
+}
+
 .actions {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 0.35rem;
+}
+
+.child-sheet-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.25rem;
 }
 
 .blockers {

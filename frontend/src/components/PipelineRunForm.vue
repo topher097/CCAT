@@ -2,13 +2,13 @@
 /** One pipeline command form with exact CLI option semantics (§7.1.8). */
 
 import { computed, onMounted, ref } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { enqueueJob, type Job } from '../api/jobs'
 import { getRunSettings, saveRunSettings } from '../api/runs'
 import { useSessionStore } from '../stores/session'
 import ConfirmDialog from './ConfirmDialog.vue'
+import { useJobPopup } from '../composables/useJobPopup'
 
 const props = withDefaults(
   defineProps<{
@@ -20,7 +20,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{ enqueued: [job: Job] }>()
 
-const router = useRouter()
+const { openJob } = useJobPopup()
 const session = useSessionStore()
 
 const test = ref(false)
@@ -190,7 +190,7 @@ async function enqueue(): Promise<void> {
       options.value,
     )
     emit('enqueued', job)
-    await router.push(`/jobs/${job.id}`)
+    openJob(job.id)
   } catch (failure) {
     if (!(failure instanceof ApiError)) {
       error.value = 'Enqueue failed.'
@@ -320,13 +320,14 @@ async function enqueue(): Promise<void> {
 
     <p v-if="error" class="error-text" role="alert" data-testid="run-error">
       {{ error }}
-      <RouterLink
+      <button
         v-if="conflictJobId !== null"
-        :to="`/jobs/${conflictJobId}`"
+        type="button"
+        @click="openJob(conflictJobId)"
         data-testid="conflict-job-link"
       >
         Open active job #{{ conflictJobId }}
-      </RouterLink>
+      </button>
     </p>
 
     <button type="submit" class="primary" :disabled="enqueueing">
