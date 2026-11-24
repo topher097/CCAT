@@ -136,6 +136,17 @@ describe('router map', () => {
     expect(router.currentRoute.value.path).toBe('/')
   })
 
+  it('keeps a framed view framed while it navigates', async () => {
+    authenticated()
+    const router = createAppRouter()
+    await router.push('/jobs/7?embed=1')
+    expect(router.currentRoute.value.query.embed).toBe('1')
+
+    await router.push('/jobs')
+    expect(router.currentRoute.value.path).toBe('/jobs')
+    expect(router.currentRoute.value.query.embed).toBe('1')
+  })
+
   it('blocks navigation while a form is dirty unless confirmed', async () => {
     authenticated()
     const router = createAppRouter()

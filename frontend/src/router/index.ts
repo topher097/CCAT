@@ -255,6 +255,16 @@ export function createAppRouter() {
       settings.discard()
     }
 
+    // A framed view (the job pop-up) stays framed while it navigates, so
+    // the section navigation never comes back inside the pop-up.
+    if (from.query.embed === '1' && to.query.embed === undefined) {
+      return {
+        path: to.path,
+        query: { ...to.query, embed: '1' },
+        replace: true,
+      }
+    }
+
     return true
   })
 

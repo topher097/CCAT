@@ -32,6 +32,9 @@ const visibleNav = computed(() =>
   nav.filter((item) => !('admin' in item) || session.hasRole('admin')),
 )
 
+/** An embedded view (the job pop-up) shows no section navigation. */
+const embedded = computed(() => route.query.embed === '1')
+
 const seasonName = computed(() => session.season?.name ?? '—')
 
 function onOnline() {
@@ -74,7 +77,11 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <nav v-if="session.authenticated" class="app-nav" aria-label="Sections">
+    <nav
+      v-if="session.authenticated && !embedded"
+      class="app-nav"
+      aria-label="Sections"
+    >
       <RouterLink v-for="item in visibleNav" :key="item.to" :to="item.to">
         {{ item.label }}
       </RouterLink>

@@ -72,7 +72,7 @@ describe('job popup', () => {
     useJobPopup().openJob(17)
     const wrapper = mount(JobPopup)
 
-    expect(wrapper.get('iframe').attributes('src')).toBe('/jobs/17')
+    expect(wrapper.get('iframe').attributes('src')).toBe('/jobs/17?embed=1')
     expect(wrapper.get('iframe').attributes('title')).toBe('Job #17')
 
     await wrapper.get('[data-testid="popup-frame-close"]').trigger('click')

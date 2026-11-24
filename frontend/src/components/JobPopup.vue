@@ -6,7 +6,8 @@ import { useJobPopup } from '../composables/useJobPopup'
 
 const { jobId, closeJob } = useJobPopup()
 const title = computed(() => (jobId.value === null ? '' : `Job #${jobId.value}`))
-const src = computed(() => `/jobs/${jobId.value}`)
+// embed=1 drops the section navigation inside the framed job page.
+const src = computed(() => `/jobs/${jobId.value}?embed=1`)
 </script>
 
 <template>
