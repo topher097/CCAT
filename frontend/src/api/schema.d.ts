@@ -82,11 +82,12 @@ export interface paths {
          *     Args:
          *         artifact_id: The artifact id.
          *         request: The current request.
+         *         inline: Display PDF artifacts inline instead of downloading.
          *         _user: Authenticated identity.
          *         _csrf: CSRF guard.
          *
          *     Returns:
-         *         The file response (attachment disposition).
+         *         The file response.
          *
          *     Raises:
          *         ApiError: 404 unknown artifact/missing file; 403 path escape.
@@ -4391,7 +4392,9 @@ export interface operations {
     };
     download_artifact_api_v1_artifacts__artifact_id__download_get: {
         parameters: {
-            query?: never;
+            query?: {
+                inline?: boolean;
+            };
             header?: never;
             path: {
                 artifact_id: number;
