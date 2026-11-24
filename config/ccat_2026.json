@@ -600,12 +600,14 @@
     ]
   },
   "dispatch": {
-    "enabled": false,
-    "sender_email": "",
+    "enabled": true,
+    "sender_email": "coppercountryangeltree@gmail.com",
     "sender_name": "The Copper Country Angel Tree Team",
-    "reply_to": "",
+    "reply_to": "coppercountryangeltree@gmail.com",
     "client_file": "ccat_google_credentials.json",
     "token_file": "ccat_google_gmail_token.json",
+    "credential_source": "oauth",
+    "service_account_subject": "",
     "timeout_seconds": 30.0,
     "max_attachment_bytes": 25000000
   },

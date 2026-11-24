@@ -20,6 +20,8 @@ automatically.
 """
 
 import base64
+import binascii
+import json
 import logging
 import os
 from email.message import EmailMessage
@@ -29,6 +31,7 @@ from typing import Any
 
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -40,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 #: The only scope a sending account needs.
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+
+#: The environment variable holding the base64 service account key.
+SERVICE_ACCOUNT_KEY_ENV = "GOOGLE_SERVICE_ACCOUNT_KEY"
 
 #: Provider statuses that prove the message was not accepted.
 _REJECTED_STATUSES = frozenset({400, 401, 403, 404, 429})
@@ -73,6 +79,105 @@ def build_raw_message(request: SendRequest) -> bytes:
             filename=attachment.filename,
         )
     return message.as_bytes()
+
+
+def decode_service_account_key(encoded: str) -> dict[str, Any]:
+    """Decode a base64 service account key into its JSON mapping.
+
+    The key is stored base64-encoded so it survives a shell environment
+    file; this turns it back into the JSON object Google issued.
+
+    Args:
+        encoded: The base64 text of the service account key file.
+
+    Returns:
+        The decoded key.
+
+    Raises:
+        MailError: When the text is not base64, not JSON, or not a
+            service account key.
+    """
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise MailError(
+            f"the service account key is not valid base64: {error}"
+        ) from error
+    try:
+        info = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise MailError(
+            f"the service account key is not valid JSON: {error}"
+        ) from error
+    if not isinstance(info, dict) or info.get("type") != "service_account":
+        raise MailError("the service account key is not a service account key")
+    if not info.get("client_email") or not info.get("private_key"):
+        raise MailError(
+            "the service account key is missing client_email or private_key"
+        )
+    return info
+
+
+def _gmail_service(credentials: Credentials, timeout: float) -> Any:
+    """Build a Gmail service with a per-request timeout.
+
+    Args:
+        credentials: The credentials the service authenticates with.
+        timeout: The per-request timeout in seconds.
+
+    Returns:
+        The Gmail v1 service resource.
+
+    Raises:
+        MailError: When the service cannot be built.
+    """
+    try:
+        service = build(
+            "gmail",
+            "v1",
+            credentials=credentials,
+            cache_discovery=False,
+        )
+    except (GoogleAuthError, OSError) as error:
+        raise MailError(f"the mail service is unavailable: {error}") from error
+    http = getattr(service, "_http", None)
+    if http is not None and hasattr(http, "timeout"):
+        http.timeout = timeout
+    return service
+
+
+def _send_via(service: Any, request: SendRequest) -> SendOutcome:
+    """Send one message through an already-built Gmail service.
+
+    Args:
+        service: The Gmail v1 service resource.
+        request: The message to send.
+
+    Returns:
+        The provider's outcome: "sent", "rejected", or "ambiguous".
+    """
+    raw = base64.urlsafe_b64encode(build_raw_message(request)).decode("ascii")
+    try:
+        response = (
+            service.users()
+            .messages()
+            .send(userId="me", body={"raw": raw})
+            .execute()
+        )
+    except HttpError as error:
+        status = int(getattr(error.resp, "status", 0) or 0)
+        if status in _REJECTED_STATUSES:
+            return SendOutcome(
+                "rejected",
+                "",
+                f"the mail provider refused the message ({status})",
+            )
+        return SendOutcome(
+            "ambiguous", "", f"the mail provider answered with {status}"
+        )
+    except (TimeoutError, OSError):
+        return SendOutcome("ambiguous", "", "the mail provider did not answer")
+    return SendOutcome("sent", str(response.get("id", "")), "")
 
 
 def _write_token(credentials: Credentials, token_file: Path) -> None:
@@ -173,21 +278,7 @@ class GmailTransport:
         Raises:
             MailError: When the service cannot be built.
         """
-        try:
-            service = build(
-                "gmail",
-                "v1",
-                credentials=self._credentials(),
-                cache_discovery=False,
-            )
-        except (GoogleAuthError, OSError) as error:
-            raise MailError(
-                f"the mail service is unavailable: {error}"
-            ) from error
-        http = getattr(service, "_http", None)
-        if http is not None and hasattr(http, "timeout"):
-            http.timeout = self._timeout
-        return service
+        return _gmail_service(self._credentials(), self._timeout)
 
     def send(self, request: SendRequest) -> SendOutcome:
         """Send one message.
@@ -201,39 +292,103 @@ class GmailTransport:
         Raises:
             MailError: When the mail account itself is not usable.
         """
-        raw = base64.urlsafe_b64encode(build_raw_message(request)).decode(
-            "ascii"
-        )
+        return _send_via(self._service(), request)
+
+
+class ServiceAccountGmailTransport:
+    """Send messages with a Google service account.
+
+    The key is read from :data:`SERVICE_ACCOUNT_KEY_ENV` as base64 and
+    decoded back to the JSON Google issued.
+
+    A service account has no mailbox of its own, so Gmail only accepts
+    its sends when the account impersonates a Workspace user through
+    domain-wide delegation.  ``subject`` must then name a user in a
+    Workspace domain whose administrator authorized this service
+    account's client id for the ``gmail.send`` scope; without it the
+    provider refuses the message.
+    """
+
+    def __init__(
+        self,
+        subject: str = "",
+        timeout: float = 30.0,
+        key_env: str = SERVICE_ACCOUNT_KEY_ENV,
+    ) -> None:
+        """Build the transport.
+
+        Args:
+            subject: The Workspace user to impersonate, for
+                domain-wide delegation.  Empty means the service
+                account itself, which owns no mailbox.
+            timeout: The per-request timeout in seconds.
+            key_env: The environment variable holding the base64 key.
+        """
+        self._subject = subject
+        self._timeout = timeout
+        self._key_env = key_env
+
+    def _credentials(self) -> Credentials:
+        """Build the service account's credentials.
+
+        Returns:
+            Credentials for the sending identity.
+
+        Raises:
+            MailError: When the key is missing or unusable.
+        """
+        encoded = os.environ.get(self._key_env, "").strip()
+        if not encoded:
+            raise MailError(
+                f"the service account key is not set; export {self._key_env}"
+            )
+        info = decode_service_account_key(encoded)
         try:
-            service = self._service()
-            response = (
-                service.users()
-                .messages()
-                .send(userId="me", body={"raw": raw})
-                .execute()
+            credentials = service_account.Credentials.from_service_account_info(
+                info, scopes=[GMAIL_SEND_SCOPE]
             )
-        except HttpError as error:
-            status = int(getattr(error.resp, "status", 0) or 0)
-            if status in _REJECTED_STATUSES:
-                return SendOutcome(
-                    "rejected",
-                    "",
-                    f"the mail provider refused the message ({status})",
-                )
-            return SendOutcome(
-                "ambiguous", "", f"the mail provider answered with {status}"
-            )
-        except (TimeoutError, OSError):
-            return SendOutcome(
-                "ambiguous", "", "the mail provider did not answer"
-            )
-        return SendOutcome("sent", str(response.get("id", "")), "")
+        except (KeyError, ValueError) as error:
+            raise MailError(
+                f"the service account key could not be loaded: {error}"
+            ) from error
+        if self._subject:
+            credentials = credentials.with_subject(self._subject)
+        return credentials
+
+    def _service(self) -> Any:
+        """Build the Gmail API service.
+
+        Returns:
+            The Gmail v1 service resource.
+
+        Raises:
+            MailError: When the service cannot be built.
+        """
+        return _gmail_service(self._credentials(), self._timeout)
+
+    def send(self, request: SendRequest) -> SendOutcome:
+        """Send one message.
+
+        Args:
+            request: The message to send.
+
+        Returns:
+            The provider's outcome: "sent", "rejected", or "ambiguous".
+
+        Raises:
+            MailError: When the service account key is missing or
+                unusable.
+        """
+        return _send_via(self._service(), request)
 
 
 __all__ = [
     "GMAIL_SEND_SCOPE",
+    "SERVICE_ACCOUNT_KEY_ENV",
     "GmailTransport",
     "MailError",
+    "ServiceAccountGmailTransport",
     "authorize",
     "build_raw_message",
+    "decode_service_account_key",
 ]

@@ -28,9 +28,10 @@ from ccat.api.dto import (
 )
 from ccat.api.errors import ApiError
 from ccat.db.repositories import SeasonStoreRepository
-from ccat.mail import GmailTransport, MailError
+from ccat.mail import GmailTransport, MailError, ServiceAccountGmailTransport
 from ccat.services import db_dispatch
 from ccat.services.db_dispatch import DispatchError
+from ccat.services.ports import MailTransport
 
 if TYPE_CHECKING:
     from ccat.config import Config
@@ -61,7 +62,7 @@ def _error(error: DispatchError) -> ApiError:
     return ApiError(status, error.code, str(error), **error.context)
 
 
-def _transport(cfg: "Config") -> GmailTransport:
+def _transport(cfg: "Config") -> MailTransport:
     """Build the mail transport the configuration asks for.
 
     Args:
@@ -70,6 +71,11 @@ def _transport(cfg: "Config") -> GmailTransport:
     Returns:
         The transport.
     """
+    if cfg.dispatch.credential_source == "service_account":
+        return ServiceAccountGmailTransport(
+            subject=cfg.dispatch.service_account_subject,
+            timeout=cfg.dispatch.timeout_seconds,
+        )
     return GmailTransport(
         Path(cfg.dispatch.client_file),
         Path(cfg.dispatch.token_file),

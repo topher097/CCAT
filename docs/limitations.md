@@ -62,7 +62,11 @@ decision before public deployment.
    needs a published/verified app rather than repeated weekly consent.
 7. **Sending identity.** `dispatch.sender_email` must be the authorized Gmail
    account or a verified send-as alias that the account may use. The display
-   name and reply-to address also need owner approval before sending.
+   name and reply-to address also need owner approval before sending. A
+   Google service account cannot be that identity on its own: it owns no
+   mailbox, so Gmail refuses its sends unless a Workspace domain authorizes
+   it through domain-wide delegation. A consumer account (`@gmail.com`) is
+   never delegable and must send through the OAuth token.
 
 ## Technical limitations
 

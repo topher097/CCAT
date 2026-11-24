@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 import base64
+import json
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import load_test_cfg
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from ccat.mail import GmailTransport, MailError, build_raw_message
+from ccat.api.routes import dispatch as dispatch_routes
+from ccat.mail import (
+    GMAIL_SEND_SCOPE,
+    GmailTransport,
+    MailError,
+    ServiceAccountGmailTransport,
+    build_raw_message,
+    decode_service_account_key,
+)
 from ccat.services.ports import Attachment, SendRequest
 
 
@@ -255,3 +265,185 @@ def test_missing_token_file_means_account_not_authorized(
 
     with pytest.raises(MailError, match="not authorized"):
         transport.send(_request())
+
+
+# ---------------------------------------------------------------------------
+# Service account credentials.
+# ---------------------------------------------------------------------------
+
+
+def _service_account_key() -> str:
+    """Build a base64 service account key for the credential tests.
+
+    Returns:
+        The base64 text of a service account key.
+    """
+    info = {
+        "type": "service_account",
+        "project_id": "test-project",
+        "private_key_id": "key-id",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n",
+        "client_email": "mailer@test-project.iam.gserviceaccount.com",
+        "client_id": "1234567890",
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }
+    return base64.b64encode(json.dumps(info).encode("utf-8")).decode("ascii")
+
+
+class _FakeCredentials:
+    """Stand-in for the service account credentials."""
+
+    def __init__(self) -> None:
+        """Record the impersonated subject, if any."""
+        self.subject = ""
+
+    def with_subject(self, subject: str) -> _FakeCredentials:
+        """Return credentials that impersonate one user.
+
+        Args:
+            subject: The user to impersonate.
+
+        Returns:
+            The impersonating credentials.
+        """
+        self.subject = subject
+        return self
+
+
+def test_service_account_key_decodes_from_base64() -> None:
+    """The base64 key becomes the JSON Google issued."""
+    info = decode_service_account_key(_service_account_key())
+
+    assert info["type"] == "service_account"
+    assert info["client_email"] == "mailer@test-project.iam.gserviceaccount.com"
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        pytest.param("not base64 !!", id="not-base64"),
+        pytest.param(
+            base64.b64encode(b"not json").decode("ascii"), id="not-json"
+        ),
+        pytest.param(
+            base64.b64encode(b'{"type": "authorized_user"}').decode("ascii"),
+            id="not-a-service-account",
+        ),
+        pytest.param(
+            base64.b64encode(b'{"type": "service_account"}').decode("ascii"),
+            id="missing-fields",
+        ),
+    ],
+)
+def test_service_account_key_rejects_bad_input(encoded: str) -> None:
+    """A key that is not a usable service account key is refused.
+
+    Args:
+        encoded: The candidate key text.
+    """
+    with pytest.raises(MailError):
+        decode_service_account_key(encoded)
+
+
+def test_service_account_transport_sends_with_the_decoded_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The environment key becomes credentials and the message goes out."""
+    captured: dict[str, Any] = {}
+    service = _FakeService({"id": "gmail-message-9"})
+
+    def fake_from_info(
+        info: dict[str, Any], scopes: list[str]
+    ) -> _FakeCredentials:
+        """Record what the transport asked Google for.
+
+        Args:
+            info: The decoded key.
+            scopes: The requested scopes.
+
+        Returns:
+            The fake credentials.
+        """
+        captured["info"] = info
+        captured["scopes"] = list(scopes)
+        return _FakeCredentials()
+
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_KEY", _service_account_key())
+    monkeypatch.setattr(
+        "ccat.mail.service_account.Credentials.from_service_account_info",
+        staticmethod(fake_from_info),
+    )
+    monkeypatch.setattr("ccat.mail.build", lambda *args, **kwargs: service)
+
+    outcome = ServiceAccountGmailTransport().send(_request())
+
+    assert outcome.state == "sent"
+    assert outcome.provider_message_id == "gmail-message-9"
+    assert captured["info"]["client_email"] == (
+        "mailer@test-project.iam.gserviceaccount.com"
+    )
+    assert captured["scopes"] == [GMAIL_SEND_SCOPE]
+    assert service.user_id == "me"
+
+
+def test_service_account_transport_impersonates_the_subject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured subject is applied to the credentials.
+
+    Args:
+        monkeypatch: Pytest's patch fixture.
+    """
+    credentials = _FakeCredentials()
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_KEY", _service_account_key())
+    monkeypatch.setattr(
+        "ccat.mail.service_account.Credentials.from_service_account_info",
+        staticmethod(lambda info, scopes: credentials),
+    )
+    monkeypatch.setattr(
+        "ccat.mail.build", lambda *args, **kwargs: _FakeService({"id": "x"})
+    )
+
+    outcome = ServiceAccountGmailTransport(
+        subject="coordinator@example.org"
+    ).send(_request())
+
+    assert outcome.state == "sent"
+    assert credentials.subject == "coordinator@example.org"
+
+
+def test_service_account_transport_needs_the_key_environment_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the key the transport refuses to send.
+
+    Args:
+        monkeypatch: Pytest's patch fixture.
+    """
+    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_KEY", raising=False)
+
+    with pytest.raises(MailError, match="GOOGLE_SERVICE_ACCOUNT_KEY"):
+        ServiceAccountGmailTransport().send(_request())
+
+
+def test_transport_selection_follows_the_configured_credential_source() -> None:
+    """The configured credential source picks the transport."""
+    cfg = load_test_cfg()
+
+    assert isinstance(dispatch_routes._transport(cfg), GmailTransport)
+
+    service_account_cfg = cfg.model_copy(
+        update={
+            "dispatch": cfg.dispatch.model_copy(
+                update={
+                    "credential_source": "service_account",
+                    "service_account_subject": "coordinator@example.org",
+                }
+            )
+        }
+    )
+
+    assert isinstance(
+        dispatch_routes._transport(service_account_cfg),
+        ServiceAccountGmailTransport,
+    )

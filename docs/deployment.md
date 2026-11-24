@@ -256,6 +256,36 @@ status issues seven-day refresh tokens, so production needs a published and
 verified OAuth app. An `unknown` send is different: reconcile it in Gmail
 before any retry because the provider may already have accepted it.
 
+### Service account credentials
+
+`dispatch.credential_source` picks where the sending credentials come from:
+
+| Value | Credentials | Needs |
+| --- | --- | --- |
+| `oauth` (default) | The Gmail token written by `ccat mail-authorize` | One browser consent, as the sending account |
+| `service_account` | The base64 service account key in `GOOGLE_SERVICE_ACCOUNT_KEY` | A Workspace domain that authorized the client id |
+
+The service account key is read from the environment as base64 and decoded
+back to the JSON Google issued. Export it as the base64 of the key file
+(`base64 < key.json | tr -d '\n'`); the app never writes the key to disk.
+
+A service account owns **no mailbox**, so Gmail refuses its sends
+("Precondition check failed") unless the account impersonates a Workspace
+user. That is domain-wide delegation, and it needs both halves:
+
+1. `dispatch.service_account_subject` names the Workspace user to
+   impersonate.
+2. The domain administrator authorizes the service account's client id
+   (the key's `client_id`) for the `https://www.googleapis.com/auth/gmail.send`
+   scope: Admin console → Security → Access and data control → API controls
+   → Domain-wide delegation.
+
+Without the subject the send is refused before it leaves Google. Consumer
+accounts (`@gmail.com`) cannot be impersonated at all, so an account like
+`coppercountryangeltree@gmail.com` must use the `oauth` source: run
+`ccat mail-authorize` while signed in as that account, and set
+`dispatch.sender_email` to it.
+
 ## 5. Migrations (controlled release step)
 
 Schema migrations are **not** run by the API/worker replicas. Compose runs a

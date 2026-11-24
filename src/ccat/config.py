@@ -463,6 +463,16 @@ class DispatchSpec(BaseModel):
             client is reused; only the token is separate.
         token_file: The Gmail token file, carrying the ``gmail.send``
             scope.
+        credential_source: Where the sending credentials come from.
+            ``"oauth"`` uses the Gmail token written by
+            ``ccat mail-authorize``; ``"service_account"`` uses the
+            base64 service account key in the ``GOOGLE_SERVICE_ACCOUNT_KEY``
+            environment variable.
+        service_account_subject: The Workspace user the service account
+            impersonates (domain-wide delegation).  A service account owns
+            no mailbox, so Gmail only accepts its sends when this names a
+            user in a Workspace domain whose administrator authorized the
+            service account's client id for the ``gmail.send`` scope.
         timeout_seconds: Per-request timeout for the mail provider.
         max_attachment_bytes: The largest total attachment size one
             message may carry.
@@ -476,6 +486,8 @@ class DispatchSpec(BaseModel):
     reply_to: str = ""
     client_file: str = "ccat_google_credentials.json"
     token_file: str = "ccat_google_gmail_token.json"
+    credential_source: Literal["oauth", "service_account"] = "oauth"
+    service_account_subject: str = ""
     timeout_seconds: float = 30.0
     max_attachment_bytes: int = 25_000_000
 
