@@ -24,10 +24,9 @@ DB-era repositories instead of the workbook:
   Completed items keep their artifacts and markers; the result reports
   failed stems while the remaining items finish (partial success).
 - Packets are the second phase of the same job (unless ``test``):
-  legacy eligibility without cascading filters, legacy
-  ``validate_all_sheets_exist`` scope (decision D18 — every eligible
-  child of every eligible sponsored family, regardless of audit
-  status/markers), legacy skip predicate (HTML + combined PDF), and
+  legacy eligibility without cascading filters, sheet validation for
+  audited assigned children only (decision D18), legacy skip predicate
+  (HTML + combined PDF), and
   ``--overwrite`` preserving manual email edits by copying the existing
   HTML to ``<stem>.manual.html`` first (D20 feasible retention).
 
@@ -55,6 +54,7 @@ from jinja2 import Environment
 from pypdf import PdfReader, PdfWriter
 
 from ccat.audit.store import (
+    STATUS_AUDITED,
     build_final_frame,
     eligible_output_rows,
 )
@@ -469,64 +469,6 @@ def _outcome(
         return "failed", row, stem, None, error
 
 
-def _validate_sheets_exist(
-    root: Path,
-    cfg: "Config",
-    child_frame: pl.DataFrame,
-    family_frame: pl.DataFrame,
-    sponsor_id: int | None = None,
-) -> None:
-    """Require a sheet PDF for every sponsored eligible child (D18).
-
-    Exact legacy :func:`ccat.sponsor_packets.validate_all_sheets_exist`
-    scope: every output-eligible child with an assigned sponsor (its own
-    ``assigned_sponsor_id``) must have its sheet file — regardless of
-    audit status, generation markers, or the sponsor's own stored
-    ``assigned_angel_ids``.  This intentionally differs from the
-    generation gate (documented divergence, plan §9.5): mixed-status
-    data can finish sheet generation and still fail packet validation.
-
-    Args:
-        root: The artifact root.
-        cfg: Pipeline configuration.
-        child_frame: Eligible child frame.
-        family_frame: Eligible family frame.
-        sponsor_id: Restrict the check to one sponsor.
-
-    Raises:
-        SponsorPacketError: When any required sheet file is missing.
-    """
-    if child_frame.is_empty():
-        return
-    location_by_family = {
-        row.get("family_id"): row.get("gift_pickup_location")
-        for row in family_frame.to_dicts()
-    }
-    missing = [
-        str(row["angel_id"])
-        for row in child_frame.to_dicts()
-        if child_sponsor(row) is not None
-        and (sponsor_id is None or child_sponsor(row) == sponsor_id)
-        and row.get("angel_id")
-        and not _sheet_path(
-            root,
-            cfg,
-            str(row["angel_id"]),
-            canonical_location(
-                location_by_family.get(row.get("family_id")),
-                cfg.location_groups,
-            )
-            or "unknown",
-        ).is_file()
-    ]
-    if missing:
-        raise SponsorPacketError(
-            "cannot build sponsor packets: child information sheet(s)"
-            f" missing for angel(s) {sorted(missing)}; run `ccat generate`"
-            " first"
-        )
-
-
 def _sponsors_missing_sheets(
     root: Path,
     cfg: "Config",
@@ -534,11 +476,11 @@ def _sponsors_missing_sheets(
     family_frame: pl.DataFrame,
     sponsor_id: int | None = None,
 ) -> "list[dict[str, Any]]":
-    """Find the sponsors whose children are still missing a sheet.
+    """Find sponsors missing sheets for audited, assigned children.
 
-    A packets-only run skips those sponsors instead of failing the whole
-    job: the coordinator asked for packets, and one child whose sheet
-    failed must not stop the other sponsors.
+    Sponsors missing an audited child's sheet are skipped instead of
+    failing the whole job. Unaudited assigned children are expected to
+    have no sheet and do not block their sponsor.
 
     Args:
         root: The artifact root.
@@ -562,6 +504,15 @@ def _sponsors_missing_sheets(
         if owner is None or not row.get("angel_id"):
             continue
         if sponsor_id is not None and owner != sponsor_id:
+            continue
+        if row.get("status") != STATUS_AUDITED:
+            logger.warning(
+                "child %s for sponsor %s is not audited (status: %s);"
+                " no info sheet, the packet skips its pages",
+                row.get("angel_id"),
+                owner,
+                row.get("status"),
+            )
             continue
         sheet = _sheet_path(
             root,
@@ -867,7 +818,7 @@ def _packet_manifest(
     }
 
 
-def _build_packets(
+def _build_packet_batch(
     root: Path,
     cfg: "Config",
     packets: "list[dict[str, Any]]",
@@ -1055,6 +1006,44 @@ def _build_packets(
     return files, skipped
 
 
+def _build_packets(
+    root: Path,
+    cfg: "Config",
+    packets: "list[dict[str, Any]]",
+    overwrite: bool,
+) -> "tuple[list[tuple[Path, str, dict[str, Any]]], int, list[dict[str, Any]]]":
+    """Build sponsor packets independently; collect per-sponsor failures.
+
+    Args:
+        root: The artifact root.
+        cfg: Pipeline configuration.
+        packets: Packet payloads from :func:`_sponsors_with_angels`.
+        overwrite: Regenerate packet files that already exist.
+
+    Returns:
+        Files to register, count of already-complete packets, and failures.
+    """
+    files: list[tuple[Path, str, dict[str, Any]]] = []
+    skipped = 0
+    failed: list[dict[str, Any]] = []
+    for packet in packets:
+        sponsor_id = int(packet["sponsor_id"])
+        try:
+            packet_files, packet_skipped = _build_packet_batch(
+                root, cfg, [packet], overwrite
+            )
+        except Exception as error:  # noqa: BLE001 - sponsor-level partial success
+            message = str(error)
+            logger.error(
+                "packet build failed for sponsor %s: %s", sponsor_id, message
+            )
+            failed.append({"sponsor_id": sponsor_id, "error": message})
+            continue
+        files.extend(packet_files)
+        skipped += packet_skipped
+    return files, skipped, failed
+
+
 def _one_row_per_angel(frame: pl.DataFrame) -> pl.DataFrame:
     """Keep one row per angel letter.
 
@@ -1129,8 +1118,6 @@ async def generate(
     Raises:
         InfoSheetError: On invalid options, a missing template, or an
             unusable store.
-        SponsorPacketError: From the packet phase (validation,
-            template, or scoped-sponsor errors).
         JobCancelRequested: When cancellation was requested.
     """
     test = bool(options.get("test"))
@@ -1201,7 +1188,14 @@ async def generate(
                     " audited status and an assigned sponsor"
                 )
         elif only == "packets":
-            pending = enriched.head(0)
+            scope = (
+                enriched.filter(pl.col("assigned_sponsor_id") == sponsor)
+                if sponsor is not None
+                else enriched
+            )
+            pending, _skipped_unsponsored = _pending_rows(
+                scope, overwrite=overwrite
+            )
         else:
             pending, _skipped_unsponsored = _pending_rows(
                 enriched, overwrite=overwrite
@@ -1336,6 +1330,7 @@ async def generate(
         packets_built = 0
         packets_skipped = 0
         packets_blocked: list[dict[str, Any]] = []
+        packets_failed: list[dict[str, Any]] = []
         if test:
             logger.info("test mode: skipping sponsor packet generation")
         elif only == "sheets":
@@ -1346,16 +1341,11 @@ async def generate(
             child_frame = _eligible_frame("child", child_rows)
             family_frame = _eligible_frame("family", family_rows)
             sponsor_frame = _eligible_frame("sponsor", sponsor_rows)
-            if only == "packets":
-                # A packets-only run skips the sponsors it cannot build.
-                packets_blocked = _sponsors_missing_sheets(
-                    root, cfg, child_frame, family_frame, sponsor
-                )
-            else:
-                # D18: exact legacy validation scope, run before building.
-                _validate_sheets_exist(
-                    root, cfg, child_frame, family_frame, sponsor_id=sponsor
-                )
+            # Missing audited-child sheets block only that sponsor. An
+            # unaudited assigned child is expected to have no sheet.
+            packets_blocked = _sponsors_missing_sheets(
+                root, cfg, child_frame, family_frame, sponsor
+            )
             packets = _sponsors_with_angels(
                 cfg,
                 sponsor_frame,
@@ -1378,16 +1368,21 @@ async def generate(
                         item["sponsor_id"],
                         item["angel_ids"],
                     )
-            files, packets_skipped = await asyncio.to_thread(
+            files, packets_skipped, packets_failed = await asyncio.to_thread(
                 _build_packets, root, cfg, packets, overwrite
             )
-            packets_built = len(packets) - packets_skipped
+            packets_built = len(packets) - packets_skipped - len(packets_failed)
             cancel()
             for path, kind, meta in files:
                 await register_file(
                     repo, kind, path, actor, meta=meta, root=root
                 )
-            progress("packets", completed=packets_built, total=len(packets))
+            progress(
+                "packets",
+                completed=packets_built,
+                failed=len(packets_failed),
+                total=len(packets),
+            )
 
     logger.info(
         "generated %d info sheet(s); %d failed", len(generated), len(failed)
@@ -1399,6 +1394,7 @@ async def generate(
         packets_built=packets_built,
         packets_skipped=packets_skipped,
         packets_blocked=packets_blocked,
+        packets_failed=packets_failed,
         info_sheet_dir=str(artifact_root(cfg) / "child_sheets"),
         packets_dir=str(artifact_root(cfg) / "sponsor_packets"),
     )

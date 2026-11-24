@@ -7,6 +7,7 @@ through the module's convert seam, faked with pypdf-written tiny PDFs
 """
 
 import asyncio
+import logging
 import os
 import sqlite3
 import threading
@@ -27,7 +28,6 @@ from ccat.config import Config, StorageSpec, WorkerSpec
 from ccat.db.engine import create_async_engine, run_migrations
 from ccat.db.uow import UnitOfWork
 from ccat.jobs import JobCancelRequested
-from ccat.sponsor_packets import SponsorPacketError
 from ccat.services import db_generate
 
 # ---------------------------------------------------------------------------
@@ -510,9 +510,6 @@ def test_failed_item_reported_and_others_continue(
     # Packets stay out of scope: this test is the sheet-phase
     # partial-success behavior.
     monkeypatch.setattr(
-        db_generate, "_validate_sheets_exist", lambda *a, **k: None
-    )
-    monkeypatch.setattr(
         db_generate, "_sponsors_with_angels", lambda *a, **k: []
     )
     result = _run(cfg, {})
@@ -795,6 +792,78 @@ def test_packet_artifacts_registered(
     }
 
 
+def test_packets_only_generates_missing_sheets_before_packet(
+    tmp_path: Path,
+    packets_cfg: Any,
+    fake_convert: list[str],
+) -> None:
+    """A scoped packets-only run builds child sheets before its packet."""
+    cfg = packets_cfg(_prepare(tmp_path))
+    _full_seed(cfg, tmp_path)
+
+    result = _run(cfg, {"only": "packets", "sponsor": 7})
+
+    stems = [
+        f"AT{cfg.season}_{angel_id}" for angel_id in ("1A", "1B", "1Z", "1AA")
+    ]
+    assert sorted(result.sheets_generated) == sorted(stems)
+    assert sorted(fake_convert) == sorted(stems)
+    for stem in stems:
+        assert (
+            tmp_path / "artifacts" / "child_sheets" / "hancock" / f"{stem}.pdf"
+        ).is_file()
+    assert result.packets_built == 1
+    assert (
+        tmp_path
+        / "artifacts"
+        / "sponsor_packets"
+        / "7"
+        / f"Sponsor 7 - Child Information {cfg.season}.pdf"
+    ).is_file()
+
+
+def test_packets_only_overwrite_regenerates_sheets_and_packet_files(
+    tmp_path: Path,
+    packets_cfg: Any,
+    fake_convert: list[str],
+) -> None:
+    """Packets-only overwrite re-renders all sheets and packet files."""
+    cfg = packets_cfg(_prepare(tmp_path))
+    _full_seed(cfg, tmp_path)
+    options = {"only": "packets", "sponsor": 7}
+    _run(cfg, options)
+    sheet_artifacts_before = _sql(
+        cfg, "SELECT COUNT(*) FROM artifacts WHERE kind = 'child_sheet'"
+    )[0][0]
+    packet_dir = tmp_path / "artifacts" / "sponsor_packets" / "7"
+    html_path = packet_dir / "sponsor_packet_7.html"
+    pdf_path = packet_dir / f"Sponsor 7 - Child Information {cfg.season}.pdf"
+    manifest_path = packet_dir / "manifest.json"
+    html_path.write_text("stale packet")
+    pdf_path.write_bytes(b"stale packet")
+    manifest_path.write_text("stale manifest")
+    fake_convert.clear()
+
+    result = _run(cfg, options | {"overwrite": True})
+
+    stems = [
+        f"AT{cfg.season}_{angel_id}" for angel_id in ("1A", "1B", "1Z", "1AA")
+    ]
+    assert sorted(result.sheets_generated) == sorted(stems)
+    assert sorted(fake_convert) == sorted(stems)
+    sheet_artifacts_after = _sql(
+        cfg, "SELECT COUNT(*) FROM artifacts WHERE kind = 'child_sheet'"
+    )[0][0]
+    assert sheet_artifacts_after == sheet_artifacts_before + len(stems)
+    assert result.packets_built == 1
+    assert html_path.is_file() and "stale packet" not in html_path.read_text()
+    assert PdfReader(str(pdf_path)).pages
+    assert (
+        manifest_path.is_file()
+        and "stale manifest" not in manifest_path.read_text()
+    )
+
+
 def test_packet_backup_replaces_a_read_only_previous_copy(
     tmp_path: Path,
     packets_cfg: Any,
@@ -819,19 +888,43 @@ def test_packet_build_reports_an_unwritable_packet_directory(
     packets_cfg: Any,
     fake_convert: list[str],
 ) -> None:
-    """An unwritable packet directory is named, not a bare PermissionError."""
+    """An unwritable sponsor is reported while other packets still build."""
     if os.geteuid() == 0:
         pytest.skip("root ignores the directory mode")
     cfg = packets_cfg(_prepare(tmp_path))
-    _full_seed(cfg, tmp_path)
+    children = [
+        _angel_child("c1", "1A", assigned_sponsor_id=7),
+        _angel_child("c2", "1B", assigned_sponsor_id=8),
+    ]
+    asyncio.run(
+        _seed(
+            cfg,
+            children=children,
+            families=[family_row(1, assigned_sponsor_id=None)],
+            sponsors=[
+                _assigned_sponsor(7, assigned_angel_ids="1A"),
+                _assigned_sponsor(8, assigned_angel_ids="1B"),
+            ],
+        )
+    )
     _run(cfg, {})
     packet_dir = tmp_path / "artifacts" / "sponsor_packets" / "7"
     packet_dir.chmod(0o555)
     try:
-        with pytest.raises(SponsorPacketError, match="not writable"):
-            _run(cfg, {"overwrite": True})
+        result = _run(cfg, {"overwrite": True})
     finally:
         packet_dir.chmod(0o755)
+    assert result.packets_built == 1
+    assert len(result.packets_failed) == 1
+    assert result.packets_failed[0]["sponsor_id"] == 7
+    assert "not writable" in result.packets_failed[0]["error"]
+    assert (
+        tmp_path
+        / "artifacts"
+        / "sponsor_packets"
+        / "8"
+        / "sponsor_packet_8.html"
+    ).is_file()
 
 
 def test_packet_split_family_two_sponsors(
@@ -892,12 +985,12 @@ def test_packet_shared_angel_letter_keeps_every_child(
     assert html.count("<strong>1A</strong>") == 2
 
 
-def test_packet_validation_legacy_scope_d18(
+def test_packet_validation_ignores_unaudited_missing_sheet(
     tmp_path: Path,
     packets_cfg: Any,
     fake_convert: list[str],
 ) -> None:
-    """Mixed-status data can finish sheets then fail packet validation."""
+    """An unaudited child without a sheet does not block its sponsor."""
     cfg = packets_cfg(_prepare(tmp_path))
     children = [
         _angel_child("c1", "1A"),  # audited: sheet generated
@@ -911,8 +1004,7 @@ def test_packet_validation_legacy_scope_d18(
             sponsors=[_assigned_sponsor(assigned_angel_ids="1A,1B")],
         )
     )
-    with pytest.raises(SponsorPacketError, match="1B"):
-        _run(cfg, {})
+    result = _run(cfg, {})
     # The audited sibling's sheet still committed (per-item durability).
     rows = _sql(
         cfg,
@@ -920,6 +1012,116 @@ def test_packet_validation_legacy_scope_d18(
         " ORDER BY zite_record_id",
     )
     assert dict(rows) == {"c1": 1, "c2": 0}
+    assert result.packets_built == 1
+    assert result.packets_blocked == []
+
+
+def test_unaudited_child_is_logged_and_packet_omits_its_pages(
+    tmp_path: Path,
+    packets_cfg: Any,
+    fake_convert: list[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unaudited assigned child gets no sheet and does not block packet."""
+    cfg = packets_cfg(_prepare(tmp_path))
+    children = [
+        _angel_child("c1", "1A"),
+        _angel_child("c2", "1Z", status="pending"),
+    ]
+    asyncio.run(
+        _seed(
+            cfg,
+            children=children,
+            families=[_family(1)],
+            sponsors=[_assigned_sponsor(assigned_angel_ids="1A,1Z")],
+        )
+    )
+    caplog.set_level(logging.WARNING, logger="ccat.child_info_generate")
+    caplog.set_level(logging.WARNING, logger="ccat.services.db_generate")
+
+    result = _run(cfg, {})
+
+    assert result.packets_built == 1
+    assert fake_convert == [f"AT{cfg.season}_1A"]
+    assert not (
+        tmp_path
+        / "artifacts"
+        / "child_sheets"
+        / "hancock"
+        / f"AT{cfg.season}_1Z.pdf"
+    ).exists()
+    packet_pdf = (
+        tmp_path
+        / "artifacts"
+        / "sponsor_packets"
+        / "7"
+        / f"Sponsor 7 - Child Information {cfg.season}.pdf"
+    )
+    titles = [
+        outline.title if hasattr(outline, "title") else None
+        for outline in PdfReader(str(packet_pdf)).outline
+    ]
+    assert titles == ["Angel 1A"]
+    assert any(
+        "child 1Z" in record.message
+        and "not audited" in record.message
+        and "pending" in record.message
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    )
+
+
+def test_failed_sheet_blocks_only_its_sponsor(
+    tmp_path: Path,
+    packets_cfg: Any,
+    fake_generation: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed child sheet blocks its sponsor, not the other sponsors."""
+    cfg = packets_cfg(_prepare(tmp_path))
+    children = [
+        _angel_child("c1", "1A", assigned_sponsor_id=7),
+        _angel_child("c2", "1B", assigned_sponsor_id=8),
+    ]
+    asyncio.run(
+        _seed(
+            cfg,
+            children=children,
+            families=[family_row(1, assigned_sponsor_id=None)],
+            sponsors=[
+                _assigned_sponsor(7, assigned_angel_ids="1A"),
+                _assigned_sponsor(8, assigned_angel_ids="1B"),
+            ],
+        )
+    )
+
+    def fail_first_sheet(
+        odt_path: Path,
+        out_dir: Path,
+        soffice_binary: str,
+        profile: Path,
+        timeout: float,
+        stop: threading.Event | None = None,
+    ) -> Path:
+        if odt_path.stem.endswith("1A"):
+            raise InfoSheetError("sheet conversion failed")
+        writer = PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+        pdf_path = out_dir / f"{odt_path.stem}.pdf"
+        with pdf_path.open("wb") as output:
+            writer.write(output)
+        return pdf_path
+
+    monkeypatch.setattr(db_generate, "_convert_to_pdf", fail_first_sheet)
+
+    result = _run(cfg, {})
+
+    assert result.sheets_failed == [f"AT{cfg.season}_1A"]
+    assert result.packets_blocked == [{"sponsor_id": 7, "angel_ids": ["1A"]}]
+    assert result.packets_built == 1
+    packets_dir = tmp_path / "artifacts" / "sponsor_packets"
+    assert not (packets_dir / "7" / "sponsor_packet_7.html").exists()
+    assert (packets_dir / "8" / "sponsor_packet_8.html").is_file()
 
 
 def test_packet_independent_filters_ignored_family(

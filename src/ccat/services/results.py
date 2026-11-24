@@ -124,9 +124,11 @@ class GenerateResult(StrictResult):
         packets_skipped: Sponsors whose packet was already complete
             before and after the run (approximate; see :func:`ccat.
             services.pipeline.generate`).
-        packets_blocked: Sponsors a packets-only run skipped because a
-            child still has no info sheet, as
+        packets_blocked: Sponsors skipped because an audited child
+            still has no info sheet, as
             ``{"sponsor_id": int, "angel_ids": [...]}``.
+        packets_failed: Sponsors whose packet build failed, as
+            ``{"sponsor_id": int, "error": str}``.
         info_sheet_dir: Info-sheet output directory.
         packets_dir: Sponsor-packet output directory.
     """
@@ -137,6 +139,7 @@ class GenerateResult(StrictResult):
     packets_built: int = 0
     packets_skipped: int = 0
     packets_blocked: list[dict[str, Any]] = Field(default_factory=list)
+    packets_failed: list[dict[str, Any]] = Field(default_factory=list)
     info_sheet_dir: str = ""
     packets_dir: str = ""
 
