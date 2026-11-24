@@ -65,7 +65,7 @@ onUnmounted(() => {
 
 <template>
   <div class="app">
-    <header v-if="session.authenticated" class="app-header">
+    <header v-if="session.authenticated && !embedded" class="app-header">
       <div class="brand">
         <strong>CCAT</strong>
         <span class="season" data-testid="header-season">{{ seasonName }}</span>

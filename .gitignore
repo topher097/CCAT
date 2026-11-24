@@ -60,3 +60,4 @@ output/**
 
 # Local database backups (children's data; never commit).
 backups/
+secrets/

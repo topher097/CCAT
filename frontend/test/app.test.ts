@@ -29,6 +29,8 @@ describe('app shell', () => {
 
     expect(wrapper.find('nav.app-nav').exists()).toBe(true)
     expect(wrapper.get('nav.app-nav').text()).toContain('Dispatch')
+    expect(wrapper.find('header.app-header').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="header-user"]').text()).toBe('coordinator')
   })
 
   it('drops the section navigation in an embedded view', async () => {
@@ -40,6 +42,7 @@ describe('app shell', () => {
     await flushPromises()
 
     expect(wrapper.find('nav.app-nav').exists()).toBe(false)
-    expect(wrapper.find('header.app-header').exists()).toBe(true)
+    expect(wrapper.find('header.app-header').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="logout"]').exists()).toBe(false)
   })
 })
