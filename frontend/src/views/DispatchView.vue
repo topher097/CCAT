@@ -27,6 +27,7 @@ import {
   progressOf,
   type Job,
 } from '../api/jobs'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DispatchGenerationBar from '../components/DispatchGenerationBar.vue'
 import DispatchSponsorTable from '../components/DispatchSponsorTable.vue'
 import PopupFrame from '../components/PopupFrame.vue'
@@ -81,6 +82,20 @@ const saving = ref(false)
 const sending = ref(false)
 const sendState = ref<'failed' | 'unknown' | null>(null)
 const sendError = ref<string | null>(null)
+// A physical-packet sponsor normally gets no email, so the send is
+// confirmed before the draft is opened.
+const physicalPacketOpen = ref(false)
+const physicalPacketRow = ref<DispatchRow | null>(null)
+const physicalPacketMessage = computed(() => {
+  const row = physicalPacketRow.value
+  const name = row ? personName(row) : 'This sponsor'
+  return (
+    `${name} is flagged for a physical packet. Sponsors with a physical` +
+    ` packet normally get no email. Continue only if this sponsor should` +
+    ` also receive the packet by email. The draft opens next; the email` +
+    ` goes out only when you press Send email.`
+  )
+})
 let draftRequest = 0
 let pollTimer: number | undefined
 
@@ -238,6 +253,29 @@ function patchRow(sponsorId: number, patch: Partial<DispatchRow>): void {
 }
 
 async function openEmail(row: DispatchRow): Promise<void> {
+  // A sent sponsor is read-only in the pop-up, so only the path that can
+  // reach a send needs the physical-packet confirmation.
+  if (row.physical_packet && row.email_status !== 'sent') {
+    physicalPacketRow.value = row
+    physicalPacketOpen.value = true
+    return
+  }
+  await loadEmail(row)
+}
+
+function confirmPhysicalPacket(): void {
+  const row = physicalPacketRow.value
+  physicalPacketOpen.value = false
+  physicalPacketRow.value = null
+  if (row) void loadEmail(row)
+}
+
+function cancelPhysicalPacket(): void {
+  physicalPacketOpen.value = false
+  physicalPacketRow.value = null
+}
+
+async function loadEmail(row: DispatchRow): Promise<void> {
   const season = seasonName.value
   if (!season) return
   const request = ++draftRequest
@@ -478,6 +516,14 @@ onUnmounted(() => {
       :title="packetTitle"
       :src="packetSrc"
       @close="packetRow = null"
+    />
+    <ConfirmDialog
+      :open="physicalPacketOpen"
+      title="Physical packet sponsor"
+      :message="physicalPacketMessage"
+      confirm-label="Continue to draft"
+      @confirm="confirmPhysicalPacket"
+      @cancel="cancelPhysicalPacket"
     />
   </section>
 </template>

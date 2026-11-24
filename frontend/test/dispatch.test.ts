@@ -639,3 +639,87 @@ describe('sponsor email popup', () => {
     )
   })
 })
+
+describe('physical packet warning', () => {
+  it('warns before opening a physical-packet sponsor and continues on confirmation', async () => {
+    const list = listView([sponsor({ physical_packet: true })])
+    const { wrapper, fetchMock } = await mountDispatch(true, list)
+
+    await wrapper.get('[data-testid="draft-send"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="confirm"]').text()).toBe(
+      'Continue to draft',
+    )
+    expect(wrapper.text()).toContain('flagged for a physical packet')
+    expect(wrapper.text()).toContain('Ada Lovelace')
+    expect(wrapper.find('[data-testid="sponsor-email-modal"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="confirm"]').trigger('click')
+    await flushPromises()
+
+    // The draft window opens exactly as for a sponsor with no physical
+    // packet; the confirmation itself sends nothing.
+    expect(wrapper.find('[data-testid="sponsor-email-modal"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="draft-recipient"]').text()).toBe(
+      'ada@example.org',
+    )
+    expect(
+      fetchMock.mock.calls.some(
+        (call) =>
+          String(call[0]).endsWith('/sponsors/7/send') &&
+          (call[1] as RequestInit).method === 'POST',
+      ),
+    ).toBe(false)
+  })
+
+  it('abandons the send when the warning is cancelled', async () => {
+    const list = listView([sponsor({ physical_packet: true })])
+    const { wrapper, fetchMock } = await mountDispatch(true, list)
+
+    await wrapper.get('[data-testid="draft-send"]').trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.get('[role="dialog"]')
+    await dialog.findAll('button')[0]!.trigger('click') // Cancel
+
+    expect(wrapper.find('[data-testid="confirm"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="sponsor-email-modal"]').exists()).toBe(false)
+    expect(
+      fetchMock.mock.calls.some(
+        (call) =>
+          String(call[0]).includes('/drafts') &&
+          (call[1] as RequestInit).method === 'POST',
+      ),
+    ).toBe(false)
+  })
+
+  it('opens without a warning for a sponsor with no physical packet', async () => {
+    const { wrapper } = await mountDispatch()
+
+    await wrapper.get('[data-testid="draft-send"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="confirm"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="sponsor-email-modal"]').exists()).toBe(true)
+  })
+
+  it('does not warn when a sent sponsor opens its email read-only', async () => {
+    const list = listView([
+      sponsor({ physical_packet: true, email_status: 'sent' }),
+    ])
+    const { wrapper } = await mountDispatch(true, list)
+
+    const allChip = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('All sponsors'))!
+    await allChip.trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="view-email"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="confirm"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="sponsor-email-modal"]').exists()).toBe(true)
+  })
+})
