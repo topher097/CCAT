@@ -2,10 +2,10 @@
 /** Generation shortcuts for the dispatch work list. */
 
 import { ref } from 'vue'
-import { RouterLink } from 'vue-router'
 
 import type { DispatchTotals } from '../api/dispatch'
 import ConfirmDialog from './ConfirmDialog.vue'
+import { useJobPopup } from '../composables/useJobPopup'
 
 const props = withDefaults(
   defineProps<{
@@ -17,6 +17,7 @@ const props = withDefaults(
   { enqueueing: false, error: null, conflictJobId: null },
 )
 const emit = defineEmits<{ run: [options: Record<string, unknown>] }>()
+const { openJob } = useJobPopup()
 
 type PendingRun = {
   title: string
@@ -200,13 +201,14 @@ defineExpose({ requestSponsor })
 
     <p v-if="localError || props.error" class="error-text" role="alert" data-testid="generation-error">
       {{ localError || props.error }}
-      <RouterLink
+      <button
         v-if="props.conflictJobId !== null"
-        :to="`/jobs/${props.conflictJobId}`"
+        type="button"
+        @click="openJob(props.conflictJobId)"
         data-testid="generation-conflict-link"
       >
         Open active job #{{ props.conflictJobId }}
-      </RouterLink>
+      </button>
     </p>
 
     <ConfirmDialog

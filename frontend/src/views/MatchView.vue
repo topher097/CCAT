@@ -14,12 +14,11 @@ import {
   ref,
   watch,
 } from 'vue'
-import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import {
   assign,
-  dispatchPackets,
   holdFamily,
   listPool,
   listSponsors,
@@ -35,6 +34,7 @@ import {
 } from '../api/manual-match'
 import { getMatchReport, type MatchReportRow } from '../api/commands'
 import { enqueueJob } from '../api/jobs'
+import { useJobPopup } from '../composables/useJobPopup'
 import { getRunSettings } from '../api/runs'
 import { useSessionStore } from '../stores/session'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -47,6 +47,7 @@ import SponsorCardList from '../components/SponsorCardList.vue'
 
 const route = useRoute()
 const router = useRouter()
+const { openJob } = useJobPopup()
 const session = useSessionStore()
 
 const seasonName = computed(() => session.season?.name ?? '')
@@ -150,8 +151,6 @@ const generating = ref(false)
 const reassignOpen = ref(false)
 const releaseOpen = ref(false)
 const holdOpen = ref(false)
-const dispatchOpen = ref(false)
-const dispatchTargetId = ref<number | null>(null)
 const holdTargetId = ref<number | null>(null)
 const details = ref<null | {
   entity: 'family' | 'child' | 'sponsor'
@@ -820,32 +819,6 @@ async function submitRelease(): Promise<void> {
   }
 }
 
-function onDispatch(sponsorId: number): void {
-  resetWriteState()
-  dispatchTargetId.value = sponsorId
-  dispatchOpen.value = true
-}
-
-async function submitDispatch(): Promise<void> {
-  dispatchOpen.value = false
-  const id = dispatchTargetId.value
-  const target = sponsors.value.find((s) => s.sponsor_id === id)
-  if (id === null || !target || !seasonName.value) return
-  pending.value = true
-  try {
-    await dispatchPackets(seasonName.value, {
-      sponsor_id: id,
-      expected_versions: { [`sponsor:${id}`]: target.row_version },
-    })
-    notice.value = `Packets dispatched for sponsor ${id} — assignments are now locked.`
-    await loadSponsors()
-  } catch (failure) {
-    handleWriteError(failure)
-  } finally {
-    pending.value = false
-  }
-}
-
 async function submitHold(note: string): Promise<void> {
   holdOpen.value = false
   const familyId = holdTargetId.value
@@ -924,7 +897,7 @@ async function runAutomaticMatch(): Promise<void> {
       { test: run.test === true && !skipMatch, skip_match: skipMatch },
       crypto.randomUUID(),
     )
-    await router.push(`/jobs/${job.id}`)
+    openJob(job.id)
   } catch (failure) {
     autoError.value =
       failure instanceof Error ? failure.message : 'match run failed'
@@ -1047,9 +1020,9 @@ onBeforeUnmount(() => {
 
     <p v-if="autoError" class="error-text" role="alert" data-testid="auto-error">
       {{ autoError }}
-      <RouterLink v-if="autoJobId !== null" :to="`/jobs/${autoJobId}`">
+      <button v-if="autoJobId !== null" type="button" @click="openJob(autoJobId)">
         Open job #{{ autoJobId }}
-      </RouterLink>
+      </button>
     </p>
 
     <div class="status-line muted" data-testid="last-run">
@@ -1089,7 +1062,6 @@ onBeforeUnmount(() => {
         :model-value="sponsorId"
         :disabled="automaticRun.active"
         @update:model-value="chooseSponsor"
-        @dispatch="onDispatch"
         @open-details="openSponsorDetails"
         @open-assignments="openAssignments"
       />
@@ -1342,12 +1314,13 @@ onBeforeUnmount(() => {
         data-testid="assign-error"
       >
         {{ actionError }}
-        <RouterLink
+        <button
           v-if="blockingJobId !== null"
-          :to="`/jobs/${blockingJobId}`"
+          type="button"
+          @click="openJob(blockingJobId)"
         >
           Open job #{{ blockingJobId }}
-        </RouterLink>
+        </button>
       </p>
       <p v-if="notice" class="notice" role="status" data-testid="write-notice">
         {{ notice }}
@@ -1392,15 +1365,6 @@ onBeforeUnmount(() => {
       :entity-key="details?.key ?? ''"
       :title="details?.title"
       @close="details = null"
-    />
-    <ConfirmDialog
-      :open="dispatchOpen"
-      title="Dispatch packets?"
-      message="The children's info sheets have been sent to this sponsor. Their assignments can no longer be changed for this sponsor."
-      confirm-label="Dispatch"
-      dangerous
-      @confirm="submitDispatch"
-      @cancel="dispatchOpen = false"
     />
     <HoldDialog
       :open="holdOpen"

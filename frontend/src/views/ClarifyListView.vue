@@ -2,7 +2,7 @@
 /** /clarify: flagged families, contact state, and CSV export (§7.1.7). */
 
 import { computed, onMounted, ref } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { RouterLink } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import {
@@ -13,8 +13,9 @@ import {
 import { useSessionStore } from '../stores/session'
 import { formatTime } from '../utils/format'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import { useJobPopup } from '../composables/useJobPopup'
 
-const router = useRouter()
+const { openJob } = useJobPopup()
 const session = useSessionStore()
 
 const families = ref<ClarifyFamily[]>([])
@@ -57,7 +58,7 @@ async function runExport(): Promise<void> {
   exporting.value = true
   try {
     const job = await enqueueClarifyExport(seasonName.value)
-    await router.push(`/jobs/${job.id}`)
+    openJob(job.id)
   } catch (failure) {
     exportError.value =
       failure instanceof ApiError

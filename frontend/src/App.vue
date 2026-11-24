@@ -4,6 +4,7 @@ import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
 import { useSessionStore } from './stores/session'
 import { useOverviewStore } from './stores/overview'
+import JobPopup from './components/JobPopup.vue'
 
 const session = useSessionStore()
 const overview = useOverviewStore()
@@ -89,5 +90,6 @@ onUnmounted(() => {
     <main class="app-main" :class="{ 'app-main--wide': route.meta.wide }">
       <RouterView />
     </main>
+    <JobPopup />
   </div>
 </template>

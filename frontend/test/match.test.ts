@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { flushPromises } from '@vue/test-utils'
+import { flushPromises, RouterLinkStub } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import MatchView from '../src/views/MatchView.vue'
+import { useJobPopup } from '../src/composables/useJobPopup'
 import { useSessionStore } from '../src/stores/session'
 import type {
   ManualAssignmentListItem,
@@ -237,7 +238,11 @@ function findChip(wrapper: Awaited<ReturnType<typeof mountPage>>['wrapper'], tex
   return wrapper.findAll('button.chip').find((button) => button.text() === text)!
 }
 
-beforeEach(() => setActivePinia(createPinia()))
+beforeEach(() => {
+  setActivePinia(createPinia())
+  useJobPopup().closeJob()
+  expect(useJobPopup().jobId.value).toBe(null)
+})
 
 describe('match page', () => {
   it('renders each child needs, wants, interests and notes', async () => {
@@ -785,65 +790,35 @@ describe('match page', () => {
     )
   })
 
-  it('dispatches a full sponsor after confirmation and shows the badge', async () => {
-    let dispatched = false
+  it('links to dispatch without posting and keeps the dispatched badge', async () => {
     const fetchMock = mockRoutes([
-      poolHandler(() => pool([family()])),
-      (url, init) =>
-        url.includes('/manual-match/sponsors') && (init.method ?? 'GET') === 'GET'
-          ? jsonResponse(200, {
-              items: [
-                sponsor({
-                  assigned_count: 3,
-                  remaining: 0,
-                  packets_dispatched: dispatched,
-                }),
-                sponsor({ sponsor_id: 43, display_name: 'Bob' }),
-              ],
-              total: 2,
-              page: 1,
-              page_size: 200,
-            })
-          : undefined,
-      (url, init) => {
-        if (!url.endsWith('/manual-match/dispatch') || init.method !== 'POST') {
-          return undefined
-        }
-        dispatched = true
-        return jsonResponse(200, sponsor({ packets_dispatched: true }))
-      },
+      poolHandler(() =>
+        pool([family()], {
+          active: true,
+          job_id: 12,
+          status: 'running',
+          started_at: null,
+        }),
+      ),
+      sponsorsHandler([sponsor({ packets_dispatched: true })]),
     ])
     const { wrapper } = await mountRouted(MatchView, {
-      path: '/match?sponsor_id=43',
+      path: SHOPPING_PATH,
       setup: withSeason,
     })
     await flushPromises()
-    expect(wrapper.find('[data-testid="sponsor-row-dispatched"]').exists()).toBe(false)
 
-    await wrapper
-      .get('[data-sponsor-id="42"] [data-testid="dispatch-packets"]')
-      .trigger('click')
-    await flushPromises()
-    expect(postsTo(fetchMock, '/manual-match/dispatch')).toHaveLength(0)
-
-    await wrapper.get('[data-testid="confirm"]').trigger('click')
-    await flushPromises()
-
-    const posts = postsTo(fetchMock, '/manual-match/dispatch')
-    expect(posts).toHaveLength(1)
-    expect(bodyOf(posts[0]!)).toEqual({
-      sponsor_id: 42,
-      expected_versions: { 'sponsor:42': 5 },
+    const link = wrapper.getComponent(RouterLinkStub)
+    expect(link.props('to')).toEqual({
+      path: '/dispatch',
+      query: { sponsor: 42 },
     })
-    expect(wrapper.get('[data-testid="write-notice"]').text()).toContain(
-      'Packets dispatched for sponsor 42',
+    expect(link.attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('[data-testid="sponsor-row-dispatched"]').text()).toBe(
+      'Dispatched',
     )
-    expect(
-      wrapper
-        .get('[data-sponsor-id="42"]')
-        .find('[data-testid="sponsor-row-dispatched"]')
-        .exists(),
-    ).toBe(true)
+    await link.trigger('click')
+    expect(postsTo(fetchMock, '/manual-match/dispatch')).toHaveLength(0)
   })
 
   it('locks Assign and Release when the selected sponsor is dispatched', async () => {
@@ -873,35 +848,6 @@ describe('match page', () => {
     expect(wrapper.get('[data-testid="release"]').attributes('disabled')).toBeDefined()
   })
 
-  it('surfaces a packets_dispatched refusal from the dispatch call', async () => {
-    mockRoutes([
-      poolHandler(() => pool([family()])),
-      sponsorsHandler([sponsor({ assigned_count: 3, remaining: 0 })]),
-      (url, init) =>
-        url.endsWith('/manual-match/dispatch') && init.method === 'POST'
-          ? jsonResponse(409, {
-              detail: {
-                code: 'packets_dispatched',
-                message: 'packets already dispatched for sponsor 42',
-              },
-            })
-          : undefined,
-    ])
-    const { wrapper } = await mountRouted(MatchView, {
-      path: SHOPPING_PATH,
-      setup: withSeason,
-    })
-    await flushPromises()
-
-    await wrapper.get('[data-testid="dispatch-packets"]').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="confirm"]').trigger('click')
-    await flushPromises()
-
-    expect(wrapper.get('[data-testid="assign-error"]').text()).toContain(
-      'already dispatched',
-    )
-  })
 })
 
 describe('assigned angels popup', () => {
@@ -1136,7 +1082,8 @@ describe('automatic matcher', () => {
       options: { test: false, skip_match: false },
       idempotency_key: expect.any(String),
     })
-    expect(router.currentRoute.value.path).toBe('/jobs/12')
+    expect(useJobPopup().jobId.value).toBe(12)
+    expect(router.currentRoute.value.path).toBe('/match')
   })
 
   it('hides the button from a role that may not run it', async () => {

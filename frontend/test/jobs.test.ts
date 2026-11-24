@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, RouterLinkStub } from '@vue/test-utils'
+import { flushPromises, mount, RouterLinkStub } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import JobsListView from '../src/views/JobsListView.vue'
 import JobDetailView from '../src/views/JobDetailView.vue'
+import JobPopup from '../src/components/JobPopup.vue'
+import { useJobPopup } from '../src/composables/useJobPopup'
 import { useSessionStore } from '../src/stores/session'
 import { bodyOf, jsonResponse, mockRoutes, mountRouted } from './helpers'
 
@@ -59,8 +61,24 @@ function detailRoutes(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   setActivePinia(createPinia())
+  useJobPopup().closeJob()
+  expect(useJobPopup().jobId.value).toBe(null)
   FakeEventSource.instances = []
   vi.useRealTimers()
+})
+
+describe('job popup', () => {
+  it('shows the selected job and closes from the overlay', async () => {
+    useJobPopup().openJob(17)
+    const wrapper = mount(JobPopup)
+
+    expect(wrapper.get('iframe').attributes('src')).toBe('/jobs/17')
+    expect(wrapper.get('iframe').attributes('title')).toBe('Job #17')
+
+    await wrapper.get('[data-testid="popup-frame-close"]').trigger('click')
+    expect(useJobPopup().jobId.value).toBe(null)
+    expect(wrapper.find('.dialog-backdrop').exists()).toBe(false)
+  })
 })
 
 describe('job center list', () => {

@@ -9,6 +9,7 @@ import type {
   DispatchRow,
 } from '../src/api/dispatch'
 import DispatchView from '../src/views/DispatchView.vue'
+import { useJobPopup } from '../src/composables/useJobPopup'
 import { useSessionStore } from '../src/stores/session'
 import {
   bodyOf,
@@ -176,10 +177,11 @@ async function mountDispatch(
   admin = true,
   list = listView(),
   handlers: Parameters<typeof mockRoutes>[0] = baseRoutes(list),
+  path = '/dispatch',
 ) {
   const fetchMock = mockRoutes(handlers)
   const mounted = await mountRouted(DispatchView, {
-    path: '/dispatch',
+    path,
     setup: () => withSeason(admin),
   })
   await flushPromises()
@@ -191,7 +193,11 @@ async function openDraft(wrapper: Awaited<ReturnType<typeof mountDispatch>>['wra
   await flushPromises()
 }
 
-beforeEach(() => setActivePinia(createPinia()))
+beforeEach(() => {
+  setActivePinia(createPinia())
+  useJobPopup().closeJob()
+  expect(useJobPopup().jobId.value).toBe(null)
+})
 
 describe('dispatch work list and generation', () => {
   it('renders one row per sponsor and explains blockers in text', async () => {
@@ -224,6 +230,114 @@ describe('dispatch work list and generation', () => {
     expect(wrapper.get('[data-sponsor-id="8"]').text()).toContain('Missing: 2A')
   })
 
+  it('focuses a sponsor from the route query, including dispatched sponsors', async () => {
+    const rows = [
+      sponsor({ packets_dispatched: true }),
+      sponsor({
+        sponsor_id: 42,
+        display_name: 'Grace Hopper',
+        packets_dispatched: true,
+      }),
+    ]
+    const { wrapper } = await mountDispatch(
+      true,
+      listView(rows),
+      baseRoutes(listView(rows)),
+      '/dispatch?sponsor=42',
+    )
+
+    const visibleRows = wrapper.findAll('[data-testid="dispatch-row"]')
+    expect(visibleRows).toHaveLength(1)
+    expect(visibleRows[0]!.attributes('data-sponsor-id')).toBe('42')
+    expect(visibleRows[0]!.attributes('data-focused')).toBe('true')
+  })
+
+  it('marks a ready packet dispatched with the sponsor version and reloads the list', async () => {
+    let dispatched = false
+    let listRequests = 0
+    const handlers = [
+      (url: string, init: RequestInit) => {
+        if (
+          url.endsWith('/seasons/2026/dispatch') &&
+          (init.method ?? 'GET') === 'GET'
+        ) {
+          listRequests += 1
+          return jsonResponse(
+            200,
+            listView([sponsor({ packets_dispatched: dispatched })]),
+          )
+        }
+        if (
+          url.endsWith('/manual-match/dispatch') &&
+          init.method === 'POST'
+        ) {
+          dispatched = true
+          return jsonResponse(200, sponsor({ packets_dispatched: true }))
+        }
+        return undefined
+      },
+      ...baseRoutes(),
+    ]
+    const { wrapper, fetchMock } = await mountDispatch(true, listView(), handlers)
+    const allSponsors = wrapper
+      .findAll('button.chip')
+      .find((button) => button.text() === 'All sponsors')!
+    await allSponsors.trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="mark-dispatched"]').trigger('click')
+    await flushPromises()
+
+    const posts = fetchMock.mock.calls.filter(
+      (call) =>
+        String(call[0]).endsWith('/manual-match/dispatch') &&
+        (call[1] as RequestInit).method === 'POST',
+    )
+    expect(posts).toHaveLength(1)
+    expect(bodyOf(posts[0]!)).toEqual({
+      sponsor_id: 7,
+      expected_versions: { 'sponsor:7': 3 },
+    })
+    expect(listRequests).toBeGreaterThan(1)
+    expect(wrapper.get('[data-testid="send-notice"]').text()).toBe(
+      'Sponsor #7 marked dispatched.',
+    )
+    expect(wrapper.get('[data-testid="dispatch-row"]').text()).toContain(
+      'Dispatched',
+    )
+  })
+
+  it('disables Mark dispatched when child slots are unfilled', async () => {
+    const row = sponsor({ blockers: ['slots_not_filled'] })
+    const { wrapper } = await mountDispatch(true, listView([row]))
+
+    const action = wrapper.get('[data-testid="mark-dispatched"]')
+    expect(action.attributes('disabled')).toBeDefined()
+    expect(action.attributes('title')).toContain('Fill all child slots')
+  })
+
+  it('shows the server error when marking dispatched is refused', async () => {
+    const { wrapper } = await mountDispatch(true, listView(), [
+      ...baseRoutes(),
+      (url, init) =>
+        url.endsWith('/manual-match/dispatch') && init.method === 'POST'
+          ? jsonResponse(409, {
+              detail: {
+                code: 'stale_version',
+                message: 'Sponsor #7 changed; refresh and try again.',
+              },
+            })
+          : undefined,
+    ])
+
+    await wrapper.get('[data-testid="mark-dispatched"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="dispatch-action-error"]').text()).toBe(
+      'Sponsor #7 changed; refresh and try again.',
+    )
+  })
+
   it('enqueues generate jobs with sheet, packet, and overwrite options', async () => {
     const fetchMock = mockRoutes([
       ...baseRoutes(),
@@ -232,7 +346,7 @@ describe('dispatch work list and generation', () => {
           ? jsonResponse(202, JOB)
           : undefined,
     ])
-    const { wrapper } = await mountRouted(DispatchView, {
+    const { wrapper, router } = await mountRouted(DispatchView, {
       path: '/dispatch',
       setup: () => withSeason(),
     })
@@ -241,6 +355,8 @@ describe('dispatch work list and generation', () => {
     await wrapper.get('[data-testid="generate-sheets"]').trigger('click')
     await wrapper.get('[data-testid="confirm"]').trigger('click')
     await flushPromises()
+    expect(useJobPopup().jobId.value).toBe(11)
+    expect(router.currentRoute.value.path).toBe('/dispatch')
     await wrapper.get('input[name="overwrite"]').setValue(true)
     await wrapper.get('[data-testid="generate-both"]').trigger('click')
     await wrapper.get('[data-testid="confirm"]').trigger('click')
@@ -259,6 +375,25 @@ describe('dispatch work list and generation', () => {
       job_type: 'generate',
       options: { only: 'both', overwrite: true },
     })
+  })
+
+  it('hides the mark-dispatched action from a user without the coordinator role', async () => {
+    mockRoutes(baseRoutes())
+    const { wrapper } = await mountRouted(DispatchView, {
+      path: '/dispatch',
+      setup: () => {
+        const session = useSessionStore()
+        session.season = { id: 1, name: '2026', xmas_date: '2026-12-25' }
+        session.me = {
+          username: 'auditor',
+          roles: ['auditor'],
+          csrf_token: 'csrf',
+        }
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="mark-dispatched"]').exists()).toBe(false)
   })
 
   it('enqueues a one-child sheet job from the collapsed controls', async () => {
@@ -329,6 +464,44 @@ describe('dispatch downloads', () => {
 
     expect(wrapper.find('[data-testid="dispatch-table"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="download-sheet"]').exists()).toBe(false)
+  })
+})
+
+describe('packet PDF popup', () => {
+  it('opens the sponsor packet inline in a titled iframe', async () => {
+    const { wrapper } = await mountDispatch()
+
+    await wrapper.get('[data-testid="view-packet"]').trigger('click')
+
+    const frame = wrapper.get('.popup-frame iframe')
+    expect(frame.attributes('src')).toBe('/api/v1/artifacts/90/download?inline=true')
+    expect(frame.attributes('title')).toBe('Sponsor #7 packet — Ada Lovelace')
+    expect(wrapper.get('[role="dialog"]').attributes('aria-label')).toBe(
+      'Sponsor #7 packet — Ada Lovelace',
+    )
+  })
+
+  it('hides the packet button when the packet is missing', async () => {
+    const row = sponsor({ packet_status: 'missing' })
+    const { wrapper } = await mountDispatch(true, listView([row]))
+
+    expect(wrapper.find('[data-testid="view-packet"]').exists()).toBe(false)
+  })
+
+  it('closes from the close button', async () => {
+    const { wrapper } = await mountDispatch()
+    await wrapper.get('[data-testid="view-packet"]').trigger('click')
+    await wrapper.get('[data-testid="popup-frame-close"]').trigger('click')
+
+    expect(wrapper.find('.popup-frame').exists()).toBe(false)
+  })
+
+  it('closes on Escape', async () => {
+    const { wrapper } = await mountDispatch()
+    await wrapper.get('[data-testid="view-packet"]').trigger('click')
+    await wrapper.get('[role="dialog"]').trigger('keydown', { key: 'Escape' })
+
+    expect(wrapper.find('.popup-frame').exists()).toBe(false)
   })
 })
 

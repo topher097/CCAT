@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { mount, RouterLinkStub } from '@vue/test-utils'
 
 import SponsorCardList, { type SponsorCard } from '../src/components/SponsorCardList.vue'
 
@@ -27,7 +27,10 @@ function sponsor(overrides: Partial<SponsorCard> = {}): SponsorCard {
 }
 
 function mountList(sponsors: SponsorCard[], modelValue: number | null = null) {
-  return mount(SponsorCardList, { props: { sponsors, modelValue } })
+  return mount(SponsorCardList, {
+    props: { sponsors, modelValue },
+    global: { stubs: { RouterLink: RouterLinkStub } },
+  })
 }
 
 type Wrapper = ReturnType<typeof mountList>
@@ -149,39 +152,33 @@ describe('SponsorCardList rows', () => {
     expect(row.get('[data-testid="sponsor-row-radio"]').attributes('disabled')).toBeUndefined()
   })
 
-  it('disables a full sponsor, marks it, and allows dispatch', async () => {
+  it('disables a full sponsor, marks it, and links to the dispatch page', () => {
     const wrapper = mountList([sponsor({ remaining: 0, assigned_count: 3 })])
     expect(wrapper.find('[data-testid="sponsor-row-full"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="sponsor-row-radio"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid="sponsor-row"]').classes()).toContain('unavailable')
 
-    const button = wrapper.get('[data-testid="dispatch-packets"]')
-    expect(button.attributes('disabled')).toBeUndefined()
-    await button.trigger('click')
-    expect(wrapper.emitted('dispatch')).toEqual([[1]])
-  })
-
-  it('disables selection and dispatch for an already dispatched sponsor', async () => {
-    const wrapper = mountList([sponsor({ remaining: 0, packets_dispatched: true })])
-    expect(wrapper.find('[data-testid="sponsor-row-dispatched"]').exists()).toBe(true)
-    expect(wrapper.get('[data-testid="sponsor-row-radio"]').attributes('disabled')).toBeDefined()
-    const button = wrapper.get('[data-testid="dispatch-packets"]')
-    expect(button.attributes('disabled')).toBeDefined()
-    expect(button.attributes('title')).toContain('already dispatched')
-    await button.trigger('click')
+    const link = wrapper.findComponent(RouterLinkStub)
+    expect(link.props('to')).toEqual({ path: '/dispatch', query: { sponsor: 1 } })
     expect(wrapper.emitted('dispatch')).toBeUndefined()
   })
 
-  it('gates dispatch until every slot is filled and explains why', () => {
-    const open = mountList([sponsor()]).get('[data-testid="dispatch-packets"]')
-    expect(open.attributes('disabled')).toBeDefined()
-    expect(open.attributes('title')).toContain('Fill all child slots first')
+  it('disables selection for an already dispatched sponsor and still links to dispatch', () => {
+    const wrapper = mountList([sponsor({ remaining: 0, packets_dispatched: true })])
+    expect(wrapper.find('[data-testid="sponsor-row-dispatched"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="sponsor-row-radio"]').attributes('disabled')).toBeDefined()
+    const link = wrapper.findComponent(RouterLinkStub)
+    expect(link.props('to')).toEqual({ path: '/dispatch', query: { sponsor: 1 } })
+    expect(wrapper.emitted('dispatch')).toBeUndefined()
+  })
 
-    const uncapped = mountList([sponsor({ num_children: null, remaining: null })]).get(
-      '[data-testid="dispatch-packets"]',
-    )
-    expect(uncapped.attributes('disabled')).toBeDefined()
-    expect(uncapped.attributes('title')).toContain('quota')
+  it('links every row to its own sponsor on the dispatch page', () => {
+    const wrapper = mountList([sponsor({ sponsor_id: 1 }), sponsor({ sponsor_id: 7 })])
+    const links = wrapper.findAllComponents(RouterLinkStub)
+    expect(links.map((link) => link.props('to'))).toEqual([
+      { path: '/dispatch', query: { sponsor: 1 } },
+      { path: '/dispatch', query: { sponsor: 7 } },
+    ])
   })
 
   it('shows budget and packet indicators only when true', () => {
@@ -260,9 +257,10 @@ describe('SponsorCardList rows', () => {
     expect(rowText).toContain('Left 2')
   })
 
-  it('keeps every row visible, with its dispatch button, when the host disables the list', () => {
+  it('keeps every row visible, with its dispatch link, when the host disables the list', () => {
     const wrapper = mount(SponsorCardList, {
       props: { sponsors: fixture(), modelValue: null, disabled: true },
+      global: { stubs: { RouterLink: RouterLinkStub } },
     })
     expect(ids(wrapper)).toHaveLength(5)
     for (const radio of wrapper.findAll('[data-testid="sponsor-row-radio"]')) {

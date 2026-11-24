@@ -2,7 +2,7 @@
 /** One command's run button and pop-up settings menu (D12, §11.8). */
 
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { useJobPopup } from '../composables/useJobPopup'
 
 import { ApiError } from '../api/client'
 import { enqueueJob, type Job } from '../api/jobs'
@@ -40,7 +40,7 @@ const SCOPE: Record<RunCommand, string> = {
     'Renders child information sheets, then builds sponsor packets from completed sheets.',
 }
 
-const router = useRouter()
+const { openJob } = useJobPopup()
 const session = useSessionStore()
 
 const root = ref<HTMLDivElement | null>(null)
@@ -240,7 +240,7 @@ async function execute(): Promise<void> {
       crypto.randomUUID(),
     )
     emit('enqueued', job)
-    await router.push(`/jobs/${job.id}`)
+    openJob(job.id)
   } catch (failure) {
     showFailure(failure)
   } finally {
@@ -374,13 +374,14 @@ async function execute(): Promise<void> {
 
         <p v-if="error" class="error-text" role="alert" data-testid="run-error">
           {{ error }}
-          <RouterLink
+          <button
             v-if="conflictJobId !== null"
-            :to="`/jobs/${conflictJobId}`"
+            type="button"
+            @click="openJob(conflictJobId)"
             data-testid="conflict-job-link"
           >
             Open active job #{{ conflictJobId }}
-          </RouterLink>
+          </button>
         </p>
 
         <div class="dialog-actions">

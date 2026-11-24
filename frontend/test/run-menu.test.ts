@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, RouterLinkStub } from '@vue/test-utils'
+import { flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { VueWrapper } from '@vue/test-utils'
 
 import RunMenu from '../src/components/RunMenu.vue'
+import { useJobPopup } from '../src/composables/useJobPopup'
 import { useSessionStore } from '../src/stores/session'
 import { bodyOf, jsonResponse, mockRoutes, mountRouted } from './helpers'
 
@@ -74,7 +75,11 @@ function jobsCall(fetchMock: ReturnType<typeof mockRoutes>) {
   )
 }
 
-beforeEach(() => setActivePinia(createPinia()))
+beforeEach(() => {
+  setActivePinia(createPinia())
+  useJobPopup().closeJob()
+  expect(useJobPopup().jobId.value).toBe(null)
+})
 
 describe('run menu', () => {
   it('opens from the button and is seeded from the stored settings', async () => {
@@ -279,7 +284,7 @@ describe('run menu', () => {
     })
   })
 
-  it('surfaces a 409 with a link to the blocking job', async () => {
+  it('opens the blocking job popup from a 409 conflict', async () => {
     mockRoutes([
       (url, init) =>
         isSettings(url, init.method ?? 'GET', 'match')
@@ -296,13 +301,14 @@ describe('run menu', () => {
                 })
               : undefined,
     ])
-    const { wrapper } = await mountMenu('match')
+    const { wrapper, router } = await mountMenu('match')
     await openMenu(wrapper)
     await confirmRun(wrapper)
 
     expect(wrapper.get('[data-testid="run-error"]').text()).toContain('#7')
-    const links = wrapper.findAllComponents(RouterLinkStub)
-    expect(links.some((link) => link.props('to') === '/jobs/7')).toBe(true)
+    await wrapper.get('[data-testid="conflict-job-link"]').trigger('click')
+    expect(useJobPopup().jobId.value).toBe(7)
+    expect(router.currentRoute.value.path).toBe('/match')
   })
 
   it('closes on Esc and returns focus to the trigger', async () => {

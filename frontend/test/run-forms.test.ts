@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { flushPromises, RouterLinkStub } from '@vue/test-utils'
+import { flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import PipelineRunForm from '../src/components/PipelineRunForm.vue'
+import { useJobPopup } from '../src/composables/useJobPopup'
 import { useSessionStore } from '../src/stores/session'
 import { bodyOf, jsonResponse, mockRoutes, mountRouted } from './helpers'
 
@@ -37,7 +38,11 @@ async function enqueueAndRead(fetchMock: ReturnType<typeof mockRoutes>) {
   return bodyOf(call!)
 }
 
-beforeEach(() => setActivePinia(createPinia()))
+beforeEach(() => {
+  setActivePinia(createPinia())
+  useJobPopup().closeJob()
+  expect(useJobPopup().jobId.value).toBe(null)
+})
 
 describe('pipeline run forms', () => {
   it('maps screen options to the CLI payload exactly', async () => {
@@ -119,7 +124,7 @@ describe('pipeline run forms', () => {
     expect(fetchMock.mock.calls).toHaveLength(1)
   })
 
-  it('renders a 409 conflict with a link to the active job', async () => {
+  it('opens the active job popup from a 409 conflict', async () => {
     mockRoutes([
       (url) =>
         url.endsWith('/seasons/2026/jobs')
@@ -132,14 +137,15 @@ describe('pipeline run forms', () => {
             })
           : undefined,
     ])
-    const { wrapper } = await mountForm('screen')
+    const { wrapper, router } = await mountForm('screen')
     await wrapper.get('form').trigger('submit')
     await wrapper.get('[data-testid="confirm"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.get('[data-testid="run-error"]').text()).toContain('#7')
-    const links = wrapper.findAllComponents(RouterLinkStub)
-    expect(links.some((link) => link.props('to') === '/jobs/7')).toBe(true)
+    await wrapper.get('[data-testid="conflict-job-link"]').trigger('click')
+    expect(useJobPopup().jobId.value).toBe(7)
+    expect(router.currentRoute.value.path).toBe('/screen')
   })
 
   it('renders a 422 field error naming the invalid field', async () => {
