@@ -28,6 +28,7 @@ from ccat.audit.store import (
     _computed_age,
     _linkage_columns,
     _module_owned_columns,
+    _raw_columns,
     _seed_row_from_baseline,
     _upsert_row,
     as_bool,
@@ -91,9 +92,10 @@ def _baseline_for(
         Linkage/editable baseline values.
     """
     if entity != "child":
-        return {
-            column: prepared.get(column) for column in _linkage_columns(entity)
-        }
+        # The store's twin seeds statuses and reseeds ignores from the
+        # raw baseline's linkage AND editable columns — so the audit
+        # detail shows the raw_*-derived values, not dashes.
+        return {column: prepared.get(column) for column in _raw_columns(entity)}
     group = _child_groups_from(preparation).get(
         (
             _as_text(prepared.get("primary_email")),
@@ -149,6 +151,13 @@ async def _prepared_and_baseline(
             row
             for row in preparation.rows[entity]
             if str(row.get(key_column)) == str(key)
+            # Identity survives id reconciliation: a renumbered prepared
+            # row is still the same raw submission.
+            or (
+                existing is not None
+                and _as_text(row.get("zite_record_id"))
+                == _as_text(existing.get("zite_record_id"))
+            )
         ),
         None,
     )

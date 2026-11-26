@@ -399,6 +399,54 @@ async def _seed_default(app: Any) -> None:
         await engine.dispose()
 
 
+async def test_family_sponsor_detail_baseline_shows_raw(
+    app: Any, auditor: Client
+) -> None:
+    """Family/sponsor baselines carry the raw_*-derived values (§1.2).
+
+    The editor's "prepared baseline" column must show what the raw
+    submission said — like the child page — so the auditor can see
+    what the pipeline prepared and what the store holds now.
+    """
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                children=[child_row("c1")],
+                # The stored family diverged from its raw submission
+                # (new email); its zite id keeps them the same entity.
+                families=[
+                    family_row(
+                        1,
+                        zite_record_id="rec_f_fam@example.com",
+                        primary_email="changed@example.com",
+                    )
+                ],
+                sponsors=[sponsor_row(1)],
+            )
+    finally:
+        await engine.dispose()
+    family = (
+        await auditor.client.get("/api/v1/seasons/2026/families/1")
+    ).json()
+    assert family["baseline"]["primary_email"] == "fam@example.com"  # raw
+    assert family["baseline"]["city"] == "Hancock"  # raw value, store null
+    assert family["baseline"]["first_name"] == "Jane"
+    # The current row keeps the audited store values.
+    assert family["row"]["primary_email"] == "changed@example.com"
+
+    sponsor = (
+        await auditor.client.get("/api/v1/seasons/2026/sponsors/1")
+    ).json()
+    assert sponsor["baseline"]["first_name"] == "Mary"
+    assert sponsor["baseline"]["email"] == "sponsor@example.com"
+    assert sponsor["baseline"]["num_children"] == 2
+    assert sponsor["baseline"]["dropoff_location"] == "Hancock"
+
+
 # ---------------------------------------------------------------------------
 # Auth.
 # ---------------------------------------------------------------------------
