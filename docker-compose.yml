@@ -190,6 +190,9 @@ services:
       # Empty/unset -> "internal" so Caddy's local CA is used and the
       # Caddyfile's `tls` directive always gets an argument.
       CCAT_ACME_EMAIL: ${CCAT_ACME_EMAIL:-internal}
+      # Extra site names (tailnet IP / MagicDNS URL) served with the
+      # internal CA so other tailnet machines can reach the app.
+      CCAT_TAILSCALE_HOSTS: ${CCAT_TAILSCALE_HOSTS:-topher-laptop.tail8dc3e.ts.net, 100.112.162.55}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Build the SPA first: `cd frontend && npm ci && npm run build`.
@@ -267,6 +270,8 @@ services:
       - "8443:8443"
     environment:
       CCAT_DEV_DOMAIN: ${CCAT_DEV_DOMAIN:-localhost}
+      # Tailnet names, each with an explicit :8443 port (Caddyfile.dev).
+      CCAT_DEV_TAILSCALE_HOSTS: ${CCAT_DEV_TAILSCALE_HOSTS:-topher-laptop.tail8dc3e.ts.net:8443, 100.112.162.55:8443}
     volumes:
       - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

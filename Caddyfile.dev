@@ -4,10 +4,21 @@
 #   docker compose --profile dev up
 #   open https://localhost:8443   (trust Caddy's local CA, or -k)
 #
+#   CCAT_DEV_DOMAIN  primary hostname (default: localhost)
+#   CCAT_DEV_TAILSCALE_HOSTS  comma-separated tailnet names, each with an
+#                    explicit :8443 port, served so other machines on the
+#                    tailnet can reach the dev server; default is this host's
+#                    tailnet identity
+#
 # Vite is proxied rather than served statically so HMR websockets work.
-{$CCAT_DEV_DOMAIN:localhost}:8443 {
+{
+	# Browsers omit SNI for IP-literal URLs, so https://100.112.162.55:8443
+	# needs a name to fall back to or the TLS handshake fails.
+	default_sni topher-laptop.tail8dc3e.ts.net
+}
+
+(dev-ingress) {
 	encode zstd gzip
-	tls internal
 
 	handle /api/* {
 		reverse_proxy api-dev:8650
@@ -16,4 +27,15 @@
 	handle {
 		reverse_proxy web:5173
 	}
+}
+
+{$CCAT_DEV_DOMAIN:localhost}:8443 {
+	import dev-ingress
+	tls internal
+}
+
+# Self-signed like the primary block: trust once (or -k) from other boxes.
+{$CCAT_DEV_TAILSCALE_HOSTS:topher-laptop.tail8dc3e.ts.net:8443, 100.112.162.55:8443} {
+	import dev-ingress
+	tls internal
 }

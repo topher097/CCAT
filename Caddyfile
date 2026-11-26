@@ -3,11 +3,20 @@
 #   CCAT_DOMAIN      public hostname (default: localhost)
 #   CCAT_ACME_EMAIL  Let's Encrypt account email; when unset Caddy uses its
 #                    internal CA instead (dev/single-host rehearsal only)
+#   CCAT_TAILSCALE_HOSTS  comma-separated tailnet names (MagicDNS URL, tailnet
+#                    or LAN IP) also served, so other machines on the tailnet
+#                    can reach the app via https://<name>; default is this
+#                    host's tailnet identity
 #
 # The compiled SPA is mounted read-only at /srv/frontend by compose.
-{$CCAT_DOMAIN:localhost} {
+{
+	# Browsers omit SNI for IP-literal URLs, so https://100.112.162.55
+	# needs a name to fall back to or the TLS handshake fails.
+	default_sni topher-laptop.tail8dc3e.ts.net
+}
+
+(ccat) {
 	encode zstd gzip
-	tls {$CCAT_ACME_EMAIL:internal}
 
 	handle /api/* {
 		reverse_proxy api:8650
@@ -29,4 +38,16 @@
 		Referrer-Policy no-referrer
 		-Server
 	}
+}
+
+{$CCAT_DOMAIN:localhost} {
+	import ccat
+	tls {$CCAT_ACME_EMAIL:internal}
+}
+
+# Tailnet names get Caddy's self-signed local CA: visiting machines must
+# trust it once (or curl -k) — Tailscale does not proxy this certificate.
+{$CCAT_TAILSCALE_HOSTS:topher-laptop.tail8dc3e.ts.net, 100.112.162.55} {
+	import ccat
+	tls internal
 }
