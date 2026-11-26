@@ -85,10 +85,10 @@ const auditClass = computed(() =>
       >
         audit: {{ auditLabel }}
       </span>
-      <span v-if="child.special_needs" class="badge">special needs</span>
+      <span v-if="child.special_needs" class="badge check-warn">special needs</span>
       <span
         v-if="child.assigned_sponsor_id !== null && child.assigned_sponsor_id !== undefined"
-        class="badge"
+        class="badge check-ok"
       >
         sponsor {{ child.assigned_sponsor_id }}
       </span>

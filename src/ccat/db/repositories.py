@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 from sqlalchemy import Boolean as SaBoolean
 from sqlalchemy import Integer as SaInteger
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ccat.audit.store import (
@@ -647,7 +647,10 @@ class SeasonStoreRepository:
         return rows
 
     async def family_child_counts(self) -> dict[int, int]:
-        """Count final children per family in one grouped query.
+        """Count live final children per family in one grouped query.
+
+        Ignored children (``ignore`` set or ``status == "ignored"``)
+        are excluded, so the count tracks the family's active children.
 
         Returns:
             ``family_id -> child count``; orphan children (NULL
@@ -658,6 +661,9 @@ class SeasonStoreRepository:
             .where(
                 FinalChild.season_id == self._season_id,
                 FinalChild.family_id.is_not(None),
+                # NULL-safe: plain != would drop NULL rows.
+                FinalChild.ignore.is_not(True),
+                FinalChild.status.is_distinct_from("ignored"),
             )
             .group_by(FinalChild.family_id)
         )
@@ -1369,6 +1375,125 @@ class SeasonStoreRepository:
                 counts[table] = len(rows)
         return counts
 
+    async def dedupe_raw_rows(
+        self,
+        module: str = "migrate",
+        table: str | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Delete exactly-matching duplicate rows from the raw tables.
+
+        Two rows are "exactly matching" when every data column
+        (``_RAW_SPECS`` ``orm_columns``: everything but ``id`` and
+        ``run_id``, including ``zite_record_id``) is equal within one
+        acquisition run.  The lowest ``id`` of each identical group
+        survives; rows that differ in any compared column — a different
+        ``zite_record_id``, for instance — always survive.  Content-
+        equal rows with different source ids are NOT exact duplicates
+        and belong to the human duplication audit instead.
+
+        Args:
+            module: Writing module identity (a raw-snapshot module).
+            table: One table ("sponsor"/"family"/"child"), or None for
+                all three.
+
+        Returns:
+            Per table: ``{"deleted": n, "kept": m}`` (m = surviving
+            rows of the active run; zeros when no active run exists).
+
+        Raises:
+            OwnershipError: When module is not a raw-snapshot module.
+            DbStoreError: For unknown tables.
+        """
+        if module not in RAW_SNAPSHOT_MODULES:
+            raise OwnershipError(module, "raw_snapshot")
+        tables = (
+            [table] if table is not None else ["sponsor", "family", "child"]
+        )
+        summary: dict[str, dict[str, int]] = {}
+        async with self._transaction():
+            for name in tables:
+                spec = self._raw_spec(name)
+                run = await self._session.scalar(
+                    select(AcquisitionRun)
+                    .where(
+                        AcquisitionRun.season_id == self._season_id,
+                        AcquisitionRun.table_name == spec.entity,
+                        AcquisitionRun.active.is_(True),
+                    )
+                    .order_by(AcquisitionRun.id.desc())
+                )
+                if run is None:
+                    summary[name] = {"deleted": 0, "kept": 0}
+                    continue
+                columns = [getattr(spec.model, c) for c in spec.orm_columns]
+                keep_ids = (
+                    select(func.min(spec.model.id))
+                    .where(spec.model.run_id == run.id)
+                    .group_by(*columns)
+                )
+                result = await self._session.execute(
+                    delete(spec.model).where(
+                        spec.model.run_id == run.id,
+                        spec.model.id.not_in(keep_ids),
+                    )
+                )
+                deleted = int(getattr(result, "rowcount", 0) or 0)
+                kept = int(
+                    await self._session.scalar(
+                        select(func.count())
+                        .select_from(spec.model)
+                        .where(spec.model.run_id == run.id)
+                    )
+                    or 0
+                )
+                run.row_count = kept
+                summary[name] = {"deleted": deleted, "kept": kept}
+        return summary
+
+    async def prune_inactive_runs(
+        self,
+        module: str = "migrate",
+    ) -> dict[str, int]:
+        """Delete deactivated acquisition runs and their raw rows.
+
+        Historical acquire snapshots are never referenced by final rows
+        (nothing joins raw tables by id), so removing them reclaims the
+        per-run copies that pile up under ``raw_*``.
+
+        Args:
+            module: Writing module identity (a raw-snapshot module).
+
+        Returns:
+            Deleted row counts per table, plus ``runs``.
+
+        Raises:
+            OwnershipError: When module is not a raw-snapshot module.
+        """
+        if module not in RAW_SNAPSHOT_MODULES:
+            raise OwnershipError(module, "raw_snapshot")
+        deleted: dict[str, int] = {"runs": 0}
+        async with self._transaction():
+            runs = (
+                await self._session.scalars(
+                    select(AcquisitionRun).where(
+                        AcquisitionRun.season_id == self._season_id,
+                        AcquisitionRun.active.is_(False),
+                    )
+                )
+            ).all()
+            for run in runs:
+                spec = _RAW_SPECS.get(str(run.table_name))
+                if spec is not None:
+                    result = await self._session.execute(
+                        delete(spec.model).where(spec.model.run_id == run.id)
+                    )
+                    deleted[spec.entity] = deleted.get(spec.entity, 0) + int(
+                        getattr(result, "rowcount", 0) or 0
+                    )
+                await self._session.delete(run)
+                deleted["runs"] += 1
+        return deleted
+
     def _raw_spec(self, table: str) -> _RowSpec:
         """Return the raw-table spec for one table name.
 
@@ -1443,6 +1568,43 @@ class SeasonStoreRepository:
             .where(ScreeningRun.season_id == self._season_id)
             .order_by(ScreeningRun.id.desc())
         )
+
+    async def append_manual_duplicates(
+        self,
+        rows: list[dict[str, Any]],
+        actor: str | None = None,
+    ) -> int:
+        """Append manually marked duplicate rows to the latest screening run.
+
+        The Duplications section reads the latest run's snapshot, so a
+        manual mark must join it; a season without any screening run
+        gets a fresh one owning only the manual marks.
+
+        Args:
+            rows: Complete duplicate_log rows (legacy dict names).
+            actor: Requesting user/job identity.
+
+        Returns:
+            The number of rows created.
+
+        Raises:
+            KeyValidationError: For unknown columns.
+        """
+        async with self._transaction():
+            run = await self._latest_screening_run()
+            if run is None:
+                run = ScreeningRun(
+                    season_id=self._season_id,
+                    actor=actor or "system",
+                    created_at=datetime.now(UTC),
+                    config_hash=self._config_hash,
+                )
+                self._session.add(run)
+                await self._session.flush()
+            spec = _DIAGNOSTIC_SPECS["duplicate_log"]
+            for obj in self._run_row_objects(spec, rows, run.id):
+                self._session.add(obj)
+        return len(rows)
 
     async def duplicate_log_rows(self) -> list[dict[str, Any]]:
         """Read the latest screening run's duplicate-log rows.
@@ -1522,7 +1684,7 @@ class SeasonStoreRepository:
             sheet: The duplicate group's sheet label.
             group_key: The duplicate group's key.
             zite_record_id: The audited group member.
-            decision: "not_duplicate" or "ignore".
+            decision: "not_duplicate", "ignore", or "clear" (an undo).
             actor: Requesting user identity.
             assigned_id: The unique id the decision assigned, if any.
 
@@ -1618,6 +1780,32 @@ class SeasonStoreRepository:
                 if entry_key is not None:
                     row.entry_key = entry_key
                 row.reconciled_at = now
+
+    async def clear_duplication_state(
+        self,
+        sheet: str,
+        group_key: str,
+    ) -> None:
+        """Delete one duplicate group's audited-state row.
+
+        A cleared member decision un-audits the group: without the
+        state row the group's status is re-derived from its member
+        decisions (pending/resolved again).
+
+        Args:
+            sheet: The duplicate group's sheet label.
+            group_key: The duplicate group's key.
+        """
+        async with self._transaction():
+            row = await self._session.scalar(
+                select(DuplicationState).where(
+                    DuplicationState.season_id == self._season_id,
+                    DuplicationState.sheet == sheet,
+                    DuplicationState.group_key == group_key,
+                )
+            )
+            if row is not None:
+                await self._session.delete(row)
             await self._session.flush()
 
     def _run_row_objects(

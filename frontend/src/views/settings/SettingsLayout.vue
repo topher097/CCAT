@@ -45,7 +45,7 @@ onMounted(() => {
       <template v-else-if="store.draft">
         <p class="muted file-path">
           File: <code>{{ store.filePath }}</code>
-          <span v-if="store.dirty" class="badge">Unsaved changes</span>
+          <span v-if="store.dirty" class="badge check-warn">Unsaved changes</span>
         </p>
 
         <RouterView />

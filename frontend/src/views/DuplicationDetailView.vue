@@ -7,6 +7,7 @@ import {
   assignDuplicationChildren,
   DUPLICATION_KIND_LABELS,
   auditDuplication,
+  undoDuplicationAudit,
   decideDuplication,
   getDuplication,
   type DuplicationDecision,
@@ -56,6 +57,7 @@ const NUMERIC_FIELDS = new Set(['age_reported', 'num_children'])
 
 const groupId = computed(() => String(route.params.id ?? ''))
 const seasonName = computed(() => session.season?.name ?? '')
+const isAdmin = computed(() => session.hasRole('admin'))
 /** The back button returns to the duplications list this group came from. */
 const { listUrl, query: carriedQuery } = useAuditNav('/audit/duplications')
 /** The list's filters, carried in the URL, decide the neighbours. */
@@ -144,7 +146,13 @@ const currentRow = computed<Record<string, unknown> | null>(() => {
 })
 const currentKey = computed<string>(() => boundMember.value?.row_key ?? '')
 const currentReadonly = computed(
-  () => boundMember.value?.row_status === 'audited',
+  () =>
+    boundMember.value?.row_status === 'audited' ||
+    detail.value?.current_locked === true,
+)
+/** The group's current column is pinned to a final audited row. */
+const currentLocked = computed(
+  () => detail.value?.current_locked === true,
 )
 const isDirty = computed(() => touched.value.size > 0 || pending.value.size > 0)
 /** The row can take a column write: it has a version and is not audited. */
@@ -209,7 +217,13 @@ const rawFields = computed<string[]>(() => {
       fields.push(key)
     }
   }
-  return fields
+  // Row order matches the individual audit pages: the editor's field
+  // order first, then raw-only fields in submission order.
+  const order = ENTITY_FIELDS[entity.value].map((spec) => spec.field)
+  return [
+    ...order.filter((field) => fields.includes(field)),
+    ...fields.filter((field) => !order.includes(field)),
+  ]
 })
 /** The editable cells of the Current column: every one is written on save. */
 const editableColumnFields = computed<string[]>(() =>
@@ -442,6 +456,12 @@ function decisionOf(member: DuplicationMember): DuplicationDecision | null {
   return stored === 'not_duplicate' || stored === 'ignore' ? stored : null
 }
 
+/** The member's stored decision, when it has one. */
+function storedDecisionOf(member: DuplicationMember): DuplicationDecision | null {
+  const stored = member.decision
+  return stored === 'not_duplicate' || stored === 'ignore' ? stored : null
+}
+
 /** The effective state of a member from its effective decision. */
 function effectiveState(
   member: DuplicationMember,
@@ -460,6 +480,20 @@ function stateLabel(member: DuplicationMember): string {
   return 'discarded'
 }
 
+/** Member-state badge class: colour follows the adjudication state. */
+function memberStateClass(member: DuplicationMember): string {
+  const state = effectiveState(member)
+  if (state === 'surviving') return 'status-audited'
+  if (state === 'released') return 'status-new'
+  return 'status-ignored'
+}
+
+/** The member's assigned sponsor id, when its row carries one. */
+function memberSponsored(member: DuplicationMember): number | null {
+  const id = member.screened?.assigned_sponsor_id
+  return id === null || id === undefined ? null : Number(id)
+}
+
 /** Link to a released member's own row page. */
 function rowUrl(member: DuplicationMember): string {
   return `/audit/${SEGMENT[entity.value]}/${encodeURIComponent(member.row_key)}`
@@ -472,14 +506,26 @@ function rowLinkText(member: DuplicationMember): string {
   return 'Open its own row — still needs its own audit'
 }
 
-/** Toggle one member's decision; the change is applied when saving. */
+/** Toggle one member's decision; the change is applied when saving.
+
+    Un-checking a decision that is already saved on the server queues a
+    "clear" so saving undoes the stored decision; un-checking a merely
+    pending choice simply drops it. */
 function toggleDecision(
   member: DuplicationMember,
   decision: DuplicationDecision,
 ): void {
   const next = new Map(pending.value)
-  if (decisionOf(member) === decision) {
-    next.delete(member.zite_record_id)
+  const chosen = pending.value.get(member.zite_record_id)
+  if (chosen === decision) {
+    if (storedDecisionOf(member) === decision) {
+      next.set(member.zite_record_id, 'clear')
+    } else {
+      next.delete(member.zite_record_id)
+    }
+  } else if (chosen === undefined && storedDecisionOf(member) === decision) {
+    // A stored decision being re-clicked means "deselect it".
+    next.set(member.zite_record_id, 'clear')
   } else {
     next.set(member.zite_record_id, decision)
   }
@@ -562,6 +608,30 @@ async function performAudit(values?: Record<string, unknown>): Promise<void> {
     notice.value = 'Duplication marked audited.'
   } catch (failure) {
     stale.value = failure instanceof ApiError && failure.status === 412
+    submitError.value = messageOf(failure)
+  } finally {
+    saving.value = false
+  }
+}
+
+/** Undo the group's audit (admin): the entry row returns to new. */
+async function performUndo(): Promise<void> {
+  if (!detail.value || saving.value) return
+  saving.value = true
+  submitError.value = null
+  stale.value = false
+  notice.value = null
+  try {
+    detail.value = await undoDuplicationAudit(
+      seasonName.value,
+      groupId.value,
+      filters.value,
+    )
+    pending.value = new Map()
+    resetDraft()
+    resetChildrenDraft()
+    notice.value = 'Audit undone.'
+  } catch (failure) {
     submitError.value = messageOf(failure)
   } finally {
     saving.value = false
@@ -711,7 +781,11 @@ onMounted(() => {
             Angel ID {{ detail.group_key }}
           </h1>
           <h1 v-else style="margin: 0">Group {{ detail.group_key }}</h1>
-          <span v-if="isContest" class="badge" data-testid="kind-label">
+          <span
+            v-if="isContest"
+            class="badge check-warn"
+            data-testid="kind-label"
+          >
             {{ DUPLICATION_KIND_LABELS.angel_claim_conflict }}
           </span>
           <span class="badge">{{ detail.entity }}</span>
@@ -727,6 +801,16 @@ onMounted(() => {
             @click="markAudited"
           >
             {{ detail.status === 'audited' ? 'Re-audit' : 'Mark audited' }}
+          </button>
+          <button
+            v-if="detail.status === 'audited' && isAdmin"
+            type="button"
+            :disabled="saving || currentLocked"
+            title="Undo the audit: the entry returns to new so its values can change."
+            data-testid="undo-audit"
+            @click="performUndo"
+          >
+            Undo audit
           </button>
         </div>
       </div>
@@ -797,10 +881,26 @@ onMounted(() => {
               >
                 <div>{{ member.zite_record_id }}</div>
                 <div class="muted">{{ formatTime(member.created) }}</div>
-                <div data-testid="member-state">{{ stateLabel(member) }}</div>
+                <div data-testid="member-state">
+                  <span
+                    class="badge"
+                    :class="memberStateClass(member)"
+                    >{{ stateLabel(member) }}</span
+                  >
+                </div>
+                <div data-testid="member-row-status">
+                  <StatusBadge :status="member.row_status" />
+                  <span
+                    v-if="memberSponsored(member)"
+                    class="badge check-ok"
+                    data-testid="member-sponsored"
+                  >
+                    sponsor {{ memberSponsored(member) }}
+                  </span>
+                </div>
                 <span
                   v-if="member.survivor"
-                  class="badge"
+                  class="badge check-ok"
                   data-testid="suggested-survivor"
                   :data-member="member.zite_record_id"
                 >
@@ -838,7 +938,7 @@ onMounted(() => {
                 </span>
                 <span
                   v-if="pending.has(member.zite_record_id)"
-                  class="badge"
+                  class="badge check-warn"
                   data-testid="pending-decision"
                 >
                   unsaved
@@ -869,8 +969,15 @@ onMounted(() => {
               <th>
                 <div>Current (editable)</div>
                 <div class="muted" data-testid="current-explainer">
-                  The group's merged entry: the newest submission's values, with
-                  older submissions filling the blanks.
+                  <template v-if="currentLocked">
+                    This entry is audited and matched to a sponsor — its
+                    values are final. The new submission is only recorded
+                    as a duplicate; it never overwrites the audited data.
+                  </template>
+                  <template v-else>
+                    The group's merged entry: the newest submission's
+                    values, with older submissions filling the blanks.
+                  </template>
                 </div>
                 <div v-if="boundMember" data-testid="current-binding">
                   {{ currentBindingText }}
@@ -950,10 +1057,10 @@ onMounted(() => {
             >
               <td>
                 {{ labelOf(field) }}
-                <span v-if="conflicts(field)" class="badge">conflict</span>
+                <span v-if="conflicts(field)" class="badge check-bad">conflict</span>
                 <span
                   v-if="currentDiffers(field)"
-                  class="badge"
+                  class="badge check-warn"
                   data-testid="diff-marker"
                 >
                   differs

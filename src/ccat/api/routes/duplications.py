@@ -22,12 +22,13 @@ from ccat.api.dto import (
     DuplicationDetail,
     DuplicationListPage,
     DuplicationMember,
+    ManualDuplicateRequest,
     NeighbourView,
     canonicalize,
     decanonicalize_patch,
 )
 from ccat.api.errors import ApiError
-from ccat.audit import RowAuditedError
+from ccat.audit import AuditError, RowAuditedError
 from ccat.db.errors import StaleRowVersionError
 from ccat.db.repositories import SeasonStoreRepository
 from ccat.services import db_duplications
@@ -205,6 +206,41 @@ async def get_duplication(
     return _detail_dto(detail, previous, next_row)
 
 
+@router.post("/manual", dependencies=[Depends(require_csrf)])
+async def mark_manual_duplicate(
+    body: ManualDuplicateRequest,
+    request: Request,
+    repo: SeasonStoreRepository = Depends(season_repo),
+    user: AuthUser = Depends(require_roles("auditor")),
+) -> Any:
+    """Mark one entity row as a manual duplicate of another (auditor).
+
+    Args:
+        body: The entity and the two rows' audit keys.
+        request: The current request.
+        repo: The season-bound repository.
+        user: The authenticated identity.
+
+    Returns:
+        The created group's id and group key.
+
+    Raises:
+        ApiError: 422 for an unknown row, a self-pair, an ignored row,
+            or a row already pending in another group.
+    """
+    try:
+        wanted_id = await db_duplications.mark_manual_duplicate(
+            repo,
+            body.entity,
+            body.record_id,
+            body.partner_id,
+            user.username,
+        )
+    except AuditError as error:
+        raise ApiError(422, "invalid_input", str(error)) from error
+    return {"id": wanted_id}
+
+
 @router.post(
     "/{group_id}/members/{record_id}",
     response_model=DuplicationDetail,
@@ -345,6 +381,58 @@ async def audit_duplication(
             key=str(error.key),
             current_version=error.current_version,
         ) from error
+    previous, next_row = await db_duplications.group_neighbours(
+        repo, group_id, q, entity, kind
+    )
+    return _detail_dto(detail, previous, next_row)
+
+
+@router.post(
+    "/{group_id}/unaudit",
+    response_model=DuplicationDetail,
+    dependencies=[Depends(require_csrf)],
+)
+async def unaudit_duplication(
+    group_id: str,
+    request: Request,
+    repo: SeasonStoreRepository = Depends(season_repo),
+    q: str = "",
+    entity: str | None = None,
+    kind: str | None = None,
+    user: AuthUser = Depends(require_roles("admin")),
+) -> Any:
+    """Undo a duplication audit (admin).
+
+    The bound entry row returns to ``new`` and the group's audited
+    state row is removed, so the group is pending again and can be
+    changed and re-audited — mirroring the individual audit pages'
+    undo.  An entry whose sponsor's packet is dispatched refuses.
+
+    Args:
+        group_id: The group's id.
+        request: The current request.
+        repo: The season-bound repository.
+        q: The list's search query (for the neighbours).
+        entity: Restrict to "child", "family", or "sponsor" (for the
+            neighbours).
+        kind: Restrict to "duplicate_submission" or "angel_claim_conflict"
+            (for the neighbours).
+        user: The authenticated identity.
+
+    Returns:
+        The updated group detail.
+
+    Raises:
+        ApiError: 404 for an unknown group; 409 when the entry's packet
+            is dispatched.
+    """
+    cfg: Config = request.app.state.cfg
+    try:
+        detail = await db_duplications.unaudit(
+            repo, cfg, group_id, user.username
+        )
+    except RowAuditedError as error:
+        raise ApiError(409, "row_audited", str(error)) from error
     previous, next_row = await db_duplications.group_neighbours(
         repo, group_id, q, entity, kind
     )

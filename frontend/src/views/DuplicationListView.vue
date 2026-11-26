@@ -149,7 +149,7 @@ onMounted(() => {
   <section>
     <div class="status-line" style="justify-content: space-between">
       <div class="status-line">
-        <AuditBackLink to="/audit" label="Audit" />
+        <AuditBackLink to="/audit" label="Registry" />
         <h1>Duplications</h1>
       </div>
     </div>
@@ -221,7 +221,11 @@ onMounted(() => {
               {{ row.group_key }}
             </RouterLink>
             <div>
-              <span class="badge" data-testid="kind-badge">
+              <span
+                class="badge"
+                :class="row.kind === 'duplicate_submission' ? 'check-unchecked' : 'check-warn'"
+                data-testid="kind-badge"
+              >
                 {{ DUPLICATION_KIND_LABELS[row.kind] ?? row.kind }}
               </span>
             </div>

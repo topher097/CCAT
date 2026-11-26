@@ -600,3 +600,45 @@ def test_screen_wrapper_reports_targets_and_reconcile_counts(
     assert result.counts.merged == {"sponsor": 0, "family": 0, "child": 0}
     # The two same-dob siblings produce one DOB-conflict snapshot row.
     assert result.diagnostics_rows == 1
+
+
+class TestMatchesQuery:
+    """All-text audit search: substring everywhere, fuzzy token fallback."""
+
+    ROW = {
+        "zite_record_id": "c1",
+        "first_name": "Kiddo",
+        "last_name": "Lee",
+        "primary_email": "fam@example.com",
+        "other_notes": "loves trains and dinosaurs",
+        "_row_version": 3,
+    }
+
+    def test_substring_hits_any_text_column(self) -> None:
+        """Any text column matches by substring."""
+        from ccat.services.db_audit import matches_query
+
+        assert matches_query(self.ROW, "trains")
+        assert matches_query(self.ROW, "lee")
+        assert matches_query(self.ROW, "fam@example.com")
+
+    def test_metadata_columns_are_not_searched(self) -> None:
+        """Internal ``_``-prefixed columns are excluded."""
+        from ccat.services.db_audit import matches_query
+
+        assert not matches_query(self.ROW, "_row_version")
+
+    def test_fuzzy_token_fallback(self) -> None:
+        """Near-miss tokens match via the similarity fallback."""
+        from ccat.services.db_audit import matches_query
+
+        # typo of "trains": close enough under the 0.75 token ratio
+        assert matches_query(self.ROW, "trins")
+        assert matches_query(self.ROW, "kiddo".replace("d", "t", 1))
+
+    def test_miss(self) -> None:
+        """Unrelated queries fail; empty query matches everything."""
+        from ccat.services.db_audit import matches_query
+
+        assert not matches_query(self.ROW, "zebra")
+        assert matches_query(self.ROW, "")

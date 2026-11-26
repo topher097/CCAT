@@ -94,6 +94,12 @@ const pageSize = ref(PAGE_SIZE)
 
 /** Pool data. */
 const items = ref<ManualMatchFamilyCard[]>([])
+/** Display order: numeric family number, left to right, top to bottom. */
+const sortedItems = computed(() =>
+  [...items.value].sort(
+    (a, b) => (Number(a.family_id) || 0) - (Number(b.family_id) || 0),
+  ),
+)
 const total = ref(0)
 const sponsors = ref<ManualMatchSponsor[]>([])
 const automaticRun = ref<ManualMatchAutomaticRun>({
@@ -542,12 +548,7 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    if (sponsorId.value === null) {
-      items.value = []
-      total.value = 0
-    } else {
-      await fetchPool()
-    }
+    await fetchPool()
     await loadSponsors()
   } catch (failure) {
     error.value =
@@ -931,7 +932,7 @@ watch(
 function startPolling(): void {
   stopPolling()
   pollTimer = setInterval(() => {
-    if (document.hidden || !seasonName.value || sponsorId.value === null) {
+    if (document.hidden || !seasonName.value) {
       return
     }
     void fetchPool().catch(() => undefined)
@@ -1184,10 +1185,10 @@ onBeforeUnmount(() => {
       class="muted pick-sponsor"
       data-testid="pick-sponsor-first"
     >
-      Choose a sponsor above to shop for. The pool shows only the families
-      that sponsor can take.
+      Choose a sponsor above to enable assignment; the pool below shows every
+      family that matches the filters.
     </p>
-    <p v-else-if="loading" role="status">Loading the pool…</p>
+    <p v-if="loading" role="status">Loading the pool…</p>
     <p v-else-if="error" class="error-text" role="alert" data-testid="list-error">
       {{ error }} <button type="button" @click="load">Retry</button>
     </p>
@@ -1197,7 +1198,7 @@ onBeforeUnmount(() => {
 
     <div v-else class="grid grid--families" role="list">
       <FamilyCard
-        v-for="card in items"
+        v-for="card in sortedItems"
         :key="card.family_id"
         role="listitem"
         :card="card"
@@ -1210,7 +1211,7 @@ onBeforeUnmount(() => {
       />
     </div>
 
-    <div v-if="sponsorId !== null" class="pagination">
+    <div class="pagination">
       <button type="button" :disabled="page <= 1" @click="go(page - 1)">
         Previous
       </button>

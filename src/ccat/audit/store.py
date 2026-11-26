@@ -717,12 +717,13 @@ def group_submissions(
     """Group submission rows the way acquire's dedup does (§6).
 
     Families group by ``primary_email``; children group by
-    (``primary_email``, ``first_name``).  Rows missing any key value are
-    singleton groups keyed by their zite id.
+    (``primary_email``, ``first_name``); sponsors group by ``email``
+    (sponsors have no ``primary_email`` column).  Rows missing any key
+    value are singleton groups keyed by their zite id.
 
     Args:
         submissions: The submission-sheet rows.
-        entity: "family" or "child".
+        entity: "family", "child", or "sponsor".
 
     Returns:
         Mapping of group key to that group's rows (unordered).
@@ -730,6 +731,8 @@ def group_submissions(
     keys = (
         ("primary_email",)
         if entity == "family"
+        else ("email",)
+        if entity == "sponsor"
         else ("primary_email", "first_name")
     )
     groups: dict[tuple[str | None, ...], list[dict[str, Any]]] = {}

@@ -399,6 +399,54 @@ async def _seed_default(app: Any) -> None:
         await engine.dispose()
 
 
+async def test_family_sponsor_detail_baseline_shows_raw(
+    app: Any, auditor: Client
+) -> None:
+    """Family/sponsor baselines carry the raw_*-derived values (§1.2).
+
+    The editor's "prepared baseline" column must show what the raw
+    submission said — like the child page — so the auditor can see
+    what the pipeline prepared and what the store holds now.
+    """
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                children=[child_row("c1")],
+                # The stored family diverged from its raw submission
+                # (new email); its zite id keeps them the same entity.
+                families=[
+                    family_row(
+                        1,
+                        zite_record_id="rec_f_fam@example.com",
+                        primary_email="changed@example.com",
+                    )
+                ],
+                sponsors=[sponsor_row(1)],
+            )
+    finally:
+        await engine.dispose()
+    family = (
+        await auditor.client.get("/api/v1/seasons/2026/families/1")
+    ).json()
+    assert family["baseline"]["primary_email"] == "fam@example.com"  # raw
+    assert family["baseline"]["city"] == "Hancock"  # raw value, store null
+    assert family["baseline"]["first_name"] == "Jane"
+    # The current row keeps the audited store values.
+    assert family["row"]["primary_email"] == "changed@example.com"
+
+    sponsor = (
+        await auditor.client.get("/api/v1/seasons/2026/sponsors/1")
+    ).json()
+    assert sponsor["baseline"]["first_name"] == "Mary"
+    assert sponsor["baseline"]["email"] == "sponsor@example.com"
+    assert sponsor["baseline"]["num_children"] == 2
+    assert sponsor["baseline"]["dropoff_location"] == "Hancock"
+
+
 # ---------------------------------------------------------------------------
 # Auth.
 # ---------------------------------------------------------------------------
@@ -775,6 +823,105 @@ async def test_family_list_computes_child_count(app: Any) -> None:
     await client.close()
 
 
+async def test_child_list_sponsored_filter_and_indicator(app: Any) -> None:
+    """Child list rows carry ``sponsored`` and honor the sponsored filter."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                children=[
+                    child_row("c1", assigned_sponsor_id=7),
+                    child_row("c2", family_id=2),
+                ],
+                families=[family_row(1), family_row(2)],
+            )
+    finally:
+        await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get(
+        "/api/v1/seasons/2026/children?sponsored=true"
+    )
+    assert [row["zite_record_id"] for row in response.json()["items"]] == ["c1"]
+    response = await client.client.get(
+        "/api/v1/seasons/2026/children?sponsored=false"
+    )
+    assert [row["zite_record_id"] for row in response.json()["items"]] == ["c2"]
+    response = await client.client.get("/api/v1/seasons/2026/children")
+    rows = {row["zite_record_id"]: row for row in response.json()["items"]}
+    assert rows["c1"]["sponsored"] is True
+    assert rows["c2"]["sponsored"] is False
+    await client.close()
+
+
+async def test_family_list_assignment_state_indicators(app: Any) -> None:
+    """Family list rows carry assignment_state and sponsored-child counts."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                children=[
+                    child_row("c1", assigned_sponsor_id=7),
+                    child_row("c2", family_id=1, first_name="Second"),
+                    child_row("c3", family_id=2, first_name="Only"),
+                ],
+                families=[family_row(1), family_row(2)],
+            )
+    finally:
+        await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get("/api/v1/seasons/2026/families")
+    rows = {row["family_id"]: row for row in response.json()["items"]}
+    assert rows[1]["assignment_state"] == "partial"
+    assert rows[1]["sponsored_children"] == 1
+    assert rows[1]["total_children"] == 2
+    assert rows[2]["assignment_state"] == "unassigned"
+    # sponsored filter: has any sponsored child
+    response = await client.client.get(
+        "/api/v1/seasons/2026/families?sponsored=true"
+    )
+    assert [row["family_id"] for row in response.json()["items"]] == [1]
+    await client.close()
+
+
+async def test_sponsor_list_match_indicators(app: Any) -> None:
+    """Sponsor list rows carry fully_matched + remaining quota."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                sponsors=[
+                    sponsor_row(7, num_angels_assigned=1),
+                    sponsor_row(8, num_children=1, num_angels_assigned=1),
+                    sponsor_row(9, num_children=None),
+                ],
+            )
+    finally:
+        await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get("/api/v1/seasons/2026/sponsors")
+    rows = {row["sponsor_id"]: row for row in response.json()["items"]}
+    assert rows[7]["fully_matched"] is False
+    assert rows[7]["remaining"] == 1
+    assert rows[8]["fully_matched"] is True
+    assert rows[8]["remaining"] == 0
+    assert rows[9]["fully_matched"] is False
+    assert rows[9]["remaining"] is None
+    response = await client.client.get(
+        "/api/v1/seasons/2026/sponsors?sponsored=true"
+    )
+    assert [row["sponsor_id"] for row in response.json()["items"]] == [8]
+    await client.close()
+
+
 async def test_child_list_flags_raw_missing(app: Any) -> None:
     """Child list rows carry raw_missing for absent raw records (§5.2)."""
     cfg = app.state.cfg
@@ -902,7 +1049,7 @@ async def test_family_and_sponsor_lists_carry_validation_status(
 
 
 async def test_detail_includes_baseline_version_attribution(app: Any) -> None:
-    """Detail: row + baseline + submissions + version + attribution."""
+    """Detail: row + baseline + version + attribution (no submissions)."""
     await _seed_default(app)
     client = await _logged_in(app, "lmboswell")
     response = await client.client.get("/api/v1/seasons/2026/children/c1")
@@ -916,7 +1063,8 @@ async def test_detail_includes_baseline_version_attribution(app: Any) -> None:
     assert "baseline" in body
     assert body["row_version"] >= 1
     assert body["last_updated_by"] == "migration"
-    assert body["submissions"]  # raw duplicate-group submissions
+    # duplicate-submission cards removed from the detail payload (§5.2)
+    assert "submissions" not in body
 
 
 async def test_patch_tri_state(app: Any) -> None:
@@ -2296,6 +2444,175 @@ async def test_entity_detail_reports_filtered_neighbours(
     assert filtered.json()["next"] is None
 
 
+async def test_child_detail_neighbours_carry_angel_id(
+    app: Any, auditor: Client
+) -> None:
+    """Child neighbours carry the angel id for the prev/next chips."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                children=[
+                    child_row("c1", family_id=1, angel_id="1A"),
+                    child_row("c2", family_id=1, angel_id="1B"),
+                ],
+                families=[family_row(1)],
+            )
+    finally:
+        await engine.dispose()
+    first = await auditor.client.get("/api/v1/seasons/2026/children/c1")
+    body = first.json()
+    assert body["next"]["key"] == "c2"
+    assert body["next"]["angel_id"] == "1B"
+    second = await auditor.client.get("/api/v1/seasons/2026/children/c2")
+    assert second.json()["previous"]["angel_id"] == "1A"
+    # Non-child neighbours carry no angel id.
+    family = await auditor.client.get("/api/v1/seasons/2026/families/1")
+    assert family.json()["previous"] is None
+    assert family.json()["next"] is None
+
+
+async def _seed_registry(app: Any) -> None:
+    """Two families (one per location), three children, two sponsors."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                children=[
+                    child_row(
+                        "c1",
+                        family_id=1,
+                        angel_id="1A",
+                        assigned_sponsor_id=7,
+                    ),
+                    child_row("c2", family_id=2, angel_id="2A"),
+                    child_row(
+                        "c3", family_id=2, angel_id="2B", first_name="Lee"
+                    ),
+                ],
+                families=[
+                    family_row(1, gift_pickup_location="Hancock"),
+                    family_row(2, gift_pickup_location="Calumet"),
+                ],
+                sponsors=[
+                    sponsor_row(1, dropoff_location="Hancock"),
+                    sponsor_row(2, dropoff_location="Calumet"),
+                ],
+            )
+    finally:
+        await engine.dispose()
+
+
+async def test_registry_search_spans_all_entities(
+    app: Any, auditor: Client
+) -> None:
+    """The registry search returns families, then children, then sponsors."""
+    await _seed_registry(app)
+    response = await auditor.client.get("/api/v1/seasons/2026/search")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 7
+    assert [item["entity"] for item in body["items"]] == [
+        "family",
+        "family",
+        "child",
+        "child",
+        "child",
+        "sponsor",
+        "sponsor",
+    ]
+    assert [item["key"] for item in body["items"]] == [
+        "1",
+        "2",
+        "c1",
+        "c2",
+        "c3",
+        "1",
+        "2",
+    ]
+    assert body["items"][0]["label"] == "Jane Doe"
+    assert body["items"][0]["family_size"] == 1
+    assert body["items"][2]["family_size"] == 1
+    assert body["items"][1]["family_size"] == 2
+    # Sponsors carry no family size.
+    assert "family_size" not in body["items"][5]
+
+
+async def test_registry_search_filters(app: Any, auditor: Client) -> None:
+    """Entity scope, status, location, family size, sponsored filters."""
+    await _seed_registry(app)
+    base = "/api/v1/seasons/2026/search"
+
+    response = await auditor.client.get(f"{base}?entity=child")
+    assert [item["key"] for item in response.json()["items"]] == [
+        "c1",
+        "c2",
+        "c3",
+    ]
+
+    response = await auditor.client.get(f"{base}?entity=sponsor&status=new")
+    assert response.json()["total"] == 2
+
+    response = await auditor.client.get(f"{base}?location=hancock")
+    assert [item["key"] for item in response.json()["items"]] == [
+        "1",
+        "c1",
+        "1",
+    ]
+
+    response = await auditor.client.get(f"{base}?entity=child&location=calumet")
+    assert [item["key"] for item in response.json()["items"]] == ["c2", "c3"]
+
+    # Family size: families with two live children and their children;
+    # sponsors are never size-filtered.
+    response = await auditor.client.get(f"{base}?family_size_min=2")
+    assert [item["key"] for item in response.json()["items"]] == [
+        "2",
+        "c2",
+        "c3",
+        "1",
+        "2",
+    ]
+    response = await auditor.client.get(
+        f"{base}?entity=family&family_size_max=1"
+    )
+    assert [item["key"] for item in response.json()["items"]] == ["1"]
+
+    # Sponsored: children by assignment, families by any assigned child,
+    # sponsors by full quota match.
+    response = await auditor.client.get(f"{base}?sponsored=true")
+    assert [item["key"] for item in response.json()["items"]] == ["1", "c1"]
+    response = await auditor.client.get(f"{base}?sponsored=false")
+    assert [item["key"] for item in response.json()["items"]] == [
+        "2",
+        "c2",
+        "c3",
+        "1",
+        "2",
+    ]
+
+
+async def test_registry_search_fuzzy_and_pagination(
+    app: Any, auditor: Client
+) -> None:
+    """The registry search reuses the lists' fuzzy query and pagination."""
+    await _seed_registry(app)
+    base = "/api/v1/seasons/2026/search"
+
+    response = await auditor.client.get(f"{base}?q=kido")
+    assert [item["key"] for item in response.json()["items"]] == ["c1", "c2"]
+
+    response = await auditor.client.get(f"{base}?page=2&page_size=3")
+    body = response.json()
+    assert body["page"] == 2
+    assert body["total"] == 7
+    assert [item["key"] for item in body["items"]] == ["c2", "c3", "1"]
+
+
 async def test_duplication_detail_reports_neighbours(
     app: Any, auditor: Client
 ) -> None:
@@ -2411,7 +2728,13 @@ async def test_duplication_audit_stale_version_is_412(
 async def test_duplication_reaudit_of_an_audited_entry(
     app: Any, auditor: Client
 ) -> None:
-    """An audited surviving entry is re-affirmed but never re-valued."""
+    """Audited entries re-affirm; carried values need no dispatched packet.
+
+    Task 18: an audited child whose assigned sponsor's packet is
+    dispatched never takes carried values; an unsponsored audited
+    child still absorbs the merge (matching can change up until
+    dispatch).
+    """
     await _seed_duplicates(app)
     listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
     group = listing.json()["items"][0]
@@ -2421,23 +2744,90 @@ async def test_duplication_reaudit_of_an_audited_entry(
         headers=auditor.headers(),
     )
     assert decided.status_code == 200, decided.text
-    for _ in range(2):
-        audited = await auditor.client.post(
-            f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
-            headers=auditor.headers(),
-        )
-        assert audited.status_code == 200, audited.text
+    audited = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+        json={"values": {"first_name": "Marcus"}},
+        headers=auditor.headers(),
+    )
+    assert audited.status_code == 200, audited.text
+
+    # Now give the audited child a dispatched sponsor.
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            children = await repo.final_rows("child")
+            for row in children:
+                if row["zite_record_id"] == "c1b":
+                    row["assigned_sponsor_id"] = 1
+                    row["assignment_source"] = "manual"
+            await repo.commit_finals(
+                "manual_match", "child", children, "coordinator"
+            )
+            sponsors = await repo.final_rows("sponsor")
+            for row in sponsors:
+                if row["sponsor_id"] == 1:
+                    row["packets_dispatched_at"] = "2026-11-01T09:00:00+00:00"
+            await repo.commit_finals(
+                "migrate", "sponsor", sponsors, "migration"
+            )
+    finally:
+        await engine.dispose()
 
     changed = await auditor.client.post(
         f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
-        json={"values": {"first_name": "Marcus"}},
+        json={"values": {"first_name": "Other"}},
         headers=auditor.headers(),
     )
     assert changed.status_code == 409, changed.text
     assert changed.json()["detail"]["code"] == "row_audited"
 
     stored = await auditor.client.get("/api/v1/seasons/2026/children/c1b")
-    assert stored.json()["row"]["first_name"] == "Kiddo"
+    assert stored.json()["row"]["first_name"] == "Marcus"
+
+
+async def test_duplication_unaudit_is_admin_only(
+    app: Any, auditor: Client, admin: Client
+) -> None:
+    """Undo a duplication audit: 403 for auditors, admin re-opens the group."""
+    await _seed_duplicates(app)
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    decided = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/members/c1",
+        json={"decision": "not_duplicate", "confirm": True},
+        headers=auditor.headers(),
+    )
+    assert decided.status_code == 200, decided.text
+    audited = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+        headers=auditor.headers(),
+    )
+    assert audited.status_code == 200, audited.text
+
+    denied = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/unaudit",
+        headers=auditor.headers(),
+    )
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"]["code"] == "forbidden"
+
+    undone = await admin.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/unaudit",
+        headers=admin.headers(),
+    )
+    assert undone.status_code == 200, undone.text
+    body = undone.json()
+    assert body["status"] == "resolved"
+    stored = await admin.client.get("/api/v1/seasons/2026/children/c1b")
+    assert stored.json()["row"]["status"] != "audited"
+    # Re-audit works after the undo.
+    again = await admin.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+        headers=admin.headers(),
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["status"] == "audited"
 
 
 async def test_duplication_reports_survivor_state(

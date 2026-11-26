@@ -24,6 +24,7 @@ import {
 } from '../api/jobs'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { formatTime } from '../utils/format'
+import { jobStatusClass } from '../utils/status'
 
 type JobEvent = {
   id?: number
@@ -304,7 +305,12 @@ onUnmounted(() => {
             <h1 style="margin: 0">
               Job #{{ job.id }} · {{ job.job_type.replaceAll('_', ' ') }}
             </h1>
-            <span class="badge" data-testid="job-status" :data-status="job.status">
+            <span
+              class="badge"
+              data-testid="job-status"
+              :class="jobStatusClass(job.status)"
+              :data-status="job.status"
+            >
               {{ jobStatusLabel(job.status) }}
             </span>
           </div>
@@ -426,7 +432,11 @@ onUnmounted(() => {
           <header class="job-log-header">
             <div class="job-log-title">
               <h2 style="margin: 0">Backend log</h2>
-              <span class="badge" :data-status="job.status">
+              <span
+                class="badge"
+                :class="jobStatusClass(job.status)"
+                :data-status="job.status"
+              >
                 {{ jobStatusLabel(job.status) }}
               </span>
               <span v-if="logRows.length > 0" class="muted log-count">

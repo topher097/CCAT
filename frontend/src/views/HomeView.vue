@@ -4,7 +4,7 @@ import { RouterLink } from 'vue-router'
 
 import { useOverviewStore } from '../stores/overview'
 import { useSessionStore } from '../stores/session'
-import { STATUSES } from '../utils/status'
+import { STATUSES, jobStatusClass } from '../utils/status'
 import { formatTime, isStale, statusLabel } from '../utils/format'
 import { useJobPopup } from '../composables/useJobPopup'
 
@@ -123,10 +123,14 @@ onUnmounted(() => overview.stopPolling())
       >
         <strong>Data revision:</strong>
         {{ revision ? formatTime(revision) : 'none recorded' }}
-        <span v-if="stale" data-testid="overview-stale" class="badge">
+        <span
+          v-if="stale"
+          data-testid="overview-stale"
+          class="badge check-bad"
+        >
           stale — no recent data load/edit
         </span>
-        <span v-else class="badge">fresh</span>
+        <span v-else class="badge check-ok">fresh</span>
         <span class="muted">
           · last loaded {{ formatTime(overview.lastLoaded?.toISOString()) }}
         </span>
@@ -154,7 +158,13 @@ onUnmounted(() => overview.stopPolling())
               :key="status"
               style="display: flex; justify-content: space-between"
             >
-              <span>{{ statusLabel(status) }}</span>
+              <span>
+                <span
+                  class="badge"
+                  :class="`status-${status.replaceAll('_', '-')}`"
+                  >{{ statusLabel(status) }}</span
+                >
+              </span>
               <span>{{
                 counts[card.entity]?.by_status?.[status] ?? 0
               }}</span>
@@ -240,7 +250,11 @@ onUnmounted(() => overview.stopPolling())
           <tbody>
             <tr v-for="(job, type) in jobs" :key="type">
               <td>{{ type }}</td>
-              <td>{{ job.status ?? 'unknown' }}</td>
+              <td>
+                <span class="badge" :class="jobStatusClass(job.status)">
+                  {{ job.status ?? 'unknown' }}
+                </span>
+              </td>
               <td>{{ formatTime(job.created_at) }}</td>
               <td>
                 <button

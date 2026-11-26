@@ -1509,3 +1509,169 @@ def test_commit_finals_atomic_on_last_row_violation(tmp_path: Path) -> None:
             await uow.engine.dispose()
 
     asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# Exact-row raw dedupe + live child counts.
+# ---------------------------------------------------------------------------
+
+
+def test_family_child_counts_excludes_ignored(tmp_path: Path) -> None:
+    """The grouped child count tracks live children, not ignored rows."""
+
+    async def main() -> None:
+        cfg = _prepare(tmp_path)
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            async with uow.store(cfg, "migrate") as repo:
+                await repo.commit_finals(
+                    "migrate",
+                    "family",
+                    [
+                        {
+                            "family_id": 1,
+                            "primary_email": "fam@example.com",
+                            "status": "new",
+                        }
+                    ],
+                    "migration",
+                )
+                await repo.commit_finals(
+                    "migrate",
+                    "child",
+                    [
+                        {
+                            "zite_record_id": "c1",
+                            "family_id": 1,
+                            "primary_email": "fam@example.com",
+                            "status": "new",
+                        },
+                        {
+                            "zite_record_id": "c2",
+                            "family_id": 1,
+                            "primary_email": "fam@example.com",
+                            "status": "ignored",
+                            "ignore": True,
+                        },
+                        {
+                            "zite_record_id": "c3",
+                            "family_id": 1,
+                            "primary_email": "fam@example.com",
+                            "status": "new",
+                            "ignore": False,
+                        },
+                    ],
+                    "migration",
+                )
+                counts = await repo.family_child_counts()
+                assert counts == {1: 2}
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())
+
+
+def test_dedupe_raw_rows_removes_exact_duplicates(tmp_path: Path) -> None:
+    """Identical raw rows collapse to one; distinct rows and row_count hold."""
+
+    async def main() -> None:
+        cfg = _prepare(tmp_path)
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            async with uow.store(cfg, "acquire") as repo:
+                await repo.replace_raw_snapshot(
+                    "acquire",
+                    {
+                        "child": [
+                            {
+                                "zite_record_id": "c1",
+                                "first_name": "Kiddo",
+                                "dob": "2018-05-10",
+                                "source": "web",
+                            },
+                            # exact duplicate of the first row
+                            {
+                                "zite_record_id": "c1",
+                                "first_name": "Kiddo",
+                                "dob": "2018-05-10",
+                                "source": "web",
+                            },
+                            # differs in one column: survives
+                            {
+                                "zite_record_id": "c2",
+                                "first_name": "Kiddo",
+                                "dob": "2018-05-10",
+                                "source": "web",
+                            },
+                        ]
+                    },
+                    "acquire",
+                )
+                summary = await repo.dedupe_raw_rows("migrate", "child")
+                assert summary == {"child": {"deleted": 1, "kept": 2}}
+                rows = await repo.raw_rows("child")
+                assert [row["zite_record_id"] for row in rows] == ["c1", "c2"]
+                async with uow.session() as session:
+                    season = await session.scalar(
+                        select(Season).where(Season.name == cfg.season)
+                    )
+                    assert season is not None
+                    run = await session.scalar(
+                        select(AcquisitionRun).where(
+                            AcquisitionRun.season_id == season.id,
+                            AcquisitionRun.table_name == "child",
+                            AcquisitionRun.active.is_(True),
+                        )
+                    )
+                    assert run is not None
+                    assert run.row_count == 2
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())
+
+
+def test_dedupe_raw_rows_scoped_per_run(tmp_path: Path) -> None:
+    """Identical rows in different runs both survive (dedupe is per run)."""
+
+    async def main() -> None:
+        cfg = _prepare(tmp_path)
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            snapshot = {
+                "child": [
+                    {
+                        "zite_record_id": "c1",
+                        "first_name": "Kiddo",
+                        "source": "web",
+                    }
+                ]
+            }
+            async with uow.store(cfg, "acquire") as repo:
+                await repo.replace_raw_snapshot("acquire", snapshot, "acquire")
+                await repo.replace_raw_snapshot("acquire", snapshot, "acquire")
+                summary = await repo.dedupe_raw_rows("migrate", "child")
+                assert summary == {"child": {"deleted": 0, "kept": 1}}
+                assert len(await repo.raw_rows("child")) == 1
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())
+
+
+def test_dedupe_raw_rejects_non_snapshot_module(tmp_path: Path) -> None:
+    """Only raw-snapshot modules may dedupe or prune raw tables."""
+
+    async def main() -> None:
+        cfg = _prepare(tmp_path)
+        uow = UnitOfWork(create_async_engine(cfg.storage.database_url))
+        try:
+            async with uow.store(cfg, "screen") as repo:
+                with pytest.raises(OwnershipError):
+                    await repo.dedupe_raw_rows("screen", "child")
+                with pytest.raises(OwnershipError):
+                    await repo.prune_inactive_runs("screen")
+        finally:
+            await uow.engine.dispose()
+
+    asyncio.run(main())

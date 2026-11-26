@@ -11,7 +11,7 @@ their canonical names (``ai_screening_notes``, never
 ``potential_anomoly``).
 """
 
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
@@ -31,8 +31,15 @@ from ccat.api.dto import (
 from ccat.api.errors import ApiError
 from ccat.db.repositories import SeasonStoreRepository
 from ccat.db.errors import StaleRowVersionError
+from ccat.audit.store import as_bool
 from ccat.services import db_audit, db_duplications
 from ccat.services.audit import SavePatch
+from ccat.services.db_assignments import (
+    STATE_UNASSIGNED,
+    assignment_state,
+    child_sponsor,
+)
+from ccat.services.db_audit import sponsor_fully_matched
 
 if TYPE_CHECKING:
     from ccat.config import Config
@@ -143,18 +150,6 @@ async def _detail_payload(
         if entry is not None:
             diagnostics["email_status"] = entry["email"]
             diagnostics["address_status"] = entry["address"]
-    submissions: list[dict[str, Any]] = []
-    if prepared is not None:
-        from ccat.audit.store import group_submissions
-
-        groups = group_submissions(await _group_rows(cfg, repo, entity), entity)
-        email = prepared.get("primary_email") or prepared.get("email")
-        group_key = (
-            (email, prepared.get("first_name"))
-            if entity == "child"
-            else (email,)
-        )
-        submissions = list(groups.get(group_key, []))
     previous, next_row = db_audit.neighbours(entity, rows, key, q, status)
     public = _public_row(entity, existing)
     pending = (await db_duplications.pending_groups_by_row(repo))[entity]
@@ -172,39 +167,15 @@ async def _detail_payload(
         key=str(existing.get(spec_key)),
         row=public,
         baseline=canonicalize(entity, baseline),
-        submissions=submissions,
         status=str(existing.get("status") or "new"),
         row_version=int(existing.get("_row_version") or 1),
         last_updated_by=existing.get("_last_updated_by"),
         last_updated_at=existing.get("_last_updated_at"),
         audited_at=existing.get("audited_at"),
         diagnostics=diagnostics,
-        previous=NeighbourView(**previous) if previous else None,
-        next=NeighbourView(**next_row) if next_row else None,
+        previous=(NeighbourView.model_validate(previous) if previous else None),
+        next=NeighbourView.model_validate(next_row) if next_row else None,
     )
-
-
-async def _group_rows(
-    cfg: "Config", repo: SeasonStoreRepository, entity: str
-) -> list[dict[str, Any]]:
-    """Return the entity's prepared rows for duplicate grouping.
-
-    Args:
-        cfg: Pipeline configuration.
-        repo: The season-bound repository.
-        entity: The entity name.
-
-    Returns:
-        The prepared rows (raw-based preparation output).
-    """
-    from ccat.preparation import prepare_rows
-
-    raw = {t: await repo.raw_rows(t) for t in ("sponsor", "family", "child")}
-    finals = {
-        t: await repo.final_rows(t) for t in ("sponsor", "family", "child")
-    }
-    preparation = prepare_rows(raw, cfg, finals, report=False)
-    return preparation.rows[entity]
 
 
 @router.get("/sponsors", response_model=EntityListPage)
@@ -215,6 +186,9 @@ async def list_sponsors(
     page_size: int = Query(50, ge=1, le=200),
     q: str = "",
     status: str | None = None,
+    ignore: bool | None = None,
+    sponsored: bool | None = None,
+    duplicate_pending: bool | None = None,
 ) -> EntityListPage:
     """List sponsors — ignored/orphan/raw-missing rows included (§5.2).
 
@@ -223,13 +197,26 @@ async def list_sponsors(
         repo: The season-bound repository.
         page: 1-based page number.
         page_size: Page size (max 200).
-        q: Search on name/email/id.
+        q: All-text search with fuzzy fallback.
         status: Stored-status filter.
+        ignore: Ignore-flag filter.
+        sponsored: Fully-matched filter.
+        duplicate_pending: Unresolved-duplicate filter.
 
     Returns:
         One page of rows.
     """
-    return await _list("sponsor", repo, page, page_size, q, status)
+    return await _list(
+        "sponsor",
+        repo,
+        page,
+        page_size,
+        q,
+        status,
+        ignore=ignore,
+        sponsored=sponsored,
+        duplicate_pending=duplicate_pending,
+    )
 
 
 @router.get("/families", response_model=EntityListPage)
@@ -240,6 +227,9 @@ async def list_families(
     page_size: int = Query(50, ge=1, le=200),
     q: str = "",
     status: str | None = None,
+    ignore: bool | None = None,
+    sponsored: bool | None = None,
+    duplicate_pending: bool | None = None,
 ) -> EntityListPage:
     """List families — ignored/orphan/raw-missing rows included (§5.2).
 
@@ -248,13 +238,26 @@ async def list_families(
         repo: The season-bound repository.
         page: 1-based page number.
         page_size: Page size (max 200).
-        q: Search on name/email/id.
+        q: All-text search with fuzzy fallback.
         status: Stored-status filter.
+        ignore: Ignore-flag filter.
+        sponsored: Any-sponsored-child filter.
+        duplicate_pending: Unresolved-duplicate filter.
 
     Returns:
         One page of rows.
     """
-    return await _list("family", repo, page, page_size, q, status)
+    return await _list(
+        "family",
+        repo,
+        page,
+        page_size,
+        q,
+        status,
+        ignore=ignore,
+        sponsored=sponsored,
+        duplicate_pending=duplicate_pending,
+    )
 
 
 @router.get("/children", response_model=EntityListPage)
@@ -266,6 +269,9 @@ async def list_children(
     q: str = "",
     status: str | None = None,
     family_id: int | None = None,
+    ignore: bool | None = None,
+    sponsored: bool | None = None,
+    duplicate_pending: bool | None = None,
 ) -> EntityListPage:
     """List children — ignored/orphan/raw-missing rows included (§5.2).
 
@@ -274,15 +280,94 @@ async def list_children(
         repo: The season-bound repository.
         page: 1-based page number.
         page_size: Page size (max 200).
-        q: Search on name/email/id.
+        q: All-text search with fuzzy fallback.
         status: Stored-status filter.
         family_id: Exact family filter; the search query only ever
             matches a family id as a substring.
+        ignore: Ignore-flag filter.
+        sponsored: Assigned-sponsor filter.
+        duplicate_pending: Unresolved-duplicate filter.
 
     Returns:
         One page of rows.
     """
-    return await _list("child", repo, page, page_size, q, status, family_id)
+    return await _list(
+        "child",
+        repo,
+        page,
+        page_size,
+        q,
+        status,
+        family_id,
+        ignore=ignore,
+        sponsored=sponsored,
+        duplicate_pending=duplicate_pending,
+    )
+
+
+@router.get("/search", response_model=EntityListPage)
+async def search_registry(
+    request: Request,
+    repo: SeasonStoreRepository = Depends(season_repo),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    q: str = "",
+    entity: Literal["any", "family", "child", "sponsor"] = "any",
+    status: str | None = None,
+    ignore: bool | None = None,
+    sponsored: bool | None = None,
+    location: str = "any",
+    family_size_min: int | None = None,
+    family_size_max: int | None = None,
+) -> EntityListPage:
+    """Search all final_* stores at once — the registry page.
+
+    Args:
+        request: The current request (carries the config).
+        repo: The season-bound repository.
+        page: 1-based page number.
+        page_size: Page size (max 200).
+        q: All-text search with fuzzy fallback.
+        entity: Scope the search to one entity kind; "any" searches all.
+        status: Stored-status filter.
+        ignore: Ignore-flag filter.
+        sponsored: Children/families: has any sponsor; sponsors: fully
+            matched.
+        location: Canonical drop-off/pickup bucket ("hancock"/"calumet").
+        family_size_min: Minimum live-children count (families, children).
+        family_size_max: Maximum live-children count (families, children).
+
+    Returns:
+        One page of merged hits, each carrying ``entity``, ``key``,
+        ``label`` and (where computed) ``family_size``.
+    """
+    cfg: Config = request.app.state.cfg
+    hits, total = await db_audit.search_all(
+        repo,
+        cfg,
+        q=q,
+        entity=entity,
+        status=status,
+        ignore=ignore,
+        sponsored=sponsored,
+        location=location,
+        family_size_min=family_size_min,
+        family_size_max=family_size_max,
+    )
+    start = (page - 1) * page_size
+    items: list[dict[str, Any]] = []
+    for hit in hits[start : start + page_size]:
+        kind = hit["entity"]
+        item = _public_row(kind, hit["row"])
+        item["entity"] = kind
+        item["key"] = str(item.get(_KEY_COLUMN[kind]) or "")
+        item["label"] = hit["label"]
+        if hit["family_size"] is not None:
+            item["family_size"] = hit["family_size"]
+        items.append(item)
+    return EntityListPage(
+        items=items, total=total, page=page, page_size=page_size
+    )
 
 
 async def _list(
@@ -293,6 +378,9 @@ async def _list(
     q: str,
     status: str | None,
     family_id: int | None = None,
+    ignore: bool | None = None,
+    sponsored: bool | None = None,
+    duplicate_pending: bool | None = None,
 ) -> EntityListPage:
     """Shared list implementation (sort → filter → paginate → canonicalize).
 
@@ -301,9 +389,13 @@ async def _list(
         repo: The season-bound repository.
         page: Page number.
         page_size: Page size.
-        q: Search query.
+        q: Search query (all-text substring, fuzzy fallback).
         status: Stored-status filter.
         family_id: Exact family filter (children only).
+        ignore: Filter on the ignore flag.
+        sponsored: Children/families: has any sponsor; sponsors: fully
+            matched.
+        duplicate_pending: Filter on an unresolved duplicate group.
 
     Returns:
         The page DTO.
@@ -316,6 +408,45 @@ async def _list(
             for row in rows
             if str(row.get("family_id") or "") == str(family_id)
         ]
+    if ignore is not None:
+        rows = [row for row in rows if as_bool(row.get("ignore")) == ignore]
+    key_column = _KEY_COLUMN[entity]
+    pending = (await db_duplications.pending_groups_by_row(repo))[entity]
+    if duplicate_pending is not None:
+        rows = [
+            row
+            for row in rows
+            if bool(pending.get(str(row.get(key_column)))) == duplicate_pending
+        ]
+    family_children: dict[Any, list[dict[str, Any]]] = {}
+    if entity == "family":
+        for child in await repo.final_rows("child"):
+            if as_bool(child.get("ignore")):
+                continue
+            family_children.setdefault(child.get("family_id"), []).append(child)
+    if sponsored is not None:
+        if entity == "child":
+            rows = [
+                row
+                for row in rows
+                if (row.get("assigned_sponsor_id") is not None) == sponsored
+            ]
+        elif entity == "family":
+            rows = [
+                row
+                for row in rows
+                if (
+                    assignment_state(
+                        family_children.get(row.get("family_id"), [])
+                    )
+                    != STATE_UNASSIGNED
+                )
+                == sponsored
+            ]
+        else:
+            rows = [
+                row for row in rows if sponsor_fully_matched(row) == sponsored
+            ]
     filtered = rows
     start = (page - 1) * page_size
     items = [
@@ -325,6 +456,12 @@ async def _list(
         counts = await repo.family_child_counts()
         for item in items:
             item["child_count"] = counts.get(int(item["family_id"]), 0)
+            children = family_children.get(item["family_id"], [])
+            item["assignment_state"] = assignment_state(children)
+            item["sponsored_children"] = sum(
+                1 for child in children if child_sponsor(child) is not None
+            )
+            item["total_children"] = len(children)
     elif entity == "child":
         counts = await repo.family_child_counts()
         raw_ids = {
@@ -339,8 +476,16 @@ async def _list(
             item["family_child_count"] = (
                 counts.get(int(family_id), 0) if family_id is not None else 0
             )
-    pending = (await db_duplications.pending_groups_by_row(repo))[entity]
-    key_column = _KEY_COLUMN[entity]
+            item["sponsored"] = item.get("assigned_sponsor_id") is not None
+    else:
+        for item in items:
+            item["fully_matched"] = sponsor_fully_matched(item)
+            quota = item.get("num_children")
+            item["remaining"] = (
+                quota - (item.get("num_angels_assigned") or 0)
+                if quota is not None
+                else None
+            )
     for item in items:
         entry = pending.get(str(item.get(key_column)))
         item["duplicate_pending"] = entry is not None

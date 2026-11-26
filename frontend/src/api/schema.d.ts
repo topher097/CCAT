@@ -564,10 +564,13 @@ export interface paths {
          *         repo: The season-bound repository.
          *         page: 1-based page number.
          *         page_size: Page size (max 200).
-         *         q: Search on name/email/id.
+         *         q: All-text search with fuzzy fallback.
          *         status: Stored-status filter.
          *         family_id: Exact family filter; the search query only ever
          *             matches a family id as a substring.
+         *         ignore: Ignore-flag filter.
+         *         sponsored: Assigned-sponsor filter.
+         *         duplicate_pending: Unresolved-duplicate filter.
          *
          *     Returns:
          *         One page of rows.
@@ -1261,6 +1264,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/seasons/{season}/duplications/manual": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark Manual Duplicate
+         * @description Mark one entity row as a manual duplicate of another (auditor).
+         *
+         *     Args:
+         *         body: The entity and the two rows' audit keys.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The created group's id and group key.
+         *
+         *     Raises:
+         *         ApiError: 422 for an unknown row, a self-pair, an ignored row,
+         *             or a row already pending in another group.
+         */
+        post: operations["mark_manual_duplicate_api_v1_seasons__season__duplications_manual_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/seasons/{season}/duplications/{group_id}": {
         parameters: {
             query?: never;
@@ -1441,8 +1477,11 @@ export interface paths {
          *         repo: The season-bound repository.
          *         page: 1-based page number.
          *         page_size: Page size (max 200).
-         *         q: Search on name/email/id.
+         *         q: All-text search with fuzzy fallback.
          *         status: Stored-status filter.
+         *         ignore: Ignore-flag filter.
+         *         sponsored: Any-sponsored-child filter.
+         *         duplicate_pending: Unresolved-duplicate filter.
          *
          *     Returns:
          *         One page of rows.
@@ -1913,6 +1952,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/seasons/{season}/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Registry
+         * @description Search all final_* stores at once — the registry page.
+         *
+         *     Args:
+         *         request: The current request (carries the config).
+         *         repo: The season-bound repository.
+         *         page: 1-based page number.
+         *         page_size: Page size (max 200).
+         *         q: All-text search with fuzzy fallback.
+         *         entity: Scope the search to one entity kind; "any" searches all.
+         *         status: Stored-status filter.
+         *         ignore: Ignore-flag filter.
+         *         sponsored: Children/families: has any sponsor; sponsors: fully
+         *             matched.
+         *         location: Canonical drop-off/pickup bucket ("hancock"/"calumet").
+         *         family_size_min: Minimum live-children count (families, children).
+         *         family_size_max: Maximum live-children count (families, children).
+         *
+         *     Returns:
+         *         One page of merged hits, each carrying ``entity``, ``key``,
+         *         ``label`` and (where computed) ``family_size``.
+         */
+        get: operations["search_registry_api_v1_seasons__season__search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/seasons/{season}/sponsors": {
         parameters: {
             query?: never;
@@ -1929,8 +2007,11 @@ export interface paths {
          *         repo: The season-bound repository.
          *         page: 1-based page number.
          *         page_size: Page size (max 200).
-         *         q: Search on name/email/id.
+         *         q: All-text search with fuzzy fallback.
          *         status: Stored-status filter.
+         *         ignore: Ignore-flag filter.
+         *         sponsored: Fully-matched filter.
+         *         duplicate_pending: Unresolved-duplicate filter.
          *
          *     Returns:
          *         One page of rows.
@@ -2892,7 +2973,7 @@ export interface components {
          * @description One duplication-audit decision.
          *
          *     Attributes:
-         *         decision: "not_duplicate" or "ignore".
+         *         decision: "not_duplicate", "ignore", or "clear" (undo).
          *         confirm: Must be True; anything else refuses the action.
          *         expected_version: The caller's expected ``row_version``.
          */
@@ -2903,7 +2984,7 @@ export interface components {
              * Decision
              * @enum {string}
              */
-            decision: "not_duplicate" | "ignore";
+            decision: "not_duplicate" | "ignore" | "clear";
             /** Expected Version */
             expected_version?: number | null;
         };
@@ -2923,9 +3004,12 @@ export interface components {
          *         survivor_count: Members left undecided (candidates to survive).
          *         children: The group's children (family groups).
          *         current: The group's merged editable fields, folded from every
-         *             submission in the group.
+         *             submission in the group. Locked to the stored row when an
+         *             audited child is matched to a sponsor.
          *         current_row_key: The key of the row the merged entry is
          *             written to.
+         *         current_locked: The current values are a final audited row;
+         *             the new submission never overwrites them.
          *         previous: The group before this one in the list's order.
          *         next: The group after this one in the list's order.
          */
@@ -2938,6 +3022,11 @@ export interface components {
             current?: {
                 [key: string]: unknown;
             };
+            /**
+             * Current Locked
+             * @default false
+             */
+            current_locked: boolean;
             /**
              * Current Row Key
              * @default
@@ -3135,7 +3224,6 @@ export interface components {
          *         row: The effective stored row (canonical names) plus
          *             ``row_version`` / ``last_updated_by`` / ``last_updated_at``.
          *         baseline: The prepared baseline values for diffing.
-         *         submissions: The entity's raw duplicate-group submissions.
          *         status: The stored status.
          *         row_version: Optimistic-concurrency version (If-Match value).
          *         last_updated_by: Latest editor.
@@ -3174,10 +3262,6 @@ export interface components {
             row_version: number;
             /** Status */
             status?: string | null;
-            /** Submissions */
-            submissions?: {
-                [key: string]: unknown;
-            }[];
         } & {
             [key: string]: unknown;
         };
@@ -3656,6 +3740,26 @@ export interface components {
             };
             /** Sponsor Id */
             sponsor_id: number;
+        };
+        /**
+         * ManualDuplicateRequest
+         * @description Mark one entity row as a manual duplicate of another.
+         *
+         *     Attributes:
+         *         entity: "child", "family", or "sponsor".
+         *         record_id: The marked row's audit key.
+         *         partner_id: The suspected duplicate's audit key.
+         */
+        ManualDuplicateRequest: {
+            /**
+             * Entity
+             * @enum {string}
+             */
+            entity: "child" | "family" | "sponsor";
+            /** Partner Id */
+            partner_id: string;
+            /** Record Id */
+            record_id: string;
         };
         /**
          * ManualHoldListPage
@@ -4164,8 +4268,11 @@ export interface components {
          *     Attributes:
          *         key: The entry's key.
          *         label: A human label for the entry.
+         *         angel_id: The child's angel id (children only).
          */
         NeighbourView: {
+            /** Angel Id */
+            angel_id?: string | null;
             /** Key */
             key: string;
             /**
@@ -4870,6 +4977,9 @@ export interface operations {
                 q?: string;
                 status?: string | null;
                 family_id?: number | null;
+                ignore?: boolean | null;
+                sponsored?: boolean | null;
+                duplicate_pending?: boolean | null;
             };
             header?: never;
             path: {
@@ -5679,6 +5789,41 @@ export interface operations {
             };
         };
     };
+    mark_manual_duplicate_api_v1_seasons__season__duplications_manual_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualDuplicateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_duplication_api_v1_seasons__season__duplications__group_id__get: {
         parameters: {
             query?: {
@@ -5843,6 +5988,9 @@ export interface operations {
                 page_size?: number;
                 q?: string;
                 status?: string | null;
+                ignore?: boolean | null;
+                sponsored?: boolean | null;
+                duplicate_pending?: boolean | null;
             };
             header?: never;
             path: {
@@ -6445,6 +6593,48 @@ export interface operations {
             };
         };
     };
+    search_registry_api_v1_seasons__season__search_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                q?: string;
+                entity?: "any" | "family" | "child" | "sponsor";
+                status?: string | null;
+                ignore?: boolean | null;
+                sponsored?: boolean | null;
+                location?: string;
+                family_size_min?: number | null;
+                family_size_max?: number | null;
+            };
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EntityListPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_sponsors_api_v1_seasons__season__sponsors_get: {
         parameters: {
             query?: {
@@ -6452,6 +6642,9 @@ export interface operations {
                 page_size?: number;
                 q?: string;
                 status?: string | null;
+                ignore?: boolean | null;
+                sponsored?: boolean | null;
+                duplicate_pending?: boolean | null;
             };
             header?: never;
             path: {

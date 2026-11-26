@@ -361,10 +361,10 @@ const visible = computed(() => props.sponsors.filter(matches).sort(compare))
             <span v-if="isFull(sponsor)" class="badge status-ignored" data-testid="sponsor-row-full">
               full
             </span>
-            <span v-if="sponsor.elevated_budget" class="flag" data-testid="sponsor-row-elevated">
+            <span v-if="sponsor.elevated_budget" class="flag check-warn" data-testid="sponsor-row-elevated">
               elevated budget
             </span>
-            <span v-if="sponsor.physical_packet" class="flag" data-testid="sponsor-row-physical">
+            <span v-if="sponsor.physical_packet" class="flag check-unchecked" data-testid="sponsor-row-physical">
               physical packet
             </span>
           </span>

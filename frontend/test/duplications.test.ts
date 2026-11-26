@@ -5,6 +5,7 @@ import { flushPromises } from '@vue/test-utils'
 import DuplicationListView from '../src/views/DuplicationListView.vue'
 import DuplicationDetailView from '../src/views/DuplicationDetailView.vue'
 import { useSessionStore } from '../src/stores/session'
+import { ENTITY_FIELDS } from '../src/utils/format'
 import { bodyOf, jsonResponse, mockRoutes, mountRouted } from './helpers'
 
 const GROUPS = [
@@ -284,6 +285,54 @@ describe('duplication detail', () => {
     expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
       'Saved',
     )
+  })
+
+  it('deselects a saved not_duplicate by queueing a clear decision', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (init.method === 'POST' && url.endsWith('/members/r1'))
+          return jsonResponse(200, detail([member({ decision: null })]))
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(
+            200,
+            detail([
+              member({
+                decision: 'not_duplicate',
+                assigned_id: '1B',
+                decided_by: 'cmendres',
+              }),
+            ]),
+          )
+        return undefined
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    // The checkbox reflects the stored decision and starts unchecked-pending.
+    const box = wrapper.get('[data-testid="not-duplicate"]')
+    await box.trigger('click')
+    await flushPromises()
+
+    // Clicking the stored decision queues a clear (checked -> unchecked).
+    expect(
+      (wrapper.get('[data-testid="not-duplicate"]').element as HTMLInputElement)
+        .checked,
+    ).toBe(false)
+    await wrapper.get('[data-testid="save"]').trigger('click')
+    await flushPromises()
+
+    const post = fetchMock.mock.calls.find(
+      (call) => (call[1] as RequestInit).method === 'POST',
+    )
+    expect(bodyOf(post as unknown[])).toEqual({
+      decision: 'clear',
+      confirm: true,
+      expected_version: 3,
+    })
   })
 
   it('confirms ignore before holding it, and saves nothing on cancel', async () => {
@@ -1038,6 +1087,78 @@ describe('duplication detail', () => {
     )
   })
 
+  it('offers Undo audit to an admin and posts /unaudit', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (init.method === 'POST' && url.endsWith('/unaudit'))
+          return jsonResponse(
+            200,
+            detail([member({ zite_record_id: 'r1', survivor: true })], {
+              status: 'resolved',
+            }),
+          )
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(
+            200,
+            detail([member({ zite_record_id: 'r1', survivor: true })], {
+              status: 'audited',
+              audited_at: '2026-11-20T10:00:00Z',
+            }),
+          )
+        return undefined
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: () => {
+        seedSeason()
+        const session = useSessionStore()
+        session.me = {
+          username: 'cmendres',
+          roles: ['admin', 'coordinator', 'auditor'],
+          csrf_token: 't',
+        }
+      },
+    })
+    await flushPromises()
+
+    const undo = wrapper.get('[data-testid="undo-audit"]')
+    await undo.trigger('click')
+    await flushPromises()
+
+    const post = fetchMock.mock.calls.find(
+      (call) =>
+        (call[1] as RequestInit).method === 'POST' &&
+        String(call[0]).endsWith('/unaudit'),
+    )
+    expect(post).toBeDefined()
+    expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
+      'undone',
+    )
+  })
+
+  it('hides Undo audit from non-admins', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail([member({ zite_record_id: 'r1', survivor: true })], {
+                status: 'audited',
+                audited_at: '2026-11-20T10:00:00Z',
+              }),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="undo-audit"]').exists()).toBe(false)
+  })
+
   it('lists children for a family group and saves family assignments', async () => {
     const fetchMock = mockRoutes([
       (url, init) => {
@@ -1494,6 +1615,118 @@ describe('duplication merged current column', () => {
     expect(wrapper.get('[data-testid="current-explainer"]').text()).toContain(
       'newest submission',
     )
+  })
+
+  it('locks the current column to the audited, dispatched entry and shows each entry status', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail(
+                [
+                  member({
+                    zite_record_id: 'r1',
+                    survivor: true,
+                    raw: { first_name: 'Ann' },
+                    screened: {
+                      zite_record_id: 'r1',
+                      first_name: 'Ann',
+                      status: 'audited',
+                      assigned_sponsor_id: 7,
+                    },
+                    row_status: 'audited',
+                  }),
+                  member({
+                    zite_record_id: 'r2',
+                    survivor: false,
+                    raw: { first_name: 'Maxine' },
+                    screened: null,
+                    row_version: null,
+                    row_key: '',
+                    row_status: null,
+                  }),
+                ],
+                {
+                  current: { first_name: 'Ann' },
+                  current_row_key: 'r1',
+                  current_locked: true,
+                },
+              ),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    // The locked explainer names the finality, not the fold.
+    expect(wrapper.get('[data-testid="current-explainer"]').text()).toContain(
+      'values are final',
+    )
+    // The audited entry's stored value wins over the new submission's.
+    expect(
+      (wrapper.get('input[name="first_name"]').element as HTMLInputElement)
+        .value,
+    ).toBe('Ann')
+    expect(
+      wrapper.get('input[name="first_name"]').attributes('readonly'),
+    ).toBeDefined()
+    // Each entry's own row status is visible in its column.
+    const statuses = wrapper
+      .findAll('[data-testid="member-row-status"]')
+      .map((cell) => cell.text())
+    expect(statuses[0]).toContain('audited')
+    const sponsored = wrapper.findAll('[data-testid="member-sponsored"]')
+    expect(sponsored).toHaveLength(1)
+    expect(sponsored[0]!.text()).toContain('7')
+  })
+
+  it('orders the field rows like the individual audit pages', async () => {
+    // Raw keys arrive in a deliberately different order than the
+    // editor's field order.
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail([
+                member({
+                  raw: {
+                    dob: '2018-01-01',
+                    primary_email: 'ann@example.org',
+                    first_name: 'Ann',
+                    gender: 'F',
+                  },
+                  screened: {
+                    zite_record_id: 'r1',
+                    first_name: 'Ann',
+                    status: 'new',
+                  },
+                }),
+              ]),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const order = wrapper
+      .findAll('tr[data-field]')
+      .map((row) => row.attributes('data-field') ?? '')
+    const editorOrder = ENTITY_FIELDS.child.map((spec) => spec.field)
+    const expected = [
+      ...editorOrder.filter((field) => order.includes(field)),
+      ...order.filter((field) => !editorOrder.includes(field)),
+    ]
+    expect(order).toEqual(expected)
+    // Concretely: the editor's first fields lead the table.
+    expect(order.slice(0, 3)).toEqual(['first_name', 'primary_email', 'dob'])
   })
 
   const sponsorMembers = (decisionOfS2: Record<string, unknown> = {}) => [

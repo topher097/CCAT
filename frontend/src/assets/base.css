@@ -153,22 +153,37 @@ button.primary {
   background: #dff0e2;
 }
 
-.badge.check-ok {
-  border-color: #2e6b3a;
-  background: #dff0e2;
-}
-
-.badge.check-warn {
+/* Duplications carry their own pending/resolved vocabulary. */
+.badge.status-pending {
   border-color: #9a7b12;
   background: #fdf4d8;
 }
 
-.badge.check-bad {
+.badge.status-resolved {
+  border-color: #2e6b3a;
+  background: #dff0e2;
+}
+
+.badge.check-ok,
+.flag.check-ok {
+  border-color: #2e6b3a;
+  background: #dff0e2;
+}
+
+.badge.check-warn,
+.flag.check-warn {
+  border-color: #9a7b12;
+  background: #fdf4d8;
+}
+
+.badge.check-bad,
+.flag.check-bad {
   border-color: #9e2b25;
   background: #f8dedc;
 }
 
-.badge.check-unchecked {
+.badge.check-unchecked,
+.flag.check-unchecked {
   border-color: #6b7a88;
   background: #eef2f6;
 }

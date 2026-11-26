@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises } from '@vue/test-utils'
 
 import EntityEditor from '../src/components/EntityEditor.vue'
 import { useSessionStore } from '../src/stores/session'
+import { autoAdvance } from '../src/composables/useAutoAdvance'
 import { bodyOf, headersOf, jsonResponse, mockRoutes, mountRouted } from './helpers'
 
 const CHILD_ROW = {
@@ -667,36 +668,6 @@ describe('entity editor', () => {
       'Mark audited',
     )
   })
-
-  it('lists duplicate submissions', async () => {
-    mockRoutes([
-      (url) =>
-        url.includes('/children/c1')
-          ? jsonResponse(
-              200,
-              childDetail({
-                submissions: [
-                  {
-                    zite_record_id: 'c1',
-                    first_name: 'Ann',
-                    primary_email: 'ann@example.org',
-                    dob: '2018-01-01',
-                  },
-                  {
-                    zite_record_id: 'c9',
-                    first_name: 'Ann',
-                    primary_email: 'ann@example.org',
-                    dob: '2018-01-01',
-                  },
-                ],
-              }),
-            )
-          : undefined,
-    ])
-    const wrapper = await mountEditor('child')
-    await flushPromises()
-    expect(wrapper.get('[data-testid="submissions"]').findAll('tbody tr')).toHaveLength(2)
-  })
 })
 
 const SPONSOR_ROW = {
@@ -933,5 +904,188 @@ describe('sponsor boolean fields', () => {
     const wrapper = await mountEditor('sponsor', '10')
     await flushPromises()
     expect(wrapper.find('[data-field="elevated_budget"] [data-testid="diff-marker"]').exists()).toBe(false)
+  })
+})
+
+describe('progress to next on audit', () => {
+  /** Reset the module-singleton flag so tests never leak state. */
+  beforeEach(() => {
+    autoAdvance.value = true
+  })
+
+  /** Mount with a next-neighbour and a PATCH that audits the row. */
+  async function mountWithNext(options: { admin?: boolean } = {}) {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (url.includes('/children/c1')) {
+          if (init.method === 'PATCH') {
+            return jsonResponse(
+              200,
+              childDetail({
+                row: { ...CHILD_ROW, status: 'audited' },
+                status: 'audited',
+                row_version: 4,
+                next: { key: 'c2', label: 'Bob', angel_id: '1B' },
+              }),
+            )
+          }
+          return jsonResponse(
+            200,
+            childDetail({
+              next: { key: 'c2', label: 'Bob', angel_id: '1B' },
+            }),
+          )
+        }
+        return undefined
+      },
+    ])
+    const { wrapper, router } = await mountRouted(EntityEditor, {
+      path: '/audit/children/c1',
+      props: { entity: 'child', entityKey: 'c1' },
+      setup: () => {
+        useSessionStore().season = {
+          id: 1,
+          name: '2026',
+          xmas_date: '2026-12-25',
+        }
+        if (options.admin) {
+          useSessionStore().me = {
+            username: 'cmendres',
+            roles: ['admin', 'coordinator', 'auditor'],
+            csrf_token: 't',
+          }
+        }
+      },
+    })
+    await flushPromises()
+    return { wrapper, router, fetchMock }
+  }
+
+  it('shows the neighbour angel ids in the prev/next chips', async () => {
+    const { wrapper } = await mountWithNext()
+
+    expect(wrapper.get('[data-testid="next-entry"]').text()).toContain(
+      'Angel 1B',
+    )
+  })
+
+  it('advances to the next entry after marking audited', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper, router, fetchMock } = await mountWithNext()
+
+    await wrapper.get('[data-testid="mark-audited-bottom"]').trigger('click')
+    await flushPromises()
+
+    expect(bodyOf(patchCall(fetchMock)!)).toEqual({ status: 'audited' })
+    expect(router.currentRoute.value.path).toBe('/audit/children/c2')
+    expect(confirm).not.toHaveBeenCalled()
+    confirm.mockRestore()
+  })
+
+  it('stays when the checkbox is unchecked', async () => {
+    const { wrapper, router, fetchMock } = await mountWithNext()
+
+    const box = wrapper.get(
+      '[data-testid="auto-advance"] input[type="checkbox"]',
+    )
+    expect((box.element as HTMLInputElement).checked).toBe(true)
+    await box.setValue(false)
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+
+    expect(bodyOf(patchCall(fetchMock)!)).toEqual({ status: 'audited' })
+    expect(router.currentRoute.value.path).toBe('/audit/children/c1')
+  })
+
+  it('stays on the last entry and never advances on a conflict', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (url.includes('/children/c1')) {
+          if (init.method === 'PATCH') {
+            return jsonResponse(412, {
+              detail: {
+                code: 'stale_version',
+                message: 'row version changed',
+                entity: 'child',
+                key: 'c1',
+                current_version: 9,
+                row: { ...CHILD_ROW, first_name: 'Bob' },
+                last_updated_by: 'lmboswell',
+                last_updated_at: '2026-11-18T11:00:00Z',
+              },
+            })
+          }
+          return jsonResponse(200, childDetail())
+        }
+        return undefined
+      },
+    ])
+    const { wrapper, router } = await mountRouted(EntityEditor, {
+      path: '/audit/children/c1',
+      props: { entity: 'child', entityKey: 'c1' },
+      setup: () => {
+        useSessionStore().season = {
+          id: 1,
+          name: '2026',
+          xmas_date: '2026-12-25',
+        }
+      },
+    })
+    await flushPromises()
+
+    // Last entry: no next, mark audited keeps the editor in place.
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await flushPromises()
+    expect(bodyOf(patchCall(fetchMock)!)).toEqual({ status: 'audited' })
+    expect(router.currentRoute.value.path).toBe('/audit/children/c1')
+
+    // A stale version (conflict) aborts the advance too.
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await wrapper.get('input[name="first_name"]').setValue('Anna')
+    await wrapper.get('[data-testid="mark-audited"]').trigger('click')
+    await wrapper.get('[data-testid="confirm"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/audit/children/c1')
+    expect(wrapper.find('[data-testid="conflict-panel"]').exists()).toBe(true)
+    confirm.mockRestore()
+  })
+
+  it('never advances in embedded popups', async () => {
+    mockRoutes([
+      (url, init) => {
+        if (url.includes('/children/c1')) {
+          if (init.method === 'PATCH') {
+            return jsonResponse(
+              200,
+              childDetail({
+                row: { ...CHILD_ROW, status: 'audited' },
+                status: 'audited',
+                row_version: 4,
+                next: { key: 'c2', label: 'Bob', angel_id: '1B' },
+              }),
+            )
+          }
+          return jsonResponse(200, childDetail())
+        }
+        return undefined
+      },
+    ])
+    const { wrapper, router } = await mountRouted(EntityEditor, {
+      path: '/audit/children/c1',
+      props: { entity: 'child', entityKey: 'c1', embedded: true },
+      setup: () => {
+        useSessionStore().season = {
+          id: 1,
+          name: '2026',
+          xmas_date: '2026-12-25',
+        }
+      },
+    })
+    await flushPromises()
+
+    // Embedded renders no auto-advance checkbox and no neighbour chips.
+    expect(wrapper.find('[data-testid="auto-advance"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="next-entry"]').exists()).toBe(false)
+    expect(router.currentRoute.value.path).toBe('/audit/children/c1')
   })
 })

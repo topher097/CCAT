@@ -140,10 +140,18 @@ onMounted(() => void load())
             <span v-else class="muted">none</span>
           </td>
           <td>
-            <span class="badge">{{ family.contacted ? 'yes' : 'no' }}</span>
+            <span
+              class="badge"
+              :class="family.contacted ? 'check-ok' : 'check-unchecked'"
+              >{{ family.contacted ? 'yes' : 'no' }}</span
+            >
           </td>
           <td>
-            <span class="badge">{{ family.replied ? 'yes' : 'no' }}</span>
+            <span
+              class="badge"
+              :class="family.replied ? 'check-ok' : 'check-unchecked'"
+              >{{ family.replied ? 'yes' : 'no' }}</span
+            >
           </td>
           <td class="muted">{{ formatTime(family.updated_at) }}</td>
         </tr>

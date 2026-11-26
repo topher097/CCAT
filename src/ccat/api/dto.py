@@ -159,10 +159,12 @@ class NeighbourView(StrictModel):
     Attributes:
         key: The entry's key.
         label: A human label for the entry.
+        angel_id: The child's angel id (children only).
     """
 
     key: str
     label: str = ""
+    angel_id: str | None = None
 
 
 class EntityDetail(StrictModel):
@@ -172,7 +174,6 @@ class EntityDetail(StrictModel):
         row: The effective stored row (canonical names) plus
             ``row_version`` / ``last_updated_by`` / ``last_updated_at``.
         baseline: The prepared baseline values for diffing.
-        submissions: The entity's raw duplicate-group submissions.
         status: The stored status.
         row_version: Optimistic-concurrency version (If-Match value).
         last_updated_by: Latest editor.
@@ -187,7 +188,6 @@ class EntityDetail(StrictModel):
     key: str
     row: dict[str, Any]
     baseline: dict[str, Any]
-    submissions: list[dict[str, Any]] = Field(default_factory=list)
     status: str | None = None
     row_version: int
     last_updated_by: str | None = None
@@ -323,9 +323,12 @@ class DuplicationDetail(StrictModel):
         survivor_count: Members left undecided (candidates to survive).
         children: The group's children (family groups).
         current: The group's merged editable fields, folded from every
-            submission in the group.
+            submission in the group. Locked to the stored row when an
+            audited child is matched to a sponsor.
         current_row_key: The key of the row the merged entry is
             written to.
+        current_locked: The current values are a final audited row;
+            the new submission never overwrites them.
         previous: The group before this one in the list's order.
         next: The group after this one in the list's order.
     """
@@ -342,6 +345,7 @@ class DuplicationDetail(StrictModel):
     children: list[DuplicationChild] = Field(default_factory=list)
     current: dict[str, Any] = Field(default_factory=dict)
     current_row_key: str = ""
+    current_locked: bool = False
     previous: NeighbourView | None = None
     next: NeighbourView | None = None
 
@@ -350,16 +354,32 @@ class DuplicationDecisionRequest(StrictModel):
     """One duplication-audit decision.
 
     Attributes:
-        decision: "not_duplicate" or "ignore".
+        decision: "not_duplicate", "ignore", or "clear" (undo).
         confirm: Must be True; anything else refuses the action.
         expected_version: The caller's expected ``row_version``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    decision: Literal["not_duplicate", "ignore"]
+    decision: Literal["not_duplicate", "ignore", "clear"]
     confirm: bool
     expected_version: int | None = None
+
+
+class ManualDuplicateRequest(StrictModel):
+    """Mark one entity row as a manual duplicate of another.
+
+    Attributes:
+        entity: "child", "family", or "sponsor".
+        record_id: The marked row's audit key.
+        partner_id: The suspected duplicate's audit key.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity: Literal["child", "family", "sponsor"]
+    record_id: str
+    partner_id: str
 
 
 class DuplicationAuditRequest(StrictModel):

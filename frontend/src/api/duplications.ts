@@ -44,7 +44,7 @@ export type DuplicationMember = Schemas['DuplicationMember'] & {
 }
 
 export type DuplicationListPage = Schemas['DuplicationListPage']
-export type DuplicationDecision = 'not_duplicate' | 'ignore'
+export type DuplicationDecision = 'not_duplicate' | 'ignore' | 'clear'
 export type DuplicationFilters = {
   q?: string
   entity?: string | null
@@ -97,6 +97,19 @@ export function getDuplication(
   )
 }
 
+/** Mark one entity row as a manual duplicate of another. */
+export function markManualDuplicate(
+  season: string,
+  entity: 'child' | 'family' | 'sponsor',
+  recordId: string,
+  partnerId: string,
+): Promise<{ id: string }> {
+  return api.post(
+    `/api/v1/seasons/${seasonPath(season)}/duplications/manual`,
+    { entity, record_id: recordId, partner_id: partnerId },
+  )
+}
+
 /** Mark a resolved duplication audited; the refreshed group comes back. */
 export function auditDuplication(
   season: string,
@@ -117,6 +130,23 @@ export function auditDuplication(
   return api.post<DuplicationDetail>(
     `/api/v1/seasons/${seasonPath(season)}/duplications/${encodeURIComponent(groupId)}/audit${suffix}`,
     postBody,
+  )
+}
+
+/** Undo a duplication audit (admin); the refreshed group comes back. */
+export function undoDuplicationAudit(
+  season: string,
+  groupId: string,
+  filters: DuplicationFilters = {},
+): Promise<DuplicationDetail> {
+  const query = new URLSearchParams()
+  if (filters.q) query.set('q', filters.q)
+  if (filters.entity && filters.entity !== 'all')
+    query.set('entity', filters.entity)
+  if (filters.kind && filters.kind !== 'all') query.set('kind', filters.kind)
+  const suffix = query.size ? `?${query.toString()}` : ''
+  return api.post<DuplicationDetail>(
+    `/api/v1/seasons/${seasonPath(season)}/duplications/${encodeURIComponent(groupId)}/unaudit${suffix}`,
   )
 }
 

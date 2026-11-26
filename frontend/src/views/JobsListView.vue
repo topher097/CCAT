@@ -15,6 +15,7 @@ import {
 } from '../api/jobs'
 import { useSessionStore } from '../stores/session'
 import { formatTime } from '../utils/format'
+import { jobStatusClass } from '../utils/status'
 
 const session = useSessionStore()
 
@@ -159,7 +160,7 @@ onMounted(() => void load())
           </td>
           <td>{{ job.job_type.replaceAll('_', ' ') }}</td>
           <td>
-            <span class="badge" :data-status="job.status">
+            <span class="badge" :class="jobStatusClass(job.status)" :data-status="job.status">
               {{ jobStatusLabel(job.status) }}
             </span>
             <span v-if="isActive(job)" class="muted"> · active</span>
