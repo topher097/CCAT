@@ -7,6 +7,7 @@ import {
   assignDuplicationChildren,
   DUPLICATION_KIND_LABELS,
   auditDuplication,
+  undoDuplicationAudit,
   decideDuplication,
   getDuplication,
   type DuplicationDecision,
@@ -56,6 +57,7 @@ const NUMERIC_FIELDS = new Set(['age_reported', 'num_children'])
 
 const groupId = computed(() => String(route.params.id ?? ''))
 const seasonName = computed(() => session.season?.name ?? '')
+const isAdmin = computed(() => session.hasRole('admin'))
 /** The back button returns to the duplications list this group came from. */
 const { listUrl, query: carriedQuery } = useAuditNav('/audit/duplications')
 /** The list's filters, carried in the URL, decide the neighbours. */
@@ -612,6 +614,30 @@ async function performAudit(values?: Record<string, unknown>): Promise<void> {
   }
 }
 
+/** Undo the group's audit (admin): the entry row returns to new. */
+async function performUndo(): Promise<void> {
+  if (!detail.value || saving.value) return
+  saving.value = true
+  submitError.value = null
+  stale.value = false
+  notice.value = null
+  try {
+    detail.value = await undoDuplicationAudit(
+      seasonName.value,
+      groupId.value,
+      filters.value,
+    )
+    pending.value = new Map()
+    resetDraft()
+    resetChildrenDraft()
+    notice.value = 'Audit undone.'
+  } catch (failure) {
+    submitError.value = messageOf(failure)
+  } finally {
+    saving.value = false
+  }
+}
+
 /** Save the edited current values onto the group's screened row. */
 async function save(): Promise<void> {
   const member = boundMember.value
@@ -775,6 +801,16 @@ onMounted(() => {
             @click="markAudited"
           >
             {{ detail.status === 'audited' ? 'Re-audit' : 'Mark audited' }}
+          </button>
+          <button
+            v-if="detail.status === 'audited' && isAdmin"
+            type="button"
+            :disabled="saving || currentLocked"
+            title="Undo the audit: the entry returns to new so its values can change."
+            data-testid="undo-audit"
+            @click="performUndo"
+          >
+            Undo audit
           </button>
         </div>
       </div>

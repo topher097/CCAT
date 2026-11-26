@@ -1087,6 +1087,78 @@ describe('duplication detail', () => {
     )
   })
 
+  it('offers Undo audit to an admin and posts /unaudit', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (init.method === 'POST' && url.endsWith('/unaudit'))
+          return jsonResponse(
+            200,
+            detail([member({ zite_record_id: 'r1', survivor: true })], {
+              status: 'resolved',
+            }),
+          )
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(
+            200,
+            detail([member({ zite_record_id: 'r1', survivor: true })], {
+              status: 'audited',
+              audited_at: '2026-11-20T10:00:00Z',
+            }),
+          )
+        return undefined
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: () => {
+        seedSeason()
+        const session = useSessionStore()
+        session.me = {
+          username: 'cmendres',
+          roles: ['admin', 'coordinator', 'auditor'],
+          csrf_token: 't',
+        }
+      },
+    })
+    await flushPromises()
+
+    const undo = wrapper.get('[data-testid="undo-audit"]')
+    await undo.trigger('click')
+    await flushPromises()
+
+    const post = fetchMock.mock.calls.find(
+      (call) =>
+        (call[1] as RequestInit).method === 'POST' &&
+        String(call[0]).endsWith('/unaudit'),
+    )
+    expect(post).toBeDefined()
+    expect(wrapper.get('[data-testid="decision-notice"]').text()).toContain(
+      'undone',
+    )
+  })
+
+  it('hides Undo audit from non-admins', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail([member({ zite_record_id: 'r1', survivor: true })], {
+                status: 'audited',
+                audited_at: '2026-11-20T10:00:00Z',
+              }),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="undo-audit"]').exists()).toBe(false)
+  })
+
   it('lists children for a family group and saves family assignments', async () => {
     const fetchMock = mockRoutes([
       (url, init) => {

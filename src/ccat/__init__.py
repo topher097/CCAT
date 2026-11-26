@@ -518,6 +518,50 @@ def _db_dedupe_raw_cmd(
         raise SystemExit(f"ccat db-dedupe-raw failed: {error}") from error
 
 
+def _db_repair_duplications_cmd(config: str = DEFAULT_CONFIG) -> None:
+    """Re-apply audited-duplication bookkeeping to stale final rows.
+
+    Groups audited before the duplicate-flag clear and shared-letter
+    cleanup shipped keep ``potential_duplicate=1`` (hiding their family
+    from the match pool) and ignored members keep the group's shared
+    angel letter.  Idempotent; touches only rows of audited child
+    groups and backfills each group's recorded entry key.
+
+    Args:
+        config: Path to the JSON configuration file.
+    """
+
+    async def _go() -> None:
+        from ccat.db.engine import create_async_engine
+        from ccat.services import db_duplications
+
+        from ccat.db.uow import UnitOfWork
+
+        engine = create_async_engine(cfg.storage.database_url)
+        try:
+            async with UnitOfWork(engine).store(cfg, "cli") as repo:
+                summary = await db_duplications.repair_audited_groups(
+                    repo, "cli"
+                )
+            print(
+                "cleared flags: {cleared_flags}, cleared letters:"
+                " {cleared_letters}, entry keys backfilled:"
+                " {entry_keys_backfilled}".format(**summary)
+            )
+        finally:
+            await engine.dispose()
+
+    import asyncio
+
+    try:
+        cfg = load_config(config)
+        asyncio.run(_go())
+    except _typed_errors() as error:
+        raise SystemExit(
+            f"ccat db-repair-duplications failed: {error}"
+        ) from error
+
+
 def _worker_cmd(config: str = DEFAULT_CONFIG) -> None:
     """Run the durable-job worker loop (plan §6.1, decision D7).
 
@@ -584,6 +628,7 @@ def main() -> None:
             "db-import": _db_import_cmd,
             "workbook-export": _workbook_export_cmd,
             "db-dedupe-raw": _db_dedupe_raw_cmd,
+            "db-repair-duplications": _db_repair_duplications_cmd,
             "serve": _serve_cmd,
             "worker": _worker_cmd,
             "db-upgrade": _db_upgrade_cmd,

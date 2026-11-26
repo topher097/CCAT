@@ -2786,6 +2786,50 @@ async def test_duplication_reaudit_of_an_audited_entry(
     assert stored.json()["row"]["first_name"] == "Marcus"
 
 
+async def test_duplication_unaudit_is_admin_only(
+    app: Any, auditor: Client, admin: Client
+) -> None:
+    """Undo a duplication audit: 403 for auditors, admin re-opens the group."""
+    await _seed_duplicates(app)
+    listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
+    group = listing.json()["items"][0]
+    decided = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/members/c1",
+        json={"decision": "not_duplicate", "confirm": True},
+        headers=auditor.headers(),
+    )
+    assert decided.status_code == 200, decided.text
+    audited = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+        headers=auditor.headers(),
+    )
+    assert audited.status_code == 200, audited.text
+
+    denied = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/unaudit",
+        headers=auditor.headers(),
+    )
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"]["code"] == "forbidden"
+
+    undone = await admin.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/unaudit",
+        headers=admin.headers(),
+    )
+    assert undone.status_code == 200, undone.text
+    body = undone.json()
+    assert body["status"] == "resolved"
+    stored = await admin.client.get("/api/v1/seasons/2026/children/c1b")
+    assert stored.json()["row"]["status"] != "audited"
+    # Re-audit works after the undo.
+    again = await admin.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+        headers=admin.headers(),
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["status"] == "audited"
+
+
 async def test_duplication_reports_survivor_state(
     app: Any, auditor: Client
 ) -> None:

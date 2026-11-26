@@ -1303,6 +1303,209 @@ def test_audited_unsponsored_child_still_accepts_the_merge(
     _run(main())
 
 
+def test_unaudit_reopens_an_audited_group(tmp_path: Path) -> None:
+    """Admin undo: the entry row returns to new and the group to pending.
+
+    The Current column showed the fold instead of the saved values; the
+    undo lets the auditor change values and re-audit, like the
+    individual audit pages.  A dispatched entry refuses.
+    """
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                group = await _group(repo, "child")
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "c1",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                await db_duplications.mark_audited(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "auditor",
+                    values={"first_name": "Marcus"},
+                )
+                children = await _rows(repo, "child")
+                assert children["c1b"]["first_name"] == "Marcus"
+                assert children["c1b"]["status"] == "audited"
+
+                # While audited, the Current column shows what the audit
+                # saved onto the entry row (the user's report: saved
+                # values never propagated back to the page).
+                audited_detail = await db_duplications.group_detail(
+                    repo, group["id"]
+                )
+                assert audited_detail["current"]["first_name"] == "Marcus"
+                assert audited_detail["current_row_key"] == "c1b"
+
+                detail = await db_duplications.unaudit(
+                    repo, cfg, group["id"], "admin"
+                )
+                children = await _rows(repo, "child")
+                states = await repo.duplication_state_rows()
+
+            # The entry row is un-audited and the group is auditable
+            # again ("resolved" = one undecided survivor, the pre-audit
+            # state).
+            assert children["c1b"]["status"] == "new"
+            assert children["c1b"]["first_name"] == "Marcus"
+            assert states == []
+            assert detail["status"] == "resolved"
+            assert detail["current"]["first_name"] == "Kiddo"
+
+            # Idempotent: undoing again changes nothing.
+            detail = await db_duplications.unaudit(
+                repo, cfg, group["id"], "admin"
+            )
+            assert detail["status"] == "resolved"
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_unaudit_refuses_a_dispatched_entry(tmp_path: Path) -> None:
+    """A dispatched packet freezes the entry: undo is refused."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                children = await repo.final_rows("child")
+                for row in children:
+                    if row["zite_record_id"] == "c1b":
+                        row["assigned_sponsor_id"] = 1
+                        row["assignment_source"] = "manual"
+                await repo.commit_finals(
+                    "manual_match", "child", children, "coordinator"
+                )
+                sponsors = await repo.final_rows("sponsor")
+                for row in sponsors:
+                    if row["sponsor_id"] == 1:
+                        row["packets_dispatched_at"] = (
+                            "2026-11-01T09:00:00+00:00"
+                        )
+                await repo.commit_finals(
+                    "migrate", "sponsor", sponsors, "migration"
+                )
+                group = await _group(repo, "child")
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "c1",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                await db_duplications.mark_audited(
+                    repo, cfg, group["id"], "auditor"
+                )
+                with pytest.raises(RowAuditedError):
+                    await db_duplications.unaudit(
+                        repo, cfg, group["id"], "admin"
+                    )
+                children = await _rows(repo, "child")
+                states = await repo.duplication_state_rows()
+            assert children["c1b"]["status"] == "audited"
+            assert states and states[0]["entry_key"] == "c1b"
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_clear_on_an_audited_group_reopens_it(tmp_path: Path) -> None:
+    """Deselecting a stored decision on an audited group un-audits it."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                group = await _group(repo, "child")
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "c1",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                await db_duplications.mark_audited(
+                    repo, cfg, group["id"], "auditor"
+                )
+                detail = await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "c1",
+                    db_duplications.DECISION_CLEAR,
+                    "admin",
+                    confirm=True,
+                )
+                children = await _rows(repo, "child")
+                states = await repo.duplication_state_rows()
+            assert detail["status"] == "pending"
+            assert states == []
+            assert children["c1b"]["status"] == "new"
+            assert children["c1"]["ignore"] in (False, None, 0)
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_ignored_member_loses_the_shared_letter(tmp_path: Path) -> None:
+    """Only the surviving entry keeps the group's angel letter."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                group = await _group(repo, "child")
+                # The pending group shares one letter across members.
+                await db_duplications.sync_pending_angel_letters(repo, "screen")
+                children = await _rows(repo, "child")
+                assert children["c1"]["angel_id"] == "1A"
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "c1",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                children = await _rows(repo, "child")
+            assert children["c1"]["angel_id"] is None
+            assert children["c1"]["status"] == "ignored"
+            assert children["c1b"]["angel_id"] == "1A"
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
 def test_released_member_row_returns_to_new(tmp_path: Path) -> None:
     """A released member becomes its own unaudited row, even if audited."""
     cfg = _cfg(tmp_path)

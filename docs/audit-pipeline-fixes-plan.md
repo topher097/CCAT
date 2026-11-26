@@ -289,6 +289,72 @@ family number, left-to-right / top-to-bottom.
   (vue-tsc) ok. Backend untouched (no backend edits this round; full suite
   971 passed at the round-3 commit).
 
+---
+
+# Round 5 — audited-group current propagation, undo, deselect, live-data bugs
+
+User report (2026-11-26): after a duplication resolution audit the
+"Current (editable)" values were saved to the child's final row but the
+duplication page kept showing the raw fold; undo was missing; deselect of
+decisions doesn't work on audited groups. Live-data bugs in family 42
+(groups `kelsikathryn480@gmail.com|Ryder` / `|Markus`, audited 2026-11-22,
+pre-round-1-fix): (A) ignored member rows still carry the shared angel letter
+42A — only the survivor should; (B) family 42 is missing from the match pool
+because every member row still carries `potential_duplicate=1` (stale flags —
+`_clear_duplicate_flags` shipped in round 1, after these audits).
+
+## Tasks
+
+- [x] 18 (amended). Audited groups: `current` = the stored entry row's
+  editable values (not the fold) — `group_detail` branch on the state row's
+  `entry_key`; fold only for pending/resolved-unaudited groups.
+- [x] 18b. Admin "Undo audit" on the duplication page:
+  `db_duplications.unaudit` (entry row → `STATUS_NEW` via `_override_status`,
+  `clear_duplication_state`, `sync_pending_angel_letters`; dispatched entry →
+  `RowAuditedError`; idempotent), route `POST /duplications/{id}/unaudit`
+  (admin), client `undoDuplicationAudit` + button (`undo-audit`, admin-only,
+  disabled when locked), notice "Audit undone."
+- [x] 22. Deselect works on audited groups: `decide(..., "clear")` on a group
+  with an audited state row first un-audits it (shared `_remove_audited_state`
+  helper), then runs `_clear_member`. Post-undo status = "resolved" (one
+  undecided survivor — the pre-audit state).
+- [x] 23. Ignored duplicate members lose the group's shared angel letter:
+  `_ignore_member` clears `angel_id` (duplication module); the letter re-flow
+  runs in `decide` AFTER the decision row is recorded (before that, the
+  member still counts pending and the sync re-stamps it — sequencing bug
+  caught by the test).
+- [x] 24. Live-data repair (family 42): `ccat db-repair-duplications`
+  (service `repair_audited_groups`) — for audited child groups: backfill the
+  recorded `entry_key`, clear stale `potential_duplicate` on member rows,
+  clear shared letters on ignored members. Idempotent. Live run:
+  `cleared flags: 7, cleared letters: 3, entry keys backfilled: 3`;
+  verified Ryder/Markus survivors keep 42A/42B, ignored members None.
+- [x] 25. Root cause for "family 42 missing from pool" + "saved values not
+  shown": the live store was TWO MIGRATIONS BEHIND (`20261121_0008`) —
+  `0009_sponsor_dispatch` (packets_dispatched_at) and
+  `0010_duplication_entry_key` (entry recall) were unapplied, so the
+  round-1/round-3 fixes could not engage. `ccat db-upgrade` applied both.
+  Post-repair pool check: family 42 present, children 42A/42B/42C all
+  selectable; 65 pool families.
+
+## Round-5 evidence
+
+- Full pytest 976 passed; frontend build (vue-tsc) ok; vitest 282 passed;
+  ruff clean; ty 0 errors on touched files.
+- New tests: unaudit service (re-open + idempotent), dispatched-entry
+  refusal, clear-on-audited reopens, ignored-member letter cleanup, API
+  unaudit 403/200 + re-audit, UI undo button admin-only + POST /unaudit,
+  audited-detail current propagation.
+
+## Design notes
+
+- Post-undo `current` = the fold again (preview of the merge) — intended.
+- Post-undo group status = "resolved" (one undecided survivor) — the
+  pre-audit state; `_group_status` unchanged.
+- Repair is idempotent and scoped: only rows of groups whose
+  `duplication_state.status == "audited"`; letters cleared only on
+  `ignore=1` rows whose `angel_id` matches a survivor letter of their group.
+
 ## Design
 
 - 20: `rawFields` (DuplicationDetailView.vue:210-219) currently follows raw

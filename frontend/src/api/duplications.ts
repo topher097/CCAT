@@ -133,6 +133,23 @@ export function auditDuplication(
   )
 }
 
+/** Undo a duplication audit (admin); the refreshed group comes back. */
+export function undoDuplicationAudit(
+  season: string,
+  groupId: string,
+  filters: DuplicationFilters = {},
+): Promise<DuplicationDetail> {
+  const query = new URLSearchParams()
+  if (filters.q) query.set('q', filters.q)
+  if (filters.entity && filters.entity !== 'all')
+    query.set('entity', filters.entity)
+  if (filters.kind && filters.kind !== 'all') query.set('kind', filters.kind)
+  const suffix = query.size ? `?${query.toString()}` : ''
+  return api.post<DuplicationDetail>(
+    `/api/v1/seasons/${seasonPath(season)}/duplications/${encodeURIComponent(groupId)}/unaudit${suffix}`,
+  )
+}
+
 /** Assign children to families after a family-group split. */
 export function assignDuplicationChildren(
   season: string,
