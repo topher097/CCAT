@@ -39,8 +39,13 @@ from ccat.audit.store import (
 )
 from ccat.config import Config
 from ccat.domain import AGE_PREF_BOUNDS
+from ccat.match import canonical_location
 from ccat.preparation import prepare_rows
 from ccat.services.audit import SavePatch
+from ccat.services.db_assignments import (
+    STATE_UNASSIGNED,
+    assignment_state,
+)
 from ccat.services.results import SaveResult
 
 if TYPE_CHECKING:
@@ -275,13 +280,138 @@ def row_label(entity: str, row: dict[str, Any]) -> str:
     return str(row.get(ENTITY_SPECS[entity]["key"]) or "")
 
 
+def sponsor_fully_matched(row: dict[str, Any]) -> bool:
+    """Return True when the sponsor's angel quota is met (no quota: any angel)."""
+    quota = row.get("num_children")
+    assigned = row.get("num_angels_assigned") or 0
+    return assigned >= quota if quota is not None else assigned > 0
+
+
+async def search_all(
+    repo: "SeasonStoreRepository",
+    cfg: Config,
+    *,
+    q: str = "",
+    entity: str = "any",
+    status: str | None = None,
+    ignore: bool | None = None,
+    sponsored: bool | None = None,
+    location: str = "any",
+    family_size_min: int | None = None,
+    family_size_max: int | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Search every final_* store at once (registry page).
+
+    The filters mirror the per-entity lists — fuzzy all-text query,
+    stored status, ignore flag, sponsorship state — plus the match
+    page's drop-off location bucket and live family size.  Hits come
+    back as a family block, then a child block, then a sponsor block,
+    each in that store's audit order.
+
+    Args:
+        repo: The season-bound repository.
+        cfg: Pipeline configuration (location buckets).
+        q: All-text search query with fuzzy fallback.
+        entity: "any", or one of "family", "child", "sponsor".
+        status: Stored-status filter.
+        ignore: Ignore-flag filter.
+        sponsored: Children/families: has any sponsor; sponsors: fully
+            matched.
+        location: Canonical drop-off/pickup bucket; "any" disables.
+        family_size_min: Minimum live-children count (families and
+            children; sponsors are never size-filtered).
+        family_size_max: Maximum live-children count (same scope).
+
+    Returns:
+        The hits — ``{"entity", "row", "label", "family_size"}``
+        dicts — and the total count across all stores.
+    """
+    kinds = ["family", "child", "sponsor"] if entity == "any" else [entity]
+    counts = (
+        await repo.family_child_counts()
+        if any(kind in ("family", "child") for kind in kinds)
+        else None
+    )
+    family_location: dict[str, str] = {}
+    if location != "any" and "child" in kinds:
+        for family in await repo.final_rows("family"):
+            bucket = canonical_location(
+                str(family.get("gift_pickup_location") or ""),
+                cfg.location_groups,
+            )
+            if bucket is not None:
+                family_location[str(family.get("family_id") or "")] = bucket
+    family_children: dict[Any, list[dict[str, Any]]] = {}
+    if "family" in kinds and sponsored is not None:
+        for child in await repo.final_rows("child"):
+            if as_bool(child.get("ignore")):
+                continue
+            family_children.setdefault(child.get("family_id"), []).append(child)
+    hits: list[dict[str, Any]] = []
+    for kind in kinds:
+        rows = ordered_rows(kind, await repo.final_rows(kind), q, status)
+        if ignore is not None:
+            rows = [row for row in rows if as_bool(row.get("ignore")) == ignore]
+        for row in rows:
+            if location != "any":
+                if kind == "family":
+                    bucket = canonical_location(
+                        str(row.get("gift_pickup_location") or ""),
+                        cfg.location_groups,
+                    )
+                elif kind == "sponsor":
+                    bucket = canonical_location(
+                        str(row.get("dropoff_location") or ""),
+                        cfg.location_groups,
+                    )
+                else:
+                    bucket = family_location.get(
+                        str(row.get("family_id") or ""), ""
+                    )
+                if bucket != location:
+                    continue
+            size: int | None = None
+            family_id = row.get("family_id")
+            if counts is not None and family_id is not None:
+                if kind in ("family", "child"):
+                    size = counts.get(int(family_id), 0)
+                if size is not None and (
+                    (family_size_min is not None and size < family_size_min)
+                    or (family_size_max is not None and size > family_size_max)
+                ):
+                    continue
+            if sponsored is not None:
+                if kind == "child":
+                    matched = row.get("assigned_sponsor_id") is not None
+                elif kind == "family":
+                    matched = (
+                        assignment_state(
+                            family_children.get(row.get("family_id"), [])
+                        )
+                        != STATE_UNASSIGNED
+                    )
+                else:
+                    matched = sponsor_fully_matched(row)
+                if matched != sponsored:
+                    continue
+            hits.append(
+                {
+                    "entity": kind,
+                    "row": row,
+                    "label": row_label(kind, row),
+                    "family_size": size,
+                }
+            )
+    return hits, len(hits)
+
+
 def neighbours(
     entity: str,
     rows: list[dict[str, Any]],
     key: str,
     q: str = "",
     status: str | None = None,
-) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+) -> tuple[dict[str, str | None] | None, dict[str, str | None] | None]:
     """Return the entries before and after one key in the list's order.
 
     Args:
@@ -315,7 +445,7 @@ def neighbours(
     )
 
 
-def _neighbour(entity: str, row: dict[str, Any]) -> dict[str, str]:
+def _neighbour(entity: str, row: dict[str, Any]) -> dict[str, str | None]:
     """Render one neighbouring row for the wire.
 
     Args:
@@ -323,11 +453,16 @@ def _neighbour(entity: str, row: dict[str, Any]) -> dict[str, str]:
         row: The neighbouring final row.
 
     Returns:
-        The neighbour's key and label.
+        The neighbour's key, label and — children only — angel id.
     """
     return {
         "key": str(row.get(ENTITY_SPECS[entity]["key"]) or ""),
         "label": row_label(entity, row),
+        "angel_id": (
+            str(row.get("angel_id"))
+            if entity == "child" and row.get("angel_id")
+            else None
+        ),
     }
 
 
@@ -722,6 +857,8 @@ __all__ = [
     "ordered_rows",
     "row_label",
     "save_entity_db",
+    "search_all",
+    "sponsor_fully_matched",
     "unignore_entity_db",
     "validation_statuses",
 ]

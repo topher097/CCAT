@@ -615,7 +615,7 @@ describe('match page', () => {
     expect(bodyOf(posts[0]!)).toEqual({ family_id: 7, note: 'moved away' })
   })
 
-  it('does not fetch the pool until a sponsor is chosen', async () => {
+  it('fetches and shows the pool before a sponsor is chosen', async () => {
     const fetchMock = mockRoutes([
       poolHandler(() => pool([family()])),
       sponsorsHandler([sponsor()]),
@@ -626,11 +626,19 @@ describe('match page', () => {
     })
     await flushPromises()
 
-    expect(poolCalls(fetchMock)).toHaveLength(0)
-    expect(wrapper.find('[data-testid="pick-sponsor-first"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="family-card"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="list-empty"]').exists()).toBe(false)
-    expect(wrapper.find('.pagination').exists()).toBe(false)
+    expect(poolCalls(fetchMock).length).toBeGreaterThan(0)
+    expect(
+      wrapper.find('[data-testid="pick-sponsor-first"]').exists(),
+    ).toBe(true)
+    expect(wrapper.find('[data-testid="family-card"]').exists()).toBe(true)
+    expect(wrapper.find('.pagination').exists()).toBe(true)
+    const last = poolCalls(fetchMock).at(-1)!
+    const params = new URL(String(last[0]), 'http://localhost').searchParams
+    expect(params.has('sponsor_id')).toBe(false)
+    expect(
+      wrapper.get('[data-testid="assign"]').attributes('disabled'),
+    ).toBeDefined()
+    expect(wrapper.get('[data-testid="assign-blocked"]').text()).not.toBe('')
   })
 
   it('fetches the pool with sponsor_id once a sponsor is picked', async () => {

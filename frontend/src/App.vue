@@ -16,7 +16,7 @@ const nav = [
   { to: '/', label: 'Overview' },
   { to: '/acquire', label: 'Acquire' },
   { to: '/screen', label: 'Screen' },
-  { to: '/audit', label: 'Audit' },
+  { to: '/audit', label: 'Registry' },
   { to: '/match', label: 'Match' },
   { to: '/dispatch', label: 'Dispatch' },
   { to: '/stats', label: 'Stats' },

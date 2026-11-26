@@ -26,3 +26,20 @@ export function checkLabel(status: unknown): string {
   const text = String(status ?? '').trim().toLowerCase()
   return text ? text.replaceAll('_', ' ') : 'unchecked'
 }
+
+/** Background-job status -> badge CSS class (same palette). */
+export function jobStatusClass(status: unknown): string {
+  switch (String(status ?? '')) {
+    case 'queued':
+      return 'status-new'
+    case 'running':
+    case 'cancel_requested':
+      return 'status-in-progress'
+    case 'succeeded':
+      return 'status-audited'
+    case 'failed':
+      return 'status-ignored'
+    default:
+      return 'check-unchecked'
+  }
+}

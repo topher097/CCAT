@@ -11,7 +11,7 @@ their canonical names (``ai_screening_notes``, never
 ``potential_anomoly``).
 """
 
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
@@ -39,6 +39,7 @@ from ccat.services.db_assignments import (
     assignment_state,
     child_sponsor,
 )
+from ccat.services.db_audit import sponsor_fully_matched
 
 if TYPE_CHECKING:
     from ccat.config import Config
@@ -75,13 +76,6 @@ def _entity(segment: str) -> str:
         raise ApiError(
             404, "not_found", f"unknown entity {segment!r}"
         ) from None
-
-
-def sponsor_fully_matched(row: dict[str, Any]) -> bool:
-    """Return True when the sponsor's angel quota is met (no quota: any angel)."""
-    quota = row.get("num_children")
-    assigned = row.get("num_angels_assigned") or 0
-    return assigned >= quota if quota is not None else assigned > 0
 
 
 def _public_row(entity: str, row: dict[str, Any]) -> dict[str, Any]:
@@ -179,8 +173,8 @@ async def _detail_payload(
         last_updated_at=existing.get("_last_updated_at"),
         audited_at=existing.get("audited_at"),
         diagnostics=diagnostics,
-        previous=NeighbourView(**previous) if previous else None,
-        next=NeighbourView(**next_row) if next_row else None,
+        previous=(NeighbourView.model_validate(previous) if previous else None),
+        next=NeighbourView.model_validate(next_row) if next_row else None,
     )
 
 
@@ -308,6 +302,71 @@ async def list_children(
         ignore=ignore,
         sponsored=sponsored,
         duplicate_pending=duplicate_pending,
+    )
+
+
+@router.get("/search", response_model=EntityListPage)
+async def search_registry(
+    request: Request,
+    repo: SeasonStoreRepository = Depends(season_repo),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    q: str = "",
+    entity: Literal["any", "family", "child", "sponsor"] = "any",
+    status: str | None = None,
+    ignore: bool | None = None,
+    sponsored: bool | None = None,
+    location: str = "any",
+    family_size_min: int | None = None,
+    family_size_max: int | None = None,
+) -> EntityListPage:
+    """Search all final_* stores at once — the registry page.
+
+    Args:
+        request: The current request (carries the config).
+        repo: The season-bound repository.
+        page: 1-based page number.
+        page_size: Page size (max 200).
+        q: All-text search with fuzzy fallback.
+        entity: Scope the search to one entity kind; "any" searches all.
+        status: Stored-status filter.
+        ignore: Ignore-flag filter.
+        sponsored: Children/families: has any sponsor; sponsors: fully
+            matched.
+        location: Canonical drop-off/pickup bucket ("hancock"/"calumet").
+        family_size_min: Minimum live-children count (families, children).
+        family_size_max: Maximum live-children count (families, children).
+
+    Returns:
+        One page of merged hits, each carrying ``entity``, ``key``,
+        ``label`` and (where computed) ``family_size``.
+    """
+    cfg: Config = request.app.state.cfg
+    hits, total = await db_audit.search_all(
+        repo,
+        cfg,
+        q=q,
+        entity=entity,
+        status=status,
+        ignore=ignore,
+        sponsored=sponsored,
+        location=location,
+        family_size_min=family_size_min,
+        family_size_max=family_size_max,
+    )
+    start = (page - 1) * page_size
+    items: list[dict[str, Any]] = []
+    for hit in hits[start : start + page_size]:
+        kind = hit["entity"]
+        item = _public_row(kind, hit["row"])
+        item["entity"] = kind
+        item["key"] = str(item.get(_KEY_COLUMN[kind]) or "")
+        item["label"] = hit["label"]
+        if hit["family_size"] is not None:
+            item["family_size"] = hit["family_size"]
+        items.append(item)
+    return EntityListPage(
+        items=items, total=total, page=page, page_size=page_size
     )
 
 

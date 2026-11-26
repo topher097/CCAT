@@ -89,6 +89,14 @@ function isOrphan(row: Record<string, unknown>): boolean {
 }
 
 /** Family badge text: state plus sponsored/total children counts. */
+/** Assignment-state indicator class: colour follows the match state. */
+function familyStateClass(row: Record<string, unknown>): string {
+  const state = String(row.assignment_state ?? 'unassigned')
+  if (state === 'assigned') return 'check-ok'
+  if (state === 'split' || state === 'partial') return 'check-warn'
+  return 'check-unchecked'
+}
+
 function familyStateBadge(row: Record<string, unknown>): string {
   const state = String(row.assignment_state ?? 'unassigned')
   const counts = `${Number(row.sponsored_children ?? 0)}/${Number(row.total_children ?? 0)}`
@@ -96,6 +104,14 @@ function familyStateBadge(row: Record<string, unknown>): string {
   if (state === 'partial') return `partial (${counts} sponsored)`
   if (state === 'assigned') return `all sponsored (${counts})`
   return `unassigned (${counts})`
+}
+
+/** Sponsor match indicator class: colour follows the quota state. */
+function sponsorMatchClass(row: Record<string, unknown>): string {
+  if (row.fully_matched === true) return 'check-ok'
+  return row.remaining === null || row.remaining === undefined
+    ? 'check-bad'
+    : 'check-warn'
 }
 
 /** Sponsor badge text: match state plus remaining quota. */
@@ -200,7 +216,7 @@ onMounted(() => {
   <section>
     <div class="status-line" style="justify-content: space-between">
       <div class="status-line">
-        <AuditBackLink to="/audit" label="Audit" />
+        <AuditBackLink to="/audit" label="Registry" />
         <h1 style="text-transform: capitalize">{{ props.segment }}</h1>
       </div>
     </div>
@@ -307,7 +323,7 @@ onMounted(() => {
             >
               {{ row.family_id }}
             </RouterLink>
-            <span v-else class="badge">orphan</span>
+            <span v-else class="badge status-ignored">orphan</span>
           </td>
           <td v-if="entity === 'child'">{{ row.angel_id || '—' }}</td>
           <td v-if="entity === 'child'">
@@ -329,17 +345,17 @@ onMounted(() => {
             </span>
           </td>
           <td>
-            <span v-if="row.ignore === true" class="badge">ignored</span>
-            <span v-if="isOrphan(row)" class="badge">orphan</span>
-            <span v-if="row.potential_duplicate === true" class="badge">
+            <span v-if="row.ignore === true" class="badge status-ignored">ignored</span>
+            <span v-if="isOrphan(row)" class="badge status-ignored">orphan</span>
+            <span v-if="row.potential_duplicate === true" class="badge check-warn">
               possible duplicate
             </span>
-            <span v-if="row.raw_missing === true" class="badge">
+            <span v-if="row.raw_missing === true" class="badge check-warn">
               raw missing
             </span>
             <span
               v-if="row.duplicate_pending === true"
-              class="badge"
+              class="badge check-warn"
               data-testid="duplicate-pending"
             >
               duplicate pending audit
@@ -348,7 +364,7 @@ onMounted(() => {
             <span
               v-if="entity === 'child'"
               class="badge"
-              :class="row.sponsored === true ? 'ok' : 'muted'"
+              :class="row.sponsored === true ? 'check-ok' : 'check-unchecked'"
               data-testid="sponsored-indicator"
             >
               {{ row.sponsored === true ? 'sponsored' : 'unsponsored' }}
@@ -356,6 +372,7 @@ onMounted(() => {
             <span
               v-if="entity === 'family' && row.assignment_state"
               class="badge"
+              :class="familyStateClass(row)"
               data-testid="family-state-indicator"
             >
               {{ familyStateBadge(row) }}
@@ -363,7 +380,7 @@ onMounted(() => {
             <span
               v-if="entity === 'sponsor' && row.fully_matched !== undefined"
               class="badge"
-              :class="row.fully_matched === true ? 'ok' : 'muted'"
+              :class="sponsorMatchClass(row)"
               data-testid="sponsor-match-indicator"
             >
               {{ sponsorMatchBadge(row) }}

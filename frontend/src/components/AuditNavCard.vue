@@ -62,7 +62,11 @@ const accessibleName = computed(() => `${props.label}, ${props.total} total`)
         class="audit-nav-card-breakdown-item"
       >
         <span class="audit-nav-card-breakdown-label">{{ status.label }}</span>
-        <span class="badge audit-nav-card-breakdown-count">{{ status.count }}</span>
+        <span
+          class="badge audit-nav-card-breakdown-count"
+          :class="`status-${status.key.replaceAll('_', '-')}`"
+          >{{ status.count }}</span
+        >
       </li>
     </ul>
 

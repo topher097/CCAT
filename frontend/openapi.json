@@ -4087,8 +4087,19 @@
       },
       "NeighbourView": {
         "additionalProperties": true,
-        "description": "One neighbouring entry in the audit list.\n\nAttributes:\n    key: The entry's key.\n    label: A human label for the entry.",
+        "description": "One neighbouring entry in the audit list.\n\nAttributes:\n    key: The entry's key.\n    label: A human label for the entry.\n    angel_id: The child's angel id (children only).",
         "properties": {
+          "angel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Angel Id"
+          },
           "key": {
             "title": "Key",
             "type": "string"
@@ -8498,6 +8509,188 @@
         "summary": "Overview",
         "tags": [
           "seasons"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/search": {
+      "get": {
+        "description": "Search all final_* stores at once \u2014 the registry page.\n\nArgs:\n    request: The current request (carries the config).\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: All-text search with fuzzy fallback.\n    entity: Scope the search to one entity kind; \"any\" searches all.\n    status: Stored-status filter.\n    ignore: Ignore-flag filter.\n    sponsored: Children/families: has any sponsor; sponsors: fully\n        matched.\n    location: Canonical drop-off/pickup bucket (\"hancock\"/\"calumet\").\n    family_size_min: Minimum live-children count (families, children).\n    family_size_max: Maximum live-children count (families, children).\n\nReturns:\n    One page of merged hits, each carrying ``entity``, ``key``,\n    ``label`` and (where computed) ``family_size``.",
+        "operationId": "search_registry_api_v1_seasons__season__search_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "entity",
+            "required": false,
+            "schema": {
+              "default": "any",
+              "enum": [
+                "any",
+                "family",
+                "child",
+                "sponsor"
+              ],
+              "title": "Entity",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ignore",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ignore"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sponsored",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sponsored"
+            }
+          },
+          {
+            "in": "query",
+            "name": "location",
+            "required": false,
+            "schema": {
+              "default": "any",
+              "title": "Location",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "family_size_min",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Family Size Min"
+            }
+          },
+          {
+            "in": "query",
+            "name": "family_size_max",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Family Size Max"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntityListPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search Registry",
+        "tags": [
+          "audit"
         ]
       }
     },

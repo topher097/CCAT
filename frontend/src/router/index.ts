@@ -72,7 +72,7 @@ export const routes: RouteRecordRaw[] = [
     path: '/audit',
     name: 'audit',
     component: AuditLandingView,
-    meta: { title: 'Audit' },
+    meta: { title: 'Registry' },
   },
   {
     path: '/audit/sponsors',

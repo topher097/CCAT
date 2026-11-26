@@ -120,3 +120,47 @@ export function getOverview(season: string): Promise<Overview> {
 export function getCurrentSeason(): Promise<SeasonView> {
   return api.get<SeasonView>('/api/v1/seasons/current')
 }
+
+export type SearchParams = {
+  page?: number
+  page_size?: number
+  q?: string
+  /** Scope the search to one entity kind; `any` searches all three. */
+  entity?: 'any' | Entity
+  status?: string | null
+  ignore?: boolean | null
+  sponsored?: boolean | null
+  /** Canonical drop-off/pickup bucket (`hancock`/`calumet`). */
+  location?: string
+  family_size_min?: number | null
+  family_size_max?: number | null
+}
+
+/** GET one cross-entity search page over all final_* tables. */
+export function searchRegistry(
+  season: string,
+  params: SearchParams = {},
+): Promise<EntityListPage> {
+  const query = new URLSearchParams()
+  if (params.page !== undefined) query.set('page', String(params.page))
+  if (params.page_size !== undefined)
+    query.set('page_size', String(params.page_size))
+  if (params.q) query.set('q', params.q)
+  if (params.entity && params.entity !== 'any') query.set('entity', params.entity)
+  if (params.status && params.status !== 'all')
+    query.set('status', params.status)
+  if (params.location && params.location !== 'any')
+    query.set('location', params.location)
+  for (const name of ['ignore', 'sponsored'] as const) {
+    const value = params[name]
+    if (value !== undefined && value !== null)
+      query.set(name, value ? 'true' : 'false')
+  }
+  for (const name of ['family_size_min', 'family_size_max'] as const) {
+    const value = params[name]
+    if (value !== undefined && value !== null)
+      query.set(name, String(value))
+  }
+  const suffix = query.size ? `?${query.toString()}` : ''
+  return api.get(`/api/v1/seasons/${seasonPath(season)}/search${suffix}`)
+}

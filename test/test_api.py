@@ -2396,6 +2396,175 @@ async def test_entity_detail_reports_filtered_neighbours(
     assert filtered.json()["next"] is None
 
 
+async def test_child_detail_neighbours_carry_angel_id(
+    app: Any, auditor: Client
+) -> None:
+    """Child neighbours carry the angel id for the prev/next chips."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                children=[
+                    child_row("c1", family_id=1, angel_id="1A"),
+                    child_row("c2", family_id=1, angel_id="1B"),
+                ],
+                families=[family_row(1)],
+            )
+    finally:
+        await engine.dispose()
+    first = await auditor.client.get("/api/v1/seasons/2026/children/c1")
+    body = first.json()
+    assert body["next"]["key"] == "c2"
+    assert body["next"]["angel_id"] == "1B"
+    second = await auditor.client.get("/api/v1/seasons/2026/children/c2")
+    assert second.json()["previous"]["angel_id"] == "1A"
+    # Non-child neighbours carry no angel id.
+    family = await auditor.client.get("/api/v1/seasons/2026/families/1")
+    assert family.json()["previous"] is None
+    assert family.json()["next"] is None
+
+
+async def _seed_registry(app: Any) -> None:
+    """Two families (one per location), three children, two sponsors."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                children=[
+                    child_row(
+                        "c1",
+                        family_id=1,
+                        angel_id="1A",
+                        assigned_sponsor_id=7,
+                    ),
+                    child_row("c2", family_id=2, angel_id="2A"),
+                    child_row(
+                        "c3", family_id=2, angel_id="2B", first_name="Lee"
+                    ),
+                ],
+                families=[
+                    family_row(1, gift_pickup_location="Hancock"),
+                    family_row(2, gift_pickup_location="Calumet"),
+                ],
+                sponsors=[
+                    sponsor_row(1, dropoff_location="Hancock"),
+                    sponsor_row(2, dropoff_location="Calumet"),
+                ],
+            )
+    finally:
+        await engine.dispose()
+
+
+async def test_registry_search_spans_all_entities(
+    app: Any, auditor: Client
+) -> None:
+    """The registry search returns families, then children, then sponsors."""
+    await _seed_registry(app)
+    response = await auditor.client.get("/api/v1/seasons/2026/search")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 7
+    assert [item["entity"] for item in body["items"]] == [
+        "family",
+        "family",
+        "child",
+        "child",
+        "child",
+        "sponsor",
+        "sponsor",
+    ]
+    assert [item["key"] for item in body["items"]] == [
+        "1",
+        "2",
+        "c1",
+        "c2",
+        "c3",
+        "1",
+        "2",
+    ]
+    assert body["items"][0]["label"] == "Jane Doe"
+    assert body["items"][0]["family_size"] == 1
+    assert body["items"][2]["family_size"] == 1
+    assert body["items"][1]["family_size"] == 2
+    # Sponsors carry no family size.
+    assert "family_size" not in body["items"][5]
+
+
+async def test_registry_search_filters(app: Any, auditor: Client) -> None:
+    """Entity scope, status, location, family size, sponsored filters."""
+    await _seed_registry(app)
+    base = "/api/v1/seasons/2026/search"
+
+    response = await auditor.client.get(f"{base}?entity=child")
+    assert [item["key"] for item in response.json()["items"]] == [
+        "c1",
+        "c2",
+        "c3",
+    ]
+
+    response = await auditor.client.get(f"{base}?entity=sponsor&status=new")
+    assert response.json()["total"] == 2
+
+    response = await auditor.client.get(f"{base}?location=hancock")
+    assert [item["key"] for item in response.json()["items"]] == [
+        "1",
+        "c1",
+        "1",
+    ]
+
+    response = await auditor.client.get(f"{base}?entity=child&location=calumet")
+    assert [item["key"] for item in response.json()["items"]] == ["c2", "c3"]
+
+    # Family size: families with two live children and their children;
+    # sponsors are never size-filtered.
+    response = await auditor.client.get(f"{base}?family_size_min=2")
+    assert [item["key"] for item in response.json()["items"]] == [
+        "2",
+        "c2",
+        "c3",
+        "1",
+        "2",
+    ]
+    response = await auditor.client.get(
+        f"{base}?entity=family&family_size_max=1"
+    )
+    assert [item["key"] for item in response.json()["items"]] == ["1"]
+
+    # Sponsored: children by assignment, families by any assigned child,
+    # sponsors by full quota match.
+    response = await auditor.client.get(f"{base}?sponsored=true")
+    assert [item["key"] for item in response.json()["items"]] == ["1", "c1"]
+    response = await auditor.client.get(f"{base}?sponsored=false")
+    assert [item["key"] for item in response.json()["items"]] == [
+        "2",
+        "c2",
+        "c3",
+        "1",
+        "2",
+    ]
+
+
+async def test_registry_search_fuzzy_and_pagination(
+    app: Any, auditor: Client
+) -> None:
+    """The registry search reuses the lists' fuzzy query and pagination."""
+    await _seed_registry(app)
+    base = "/api/v1/seasons/2026/search"
+
+    response = await auditor.client.get(f"{base}?q=kido")
+    assert [item["key"] for item in response.json()["items"]] == ["c1", "c2"]
+
+    response = await auditor.client.get(f"{base}?page=2&page_size=3")
+    body = response.json()
+    assert body["page"] == 2
+    assert body["total"] == 7
+    assert [item["key"] for item in body["items"]] == ["c2", "c3", "1"]
+
+
 async def test_duplication_detail_reports_neighbours(
     app: Any, auditor: Client
 ) -> None:

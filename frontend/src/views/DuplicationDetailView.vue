@@ -466,6 +466,14 @@ function stateLabel(member: DuplicationMember): string {
   return 'discarded'
 }
 
+/** Member-state badge class: colour follows the adjudication state. */
+function memberStateClass(member: DuplicationMember): string {
+  const state = effectiveState(member)
+  if (state === 'surviving') return 'status-audited'
+  if (state === 'released') return 'status-new'
+  return 'status-ignored'
+}
+
 /** Link to a released member's own row page. */
 function rowUrl(member: DuplicationMember): string {
   return `/audit/${SEGMENT[entity.value]}/${encodeURIComponent(member.row_key)}`
@@ -729,7 +737,11 @@ onMounted(() => {
             Angel ID {{ detail.group_key }}
           </h1>
           <h1 v-else style="margin: 0">Group {{ detail.group_key }}</h1>
-          <span v-if="isContest" class="badge" data-testid="kind-label">
+          <span
+            v-if="isContest"
+            class="badge check-warn"
+            data-testid="kind-label"
+          >
             {{ DUPLICATION_KIND_LABELS.angel_claim_conflict }}
           </span>
           <span class="badge">{{ detail.entity }}</span>
@@ -815,10 +827,16 @@ onMounted(() => {
               >
                 <div>{{ member.zite_record_id }}</div>
                 <div class="muted">{{ formatTime(member.created) }}</div>
-                <div data-testid="member-state">{{ stateLabel(member) }}</div>
+                <div data-testid="member-state">
+                  <span
+                    class="badge"
+                    :class="memberStateClass(member)"
+                    >{{ stateLabel(member) }}</span
+                  >
+                </div>
                 <span
                   v-if="member.survivor"
-                  class="badge"
+                  class="badge check-ok"
                   data-testid="suggested-survivor"
                   :data-member="member.zite_record_id"
                 >
@@ -856,7 +874,7 @@ onMounted(() => {
                 </span>
                 <span
                   v-if="pending.has(member.zite_record_id)"
-                  class="badge"
+                  class="badge check-warn"
                   data-testid="pending-decision"
                 >
                   unsaved
@@ -968,10 +986,10 @@ onMounted(() => {
             >
               <td>
                 {{ labelOf(field) }}
-                <span v-if="conflicts(field)" class="badge">conflict</span>
+                <span v-if="conflicts(field)" class="badge check-bad">conflict</span>
                 <span
                   v-if="currentDiffers(field)"
-                  class="badge"
+                  class="badge check-warn"
                   data-testid="diff-marker"
                 >
                   differs

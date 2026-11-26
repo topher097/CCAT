@@ -1952,6 +1952,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/seasons/{season}/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Registry
+         * @description Search all final_* stores at once — the registry page.
+         *
+         *     Args:
+         *         request: The current request (carries the config).
+         *         repo: The season-bound repository.
+         *         page: 1-based page number.
+         *         page_size: Page size (max 200).
+         *         q: All-text search with fuzzy fallback.
+         *         entity: Scope the search to one entity kind; "any" searches all.
+         *         status: Stored-status filter.
+         *         ignore: Ignore-flag filter.
+         *         sponsored: Children/families: has any sponsor; sponsors: fully
+         *             matched.
+         *         location: Canonical drop-off/pickup bucket ("hancock"/"calumet").
+         *         family_size_min: Minimum live-children count (families, children).
+         *         family_size_max: Maximum live-children count (families, children).
+         *
+         *     Returns:
+         *         One page of merged hits, each carrying ``entity``, ``key``,
+         *         ``label`` and (where computed) ``family_size``.
+         */
+        get: operations["search_registry_api_v1_seasons__season__search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/seasons/{season}/sponsors": {
         parameters: {
             query?: never;
@@ -4221,8 +4260,11 @@ export interface components {
          *     Attributes:
          *         key: The entry's key.
          *         label: A human label for the entry.
+         *         angel_id: The child's angel id (children only).
          */
         NeighbourView: {
+            /** Angel Id */
+            angel_id?: string | null;
             /** Key */
             key: string;
             /**
@@ -6530,6 +6572,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Overview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_registry_api_v1_seasons__season__search_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                q?: string;
+                entity?: "any" | "family" | "child" | "sponsor";
+                status?: string | null;
+                ignore?: boolean | null;
+                sponsored?: boolean | null;
+                location?: string;
+                family_size_min?: number | null;
+                family_size_max?: number | null;
+            };
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EntityListPage"];
                 };
             };
             /** @description Validation Error */

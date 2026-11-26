@@ -59,6 +59,7 @@ Final: full pytest + frontend build + vitest + pre-commit at settled state; plan
 
 - [x] 0. Plan file created (this file)
 - [x] 1. Root-cause duplicate submissions everywhere (WS-A) — bug verdict logged; fix = submissions removal + sponsor key fix
+
 - [x] 2. Remove duplicate/DOB lists; add fuzzy search with filters (done: landing + editor sections removed; all-text fuzzy matches_query; ignore/sponsored/duplicate_pending filters)
 - [x] 3. Sponsorship indicators in audit lists (done: child sponsored, family assignment_state + counts, sponsor fully_matched/remaining + badges)
 - [x] 4. Fix "Not duplicate" deselection (done: `clear` decision end-to-end — repo trail row, `_decision_for` None, `_clear_member` unignore/flag-restore/family-row undo, `clear_duplication_state`; UI toggle queues clear; tests backend+frontend)
@@ -91,3 +92,124 @@ Final: full pytest + frontend build + vitest + pre-commit at settled state; plan
 - Fuzzy search design: server-side, every non-`_` string column, substring first, difflib token-ratio ≥ 0.75 fallback (repo precedent in scripts/dob_check); no new frontend dependency; filters (ignore/sponsored/duplicate_pending) are server-side list params mirrored in the URL.
 - Sponsorship indicators: computed server-side in `_list` extras (child `sponsored`, family `assignment_state` + `sponsored_children`/`total_children` via db_assignments helpers, sponsor `fully_matched`/`remaining`); badges rendered per segment in AuditListView.
 - Delegation note: fixer lanes failed twice with malformed output and zero writes; Lane A/B/C scopes were implemented directly by the orchestrator with explorer-supplied root causes. Final lint/typecheck delegated once more.
+
+---
+
+# Round 2 — Registry, cross-table search, indicator colors, match pool
+
+User request (2026-11-25), four changes, then three more. Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked.
+
+## Tasks
+
+- [x] 11. Rename "Audit" page → "Registry" (labels only; `/audit` route paths unchanged).
+- [x] 12. Registry page: search across all final_* tables under the nav cards — filters (audit status, drop-off location, family size, entity scope family/children/sponsors), fuzzy q, every result links to its detail page.
+- [x] 13. All indicators on every page colored by state (canonical `.badge` + `status-*`/`check-*` pattern of the audited/email/address indicators).
+- [x] 14. Match page: pool visible under filters at all times; assignment stays blocked until a sponsor is chosen.
+- [x] 15. Prev/next chips include the child's Angel ID.
+- [x] 16. Second "Mark audited" button underneath the entry-information table.
+- [x] 17. Per-session checkbox "progress to next on audit" (default TRUE) next to the Mark-audited buttons; auto-advance after a successful audit; previous objects stay in Back history.
+
+## Design
+
+### 11 — Rename surface (labels only)
+| site | change |
+|---|---|
+| `frontend/src/App.vue:19` | nav label `'Audit'` → `'Registry'` |
+| `frontend/src/router/index.ts:75` | `meta.title` `'Audit'` → `'Registry'` (drives document.title :275-276) |
+| `frontend/src/views/AuditLandingView.vue:108` | `<h1>Audit</h1>` → `<h1>Registry</h1>` |
+| `frontend/src/views/AuditListView.vue:203` | `<AuditBackLink … label="Audit">` → `label="Registry"` |
+| `frontend/src/views/DuplicationListView.vue:152` | same |
+Keep: `/audit` route paths + route names, all `Audit*.vue` file/component names, every per-entity audit-action string (Mark audited, Audit status, Re-audit, …), `JobDetailView.vue:195` ("Audit rows from the new snapshot" = the action). No tests assert the label.
+
+### 12 — Cross-table search
+Backend:
+- Service `db_audit.search_all(...)` next to `ordered_rows` (db_audit.py:225). Loads the three stores via `repo.final_rows` (repositories.py:614-647); filters in Python mirroring `_list` (routes/audit.py:314-446): `matches_query` fuzzy (db_audit.py:193-222), exact `status`, `ignore`, `sponsored` (child `assigned_sponsor_id`; family `assignment_state != "unassigned"`; sponsor `sponsor_fully_matched` audit.py:80-84).
+- Params: `q`, `entity` (`any|family|child|sponsor`), `status`, `ignore`, `sponsored`, `location` (`any|hancock|calumet`), `family_size_min`, `family_size_max`, `page`, `page_size`. No `duplicate_pending` (lists already offer it; group lookup out of scope).
+- `location`: bucket via `canonical_location(value, cfg.location_groups)` (match.py:109-126) — family on `gift_pickup_location` (models.py:236), sponsor on `dropoff_location` (models.py:281), child via its family's pickup.
+- `family_size` = live non-ignored child count, `family_child_counts()` (repositories.py:649-669); applies to families and to children (their family's count); sponsors unaffected. Decorate items with the count.
+- Response: `EntityListPage` shape (dto.py:147-153); each item = `_public_row` merged with `entity` (`family|child|sponsor`), `key` (`_KEY_COLUMN` audit.py:56-60), `label` (`row_label` db_audit.py:255-275). Order: family block → child block → sponsor block, each by `audit_sort_key`; page slices the combined list; `total` = combined count.
+- Route: `GET /seasons/{season}/search` in `routes/audit.py` (router prefix already `/seasons/{season}` :46).
+Frontend:
+- `frontend/src/api/audit.ts`: `searchRegistry(season, params)`.
+- `AuditLandingView.vue`: search section under the nav cards — q input, entity select (All/Families/Children/Sponsors), status select, location select (options match MatchView.vue:1105-1113), family-size min/max, ignore + sponsored checkboxes. URL-synced filters, same pattern as AuditListView (:58,122-132).
+- Results table: entity badge, label, key, `StatusBadge`, sponsored/ignored badges; each row links to its detail (`/audit/families/{family_id}`, `/audit/children/{zite_record_id}`, `/audit/sponsors/{sponsor_id}` — detailTo pattern AuditListView.vue:77-85). Simple prev/next pagination.
+- Vitest: results render with correct links; params serialize.
+
+### 13 — Indicator colors (canonical pattern)
+`.badge` pill + one state class: `status-*` for audit vocabulary (base.css:132-154: new blue / in-progress amber / needs-clarification orange / ignored red / audited green), `check-*` via `checkClass()` (utils/status.ts:12) for boolean/validation (ok green, warn amber, bad red, unchecked grey).
+CSS gaps to fix first: add `.status-pending` (amber) + `.status-resolved` (green) to base.css; make `:data-status` job badges colored (JobsListView.vue:162-164, JobDetailView.vue:307,429) — map queued→new, running/cancel_requested→in-progress, succeeded→audited, failed→ignored(red), cancelled→unchecked.
+Sweep (replace dead `.ok`/`.muted` classes too):
+- `AuditListView.vue`: orphan/ignored → `status-ignored` (:310,:332-333); possible-duplicate/raw-missing/duplicate-pending → `check-warn` (:334-346); sponsored → `check-ok`, unsponsored → `check-unchecked` (:350-352); assignment_state assigned/partial+split/unassigned → `check-ok`/`check-warn`/`check-unchecked` (:358-361); fully-matched/remaining/unmatched → `check-ok`/`check-warn`/`check-bad` (:365-367).
+- `AuditNavCard.vue:64-65`: status-count badge gets `status-*` (pass slug prop).
+- `HomeView.vue`: stale→`check-bad`, fresh→`check-ok` (:126-129); status counts → `status-*` badges (:152-161); job status (:243).
+- `ClarifyListView.vue:143,146`: yes→`check-ok`, no→`check-unchecked`.
+- `DuplicationListView.vue`: conflict kind→`check-warn` (:224-226); pending/resolved colored via new CSS.
+- `DuplicationDetailView.vue`: member state→`status-*` (:818); survivor→`check-ok` (:819-826); unsaved decision→`check-warn` (:857-863); conflict→`check-bad` (:971); differs→`check-warn` (:972-978); kind→`check-warn` (:732).
+- `FamilyCard.vue`: assignment_state→`check-*` (:114-116); Held→`check-warn` (:122-124).
+- `ChildSummary.vue`: special needs→`check-warn` (:88); sponsor assigned→`check-ok` (:89-94).
+- `SponsorCardList.vue`: elevated budget→`check-warn`, physical packet→`check-unchecked` (:364-369).
+- `AdminView.vue:217` dev user→`check-warn`; `SettingsLayout.vue:48` unsaved→`check-warn`.
+- `EntityEditor.vue` :607 control→`check-unchecked`, :610-614 differs→`check-warn` — done by the task-16/17 lane to avoid file collision.
+Untouched (informational, not state): DuplicationDetailView:735, ChildSummary:79, SettingsIndexView:42, StatsView, DispatchSponsorTable, SponsorEmailModal, MatchView chips.
+Guard tests: list.test.ts:197-199,222; sponsor-card-list.test.ts:131,151.
+
+### 14 — Match pool always visible
+`MatchView.vue`: `load()` (:544-551) drops the `sponsorId === null` empty-branch — always `fetchPool()` (backend already supports sponsor-less: routes/manual_match.py:155, db_manual_match.py:601-654; order family_id, no fit scoring until sponsor picked). Template :1182-1196: `pick-sponsor-first` block becomes a muted hint shown when `sponsorId === null` above the unguarded loading/error/empty/grid chain; pagination guard :1213 removed; poll guard :934 unguarded. Assign stays blocked — `assignBlockedReason` (:231-241) already returns 'Choose a sponsor.'; button `:disabled` and `assign-blocked` text unchanged.
+Tests: rewrite match.test.ts:618-634 (pool fetches without sponsor_id, cards render); drop :656 pick-sponsor-first assert; add: assign disabled + blocked reason with no sponsor.
+
+### 15 — Angel ID in prev/next
+Backend: `NeighbourView` (dto.py:195-196) gains `angel_id: str | None = None`; `db_audit.neighbours` fills it from the child row (`final_child.angel_id`, models.py:151); None for family/sponsor. Frontend: chips (EntityEditor.vue:704-726) render `← Previous {label} · Angel {angel_id}` / `Next {label} · Angel {angel_id}` when present.
+
+### 16 — Bottom Mark audited
+`EntityEditor.vue` save row (:682-702, directly under the Baseline-vs-current table): second button `data-testid="mark-audited-bottom"`, same `@click="toggleAudited"`, same `:disabled` expression (:473-475), same `:title="auditHint"`, same label logic (:480).
+
+### 17 — "Progress to next on audit"
+- Setting: module-scope `const autoAdvance = ref(true)` in EntityEditor.vue (precedent useDirtyGuard.ts:6; survives route remounts = per-session; no persistence wanted).
+- Checkbox bound to both Mark-audited buttons (header :469-481 + bottom :682-702), label `Progress to next on audit`, `data-testid="auto-advance"`; hidden when `props.embedded`.
+- Advance: in `persist()` success path only when the save carried `status: 'audited'` (not undo, not plain save): `setDirty(false)` + `await nextTick()` then `router.push(neighbourTo(detail.next.key))` (:289-293). `push` (not replace) keeps every visited entity in Back history — required.
+- Edge cases: failure/conflict paths (:318-332) abort before advance; `detail.next === null` → stay; embedded popups never advance; dirty watcher (useDirtyGuard.ts:17) defused by `setDirty(false)` before push so router guard (router/index.ts:243-248) never fires.
+- Tests (editor.test.ts, audit-nav.test.ts): advance on audited save; no advance when unchecked; no advance on conflict; no advance on last item; no confirm dialog (dirty cleared); push not replace.
+
+## Lanes
+
+Pass 1 (parallel, disjoint files):
+- **R2-A backend (fixer)**: `db_audit.py` (search_all + neighbours angel_id), `routes/audit.py` (search route), `dto.py` (NeighbourView.angel_id), focused pytest (test/test_api.py, test/test_services.py).
+- **R2-B frontend (fixer)**: rename (5 sites), MatchView pool + match.test.ts, Registry search UI + api fn + vitest. Mocks the fixed contract above.
+
+Pass 2 (after Pass 1 reconciled):
+- **R2-C indicators (designer)**: §13 sweep + base.css additions; must NOT touch EntityEditor.vue.
+- **R2-D editor (fixer)**: EntityEditor tasks 15-17 + its two badge lines + tests.
+
+Pass 3 (orchestrator): reconcile writers → full pytest, frontend build + vitest, ruff; export_openapi + `npm run gen:api` (new endpoint); plan + commit.
+
+## Round-2 outcome / verification
+
+- Delegation: all three fixer lanes (R2-A twice, R2-B once) failed with the
+  same malformed `tool_call` output and zero writes — same failure mode as
+  round 1. Orchestrator implemented all lanes directly; 5 explorer recons
+  did succeed and drove the guide. Conclusion stands: use explorer for
+  recon, implement directly in this environment.
+- 12: new `GET /seasons/{season}/search` (`db_audit.search_all`) — filters
+  q/entity/status/ignore/sponsored/location/family_size; hits ordered
+  family→child→sponsor by `audit_sort_key`; items carry entity/key/label/
+  family_size. Registry search section added under the landing cards,
+  URL-synced, loads only once the user searches.
+- 13: `.status-pending`/`.status-resolved` added; `check-*` classes now
+  also color `.flag` spans; `jobStatusClass()` maps job states onto the
+  same palette; sweep applied across AuditListView, AuditNavCard,
+  HomeView, JobsListView, JobDetailView, ClarifyListView,
+  DuplicationListView/DetailView, FamilyCard, ChildSummary,
+  SponsorCardList, AdminView, SettingsLayout, EntityEditor. Dead
+  `.ok`/`.muted` classes replaced with real classes.
+- 14: pool loads/fetches/paginates/polls without a sponsor; muted
+  "choose a sponsor" hint stays; assign remains blocked (existing
+  `assignBlockedReason`).
+- 15-17: `NeighbourView.angel_id` (children) rendered in the chips; second
+  `mark-audited-bottom` button in the save row; `useAutoAdvance` module
+  ref (default TRUE, per-session) with checkboxes by both buttons;
+  advance = `setDirty(false)` + `nextTick` + `router.push` (Back history
+  preserved), gated on success/!embedded/next-exists.
+- Evidence: full pytest 968 passed; frontend `npm run build` (vue-tsc +
+  vite) ok; vitest 277 passed; `ruff check src/` clean; `ty` 0 errors on
+  the three touched backend files (pyproject unknown-rule warning pre-exists);
+  openapi.json + schema.d.ts regenerated.

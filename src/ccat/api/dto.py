@@ -159,10 +159,12 @@ class NeighbourView(StrictModel):
     Attributes:
         key: The entry's key.
         label: A human label for the entry.
+        angel_id: The child's angel id (children only).
     """
 
     key: str
     label: str = ""
+    angel_id: str | None = None
 
 
 class EntityDetail(StrictModel):

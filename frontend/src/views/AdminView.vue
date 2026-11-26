@@ -214,7 +214,7 @@ onMounted(() => void load())
           <tr v-for="user in users" :key="user.id">
             <td>
               {{ user.username }}
-              <span v-if="user.dev_no_password" class="badge">dev</span>
+              <span v-if="user.dev_no_password" class="badge check-warn">dev</span>
             </td>
             <td>
               <label>

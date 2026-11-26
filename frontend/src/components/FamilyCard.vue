@@ -63,6 +63,19 @@ const stateLabel = computed(
   () => STATE_LABELS[props.card.assignment_state] ?? props.card.assignment_state,
 )
 
+/** Assignment-state badge class: colour follows the match state. */
+const stateClass = computed(() => {
+  switch (props.card.assignment_state) {
+    case 'assigned':
+      return 'check-ok'
+    case 'partial':
+    case 'split':
+      return 'check-warn'
+    default:
+      return 'check-unchecked'
+  }
+})
+
 // Classes come from base.css (.badge.status-*); unknown values stay neutral.
 const KNOWN_STATUSES = ['new', 'in_progress', 'needs_clarification', 'ignored', 'audited']
 
@@ -111,7 +124,11 @@ const hold = computed(() =>
           >
             audit: {{ auditLabel }}
           </span>
-          <span class="badge" data-testid="assignment-state">
+          <span
+            class="badge"
+            :class="stateClass"
+            data-testid="assignment-state"
+          >
             {{ stateLabel }}
           </span>
         </span>
@@ -119,7 +136,11 @@ const hold = computed(() =>
       <p class="muted family-meta">
         {{ card.gift_pickup_location || 'location unknown' }} ·
         {{ card.family_size }} children · {{ card.assigned_count }} assigned
-        <span v-if="card.hold?.held" class="badge" data-testid="held-badge">
+        <span
+          v-if="card.hold?.held"
+          class="badge check-warn"
+          data-testid="held-badge"
+        >
           Held
         </span>
       </p>
