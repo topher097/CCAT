@@ -286,6 +286,54 @@ describe('duplication detail', () => {
     )
   })
 
+  it('deselects a saved not_duplicate by queueing a clear decision', async () => {
+    const fetchMock = mockRoutes([
+      (url, init) => {
+        if (init.method === 'POST' && url.endsWith('/members/r1'))
+          return jsonResponse(200, detail([member({ decision: null })]))
+        if (url.includes('/duplications/g1'))
+          return jsonResponse(
+            200,
+            detail([
+              member({
+                decision: 'not_duplicate',
+                assigned_id: '1B',
+                decided_by: 'cmendres',
+              }),
+            ]),
+          )
+        return undefined
+      },
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    // The checkbox reflects the stored decision and starts unchecked-pending.
+    const box = wrapper.get('[data-testid="not-duplicate"]')
+    await box.trigger('click')
+    await flushPromises()
+
+    // Clicking the stored decision queues a clear (checked -> unchecked).
+    expect(
+      (wrapper.get('[data-testid="not-duplicate"]').element as HTMLInputElement)
+        .checked,
+    ).toBe(false)
+    await wrapper.get('[data-testid="save"]').trigger('click')
+    await flushPromises()
+
+    const post = fetchMock.mock.calls.find(
+      (call) => (call[1] as RequestInit).method === 'POST',
+    )
+    expect(bodyOf(post as unknown[])).toEqual({
+      decision: 'clear',
+      confirm: true,
+      expected_version: 3,
+    })
+  })
+
   it('confirms ignore before holding it, and saves nothing on cancel', async () => {
     const fetchMock = mockRoutes([
       (url, init) => {

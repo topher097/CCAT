@@ -13,6 +13,7 @@ versions so a stale editor cannot silently overwrite (§4.4).
 """
 
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any
 
 from ccat.audit import AuditError
@@ -190,29 +191,34 @@ def audit_sort_key(entity: str, row: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def matches_query(row: dict[str, Any], q: str) -> bool:
-    """Case-insensitive substring match on name/email/id (§5.2).
+    """Case-insensitive all-text match with a fuzzy fallback (§5.2).
+
+    Substring over every text value of the row; when nothing contains
+    the query, each whitespace-separated token is compared with
+    ``difflib.SequenceMatcher`` so typos and near-misses still match.
 
     Args:
         row: The final row.
         q: The search query.
 
     Returns:
-        True when any searchable field contains the query.
+        True when any text value contains the query or is similar to it.
     """
     needle = q.strip().lower()
     if not needle:
         return True
-    haystack = [
-        row.get("first_name"),
-        row.get("last_name"),
-        row.get("primary_email"),
-        row.get("email"),
-        row.get("zite_record_id"),
-        row.get("family_id"),
-        row.get("sponsor_id"),
+    values = [
+        str(value).lower()
+        for key, value in row.items()
+        if not key.startswith("_") and value is not None
     ]
+    for value in values:
+        if needle in value:
+            return True
     return any(
-        value is not None and needle in str(value).lower() for value in haystack
+        SequenceMatcher(None, needle, token).ratio() >= 0.75
+        for value in values
+        for token in value.split()
     )
 
 

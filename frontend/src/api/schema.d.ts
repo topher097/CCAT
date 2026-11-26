@@ -564,10 +564,13 @@ export interface paths {
          *         repo: The season-bound repository.
          *         page: 1-based page number.
          *         page_size: Page size (max 200).
-         *         q: Search on name/email/id.
+         *         q: All-text search with fuzzy fallback.
          *         status: Stored-status filter.
          *         family_id: Exact family filter; the search query only ever
          *             matches a family id as a substring.
+         *         ignore: Ignore-flag filter.
+         *         sponsored: Assigned-sponsor filter.
+         *         duplicate_pending: Unresolved-duplicate filter.
          *
          *     Returns:
          *         One page of rows.
@@ -1261,6 +1264,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/seasons/{season}/duplications/manual": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark Manual Duplicate
+         * @description Mark one entity row as a manual duplicate of another (auditor).
+         *
+         *     Args:
+         *         body: The entity and the two rows' audit keys.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The created group's id and group key.
+         *
+         *     Raises:
+         *         ApiError: 422 for an unknown row, a self-pair, an ignored row,
+         *             or a row already pending in another group.
+         */
+        post: operations["mark_manual_duplicate_api_v1_seasons__season__duplications_manual_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/seasons/{season}/duplications/{group_id}": {
         parameters: {
             query?: never;
@@ -1441,8 +1477,11 @@ export interface paths {
          *         repo: The season-bound repository.
          *         page: 1-based page number.
          *         page_size: Page size (max 200).
-         *         q: Search on name/email/id.
+         *         q: All-text search with fuzzy fallback.
          *         status: Stored-status filter.
+         *         ignore: Ignore-flag filter.
+         *         sponsored: Any-sponsored-child filter.
+         *         duplicate_pending: Unresolved-duplicate filter.
          *
          *     Returns:
          *         One page of rows.
@@ -1929,8 +1968,11 @@ export interface paths {
          *         repo: The season-bound repository.
          *         page: 1-based page number.
          *         page_size: Page size (max 200).
-         *         q: Search on name/email/id.
+         *         q: All-text search with fuzzy fallback.
          *         status: Stored-status filter.
+         *         ignore: Ignore-flag filter.
+         *         sponsored: Fully-matched filter.
+         *         duplicate_pending: Unresolved-duplicate filter.
          *
          *     Returns:
          *         One page of rows.
@@ -2892,7 +2934,7 @@ export interface components {
          * @description One duplication-audit decision.
          *
          *     Attributes:
-         *         decision: "not_duplicate" or "ignore".
+         *         decision: "not_duplicate", "ignore", or "clear" (undo).
          *         confirm: Must be True; anything else refuses the action.
          *         expected_version: The caller's expected ``row_version``.
          */
@@ -2903,7 +2945,7 @@ export interface components {
              * Decision
              * @enum {string}
              */
-            decision: "not_duplicate" | "ignore";
+            decision: "not_duplicate" | "ignore" | "clear";
             /** Expected Version */
             expected_version?: number | null;
         };
@@ -3135,7 +3177,6 @@ export interface components {
          *         row: The effective stored row (canonical names) plus
          *             ``row_version`` / ``last_updated_by`` / ``last_updated_at``.
          *         baseline: The prepared baseline values for diffing.
-         *         submissions: The entity's raw duplicate-group submissions.
          *         status: The stored status.
          *         row_version: Optimistic-concurrency version (If-Match value).
          *         last_updated_by: Latest editor.
@@ -3174,10 +3215,6 @@ export interface components {
             row_version: number;
             /** Status */
             status?: string | null;
-            /** Submissions */
-            submissions?: {
-                [key: string]: unknown;
-            }[];
         } & {
             [key: string]: unknown;
         };
@@ -3656,6 +3693,26 @@ export interface components {
             };
             /** Sponsor Id */
             sponsor_id: number;
+        };
+        /**
+         * ManualDuplicateRequest
+         * @description Mark one entity row as a manual duplicate of another.
+         *
+         *     Attributes:
+         *         entity: "child", "family", or "sponsor".
+         *         record_id: The marked row's audit key.
+         *         partner_id: The suspected duplicate's audit key.
+         */
+        ManualDuplicateRequest: {
+            /**
+             * Entity
+             * @enum {string}
+             */
+            entity: "child" | "family" | "sponsor";
+            /** Partner Id */
+            partner_id: string;
+            /** Record Id */
+            record_id: string;
         };
         /**
          * ManualHoldListPage
@@ -4870,6 +4927,9 @@ export interface operations {
                 q?: string;
                 status?: string | null;
                 family_id?: number | null;
+                ignore?: boolean | null;
+                sponsored?: boolean | null;
+                duplicate_pending?: boolean | null;
             };
             header?: never;
             path: {
@@ -5679,6 +5739,41 @@ export interface operations {
             };
         };
     };
+    mark_manual_duplicate_api_v1_seasons__season__duplications_manual_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualDuplicateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_duplication_api_v1_seasons__season__duplications__group_id__get: {
         parameters: {
             query?: {
@@ -5843,6 +5938,9 @@ export interface operations {
                 page_size?: number;
                 q?: string;
                 status?: string | null;
+                ignore?: boolean | null;
+                sponsored?: boolean | null;
+                duplicate_pending?: boolean | null;
             };
             header?: never;
             path: {
@@ -6452,6 +6550,9 @@ export interface operations {
                 page_size?: number;
                 q?: string;
                 status?: string | null;
+                ignore?: boolean | null;
+                sponsored?: boolean | null;
+                duplicate_pending?: boolean | null;
             };
             header?: never;
             path: {

@@ -667,36 +667,6 @@ describe('entity editor', () => {
       'Mark audited',
     )
   })
-
-  it('lists duplicate submissions', async () => {
-    mockRoutes([
-      (url) =>
-        url.includes('/children/c1')
-          ? jsonResponse(
-              200,
-              childDetail({
-                submissions: [
-                  {
-                    zite_record_id: 'c1',
-                    first_name: 'Ann',
-                    primary_email: 'ann@example.org',
-                    dob: '2018-01-01',
-                  },
-                  {
-                    zite_record_id: 'c9',
-                    first_name: 'Ann',
-                    primary_email: 'ann@example.org',
-                    dob: '2018-01-01',
-                  },
-                ],
-              }),
-            )
-          : undefined,
-    ])
-    const wrapper = await mountEditor('child')
-    await flushPromises()
-    expect(wrapper.get('[data-testid="submissions"]').findAll('tbody tr')).toHaveLength(2)
-  })
 })
 
 const SPONSOR_ROW = {

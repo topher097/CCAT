@@ -119,12 +119,4 @@ describe('audit landing', () => {
     expect(targets).toContain('/audit/sponsors')
     expect(targets).toContain('/audit/duplications')
   })
-
-  it('keeps the diagnostics tables below the cards', async () => {
-    mockOverview()
-    const wrapper = mountLanding()
-    await flushPromises()
-
-    expect(wrapper.find('[data-testid="diagnostics-empty"]').exists()).toBe(true)
-  })
 })

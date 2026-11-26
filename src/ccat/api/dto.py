@@ -172,7 +172,6 @@ class EntityDetail(StrictModel):
         row: The effective stored row (canonical names) plus
             ``row_version`` / ``last_updated_by`` / ``last_updated_at``.
         baseline: The prepared baseline values for diffing.
-        submissions: The entity's raw duplicate-group submissions.
         status: The stored status.
         row_version: Optimistic-concurrency version (If-Match value).
         last_updated_by: Latest editor.
@@ -187,7 +186,6 @@ class EntityDetail(StrictModel):
     key: str
     row: dict[str, Any]
     baseline: dict[str, Any]
-    submissions: list[dict[str, Any]] = Field(default_factory=list)
     status: str | None = None
     row_version: int
     last_updated_by: str | None = None
@@ -350,16 +348,32 @@ class DuplicationDecisionRequest(StrictModel):
     """One duplication-audit decision.
 
     Attributes:
-        decision: "not_duplicate" or "ignore".
+        decision: "not_duplicate", "ignore", or "clear" (undo).
         confirm: Must be True; anything else refuses the action.
         expected_version: The caller's expected ``row_version``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    decision: Literal["not_duplicate", "ignore"]
+    decision: Literal["not_duplicate", "ignore", "clear"]
     confirm: bool
     expected_version: int | None = None
+
+
+class ManualDuplicateRequest(StrictModel):
+    """Mark one entity row as a manual duplicate of another.
+
+    Attributes:
+        entity: "child", "family", or "sponsor".
+        record_id: The marked row's audit key.
+        partner_id: The suspected duplicate's audit key.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity: Literal["child", "family", "sponsor"]
+    record_id: str
+    partner_id: str
 
 
 class DuplicationAuditRequest(StrictModel):

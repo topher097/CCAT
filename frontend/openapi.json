@@ -1328,7 +1328,7 @@
       },
       "DuplicationDecisionRequest": {
         "additionalProperties": false,
-        "description": "One duplication-audit decision.\n\nAttributes:\n    decision: \"not_duplicate\" or \"ignore\".\n    confirm: Must be True; anything else refuses the action.\n    expected_version: The caller's expected ``row_version``.",
+        "description": "One duplication-audit decision.\n\nAttributes:\n    decision: \"not_duplicate\", \"ignore\", or \"clear\" (undo).\n    confirm: Must be True; anything else refuses the action.\n    expected_version: The caller's expected ``row_version``.",
         "properties": {
           "confirm": {
             "title": "Confirm",
@@ -1337,7 +1337,8 @@
           "decision": {
             "enum": [
               "not_duplicate",
-              "ignore"
+              "ignore",
+              "clear"
             ],
             "title": "Decision",
             "type": "string"
@@ -1725,7 +1726,7 @@
       },
       "EntityDetail": {
         "additionalProperties": true,
-        "description": "One entity's full audit detail (\u00a75.2).\n\nAttributes:\n    row: The effective stored row (canonical names) plus\n        ``row_version`` / ``last_updated_by`` / ``last_updated_at``.\n    baseline: The prepared baseline values for diffing.\n    submissions: The entity's raw duplicate-group submissions.\n    status: The stored status.\n    row_version: Optimistic-concurrency version (If-Match value).\n    last_updated_by: Latest editor.\n    last_updated_at: Latest edit timestamp (ISO).\n    audited_at: The human-audit authority timestamp.\n    diagnostics: Per-entity diagnostics (child: DOB conflicts).\n    previous: The entry before this one in the list's order.\n    next: The entry after this one in the list's order.",
+        "description": "One entity's full audit detail (\u00a75.2).\n\nAttributes:\n    row: The effective stored row (canonical names) plus\n        ``row_version`` / ``last_updated_by`` / ``last_updated_at``.\n    baseline: The prepared baseline values for diffing.\n    status: The stored status.\n    row_version: Optimistic-concurrency version (If-Match value).\n    last_updated_by: Latest editor.\n    last_updated_at: Latest edit timestamp (ISO).\n    audited_at: The human-audit authority timestamp.\n    diagnostics: Per-entity diagnostics (child: DOB conflicts).\n    previous: The entry before this one in the list's order.\n    next: The entry after this one in the list's order.",
         "properties": {
           "audited_at": {
             "anyOf": [
@@ -1817,14 +1818,6 @@
               }
             ],
             "title": "Status"
-          },
-          "submissions": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "title": "Submissions",
-            "type": "array"
           }
         },
         "required": [
@@ -3088,6 +3081,36 @@
           "sponsor_id"
         ],
         "title": "ManualDispatchRequest",
+        "type": "object"
+      },
+      "ManualDuplicateRequest": {
+        "additionalProperties": false,
+        "description": "Mark one entity row as a manual duplicate of another.\n\nAttributes:\n    entity: \"child\", \"family\", or \"sponsor\".\n    record_id: The marked row's audit key.\n    partner_id: The suspected duplicate's audit key.",
+        "properties": {
+          "entity": {
+            "enum": [
+              "child",
+              "family",
+              "sponsor"
+            ],
+            "title": "Entity",
+            "type": "string"
+          },
+          "partner_id": {
+            "title": "Partner Id",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity",
+          "record_id",
+          "partner_id"
+        ],
+        "title": "ManualDuplicateRequest",
         "type": "object"
       },
       "ManualHoldListPage": {
@@ -5106,7 +5129,7 @@
     },
     "/api/v1/seasons/{season}/children": {
       "get": {
-        "description": "List children \u2014 ignored/orphan/raw-missing rows included (\u00a75.2).\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: Search on name/email/id.\n    status: Stored-status filter.\n    family_id: Exact family filter; the search query only ever\n        matches a family id as a substring.\n\nReturns:\n    One page of rows.",
+        "description": "List children \u2014 ignored/orphan/raw-missing rows included (\u00a75.2).\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: All-text search with fuzzy fallback.\n    status: Stored-status filter.\n    family_id: Exact family filter; the search query only ever\n        matches a family id as a substring.\n    ignore: Ignore-flag filter.\n    sponsored: Assigned-sponsor filter.\n    duplicate_pending: Unresolved-duplicate filter.\n\nReturns:\n    One page of rows.",
         "operationId": "list_children_api_v1_seasons__season__children_get",
         "parameters": [
           {
@@ -5181,6 +5204,54 @@
                 }
               ],
               "title": "Family Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ignore",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ignore"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sponsored",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sponsored"
+            }
+          },
+          {
+            "in": "query",
+            "name": "duplicate_pending",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Duplicate Pending"
             }
           }
         ],
@@ -6567,6 +6638,59 @@
         ]
       }
     },
+    "/api/v1/seasons/{season}/duplications/manual": {
+      "post": {
+        "description": "Mark one entity row as a manual duplicate of another (auditor).\n\nArgs:\n    body: The entity and the two rows' audit keys.\n    request: The current request.\n    repo: The season-bound repository.\n    user: The authenticated identity.\n\nReturns:\n    The created group's id and group key.\n\nRaises:\n    ApiError: 422 for an unknown row, a self-pair, an ignored row,\n        or a row already pending in another group.",
+        "operationId": "mark_manual_duplicate_api_v1_seasons__season__duplications_manual_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualDuplicateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Mark Manual Duplicate Api V1 Seasons  Season  Duplications Manual Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mark Manual Duplicate",
+        "tags": [
+          "duplications"
+        ]
+      }
+    },
     "/api/v1/seasons/{season}/duplications/{group_id}": {
       "get": {
         "description": "Read one duplicate group's raw and screened results.\n\nArgs:\n    group_id: The group's id.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    kind: Restrict to \"duplicate_submission\" or \"angel_claim_conflict\"\n        (for the neighbours).\n    _user: Authenticated identity.\n\nReturns:\n    The group detail.\n\nRaises:\n    ApiError: 404 when no group carries that id.",
@@ -6991,7 +7115,7 @@
     },
     "/api/v1/seasons/{season}/families": {
       "get": {
-        "description": "List families \u2014 ignored/orphan/raw-missing rows included (\u00a75.2).\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: Search on name/email/id.\n    status: Stored-status filter.\n\nReturns:\n    One page of rows.",
+        "description": "List families \u2014 ignored/orphan/raw-missing rows included (\u00a75.2).\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: All-text search with fuzzy fallback.\n    status: Stored-status filter.\n    ignore: Ignore-flag filter.\n    sponsored: Any-sponsored-child filter.\n    duplicate_pending: Unresolved-duplicate filter.\n\nReturns:\n    One page of rows.",
         "operationId": "list_families_api_v1_seasons__season__families_get",
         "parameters": [
           {
@@ -7050,6 +7174,54 @@
                 }
               ],
               "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ignore",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ignore"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sponsored",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sponsored"
+            }
+          },
+          {
+            "in": "query",
+            "name": "duplicate_pending",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Duplicate Pending"
             }
           }
         ],
@@ -8331,7 +8503,7 @@
     },
     "/api/v1/seasons/{season}/sponsors": {
       "get": {
-        "description": "List sponsors \u2014 ignored/orphan/raw-missing rows included (\u00a75.2).\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: Search on name/email/id.\n    status: Stored-status filter.\n\nReturns:\n    One page of rows.",
+        "description": "List sponsors \u2014 ignored/orphan/raw-missing rows included (\u00a75.2).\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: All-text search with fuzzy fallback.\n    status: Stored-status filter.\n    ignore: Ignore-flag filter.\n    sponsored: Fully-matched filter.\n    duplicate_pending: Unresolved-duplicate filter.\n\nReturns:\n    One page of rows.",
         "operationId": "list_sponsors_api_v1_seasons__season__sponsors_get",
         "parameters": [
           {
@@ -8390,6 +8562,54 @@
                 }
               ],
               "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ignore",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ignore"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sponsored",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sponsored"
+            }
+          },
+          {
+            "in": "query",
+            "name": "duplicate_pending",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Duplicate Pending"
             }
           }
         ],

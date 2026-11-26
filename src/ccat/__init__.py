@@ -20,6 +20,7 @@ Commands (all accept ``--config`` where applicable)::
     ccat db-import --from PATH [--db URL] [--force] [--backup PATH]
                    [--report PATH]
     ccat workbook-export --output PATH [--db URL] [--report PATH] [--force]
+    ccat db-dedupe-raw [--table TABLE] [--prune-inactive] [--config PATH]
     ccat serve [--config PATH]
     ccat worker [--config PATH]
     ccat db-upgrade [--config PATH]
@@ -466,6 +467,57 @@ def _db_upgrade_cmd(config: str = DEFAULT_CONFIG) -> None:
     _dispatch("db-upgrade", "db.cli:run", config)
 
 
+def _db_dedupe_raw_cmd(
+    config: str = DEFAULT_CONFIG,
+    table: str | None = None,
+    prune_inactive: bool = False,
+) -> None:
+    """Remove exactly-matching duplicate rows from the raw_* tables.
+
+    Two raw rows are exact duplicates when every data column (including
+    ``zite_record_id``) is equal within one acquisition run; the lowest
+    id survives.  Rows that differ in any column — a different source
+    id, for instance — always survive and belong to the Duplications
+    audit instead.  ``--prune-inactive`` also deletes deactivated
+    acquisition runs and their rows (old acquire snapshots).
+
+    Args:
+        config: Path to the JSON configuration file.
+        table: Optional single table (sponsor/family/child); default
+            dedupes all three.
+        prune_inactive: Also delete inactive acquisition runs.
+    """
+
+    async def _go() -> None:
+        from ccat.db.engine import create_async_engine
+
+        from ccat.db.uow import UnitOfWork
+
+        engine = create_async_engine(cfg.storage.database_url)
+        try:
+            async with UnitOfWork(engine).store(cfg, "cli") as repo:
+                summary = await repo.dedupe_raw_rows("migrate", table)
+                for name, counts in summary.items():
+                    print(
+                        f"{name}: deleted {counts['deleted']},"
+                        f" kept {counts['kept']}"
+                    )
+                if prune_inactive:
+                    pruned = await repo.prune_inactive_runs("migrate")
+                    for name, count in pruned.items():
+                        print(f"pruned {name}: {count}")
+        finally:
+            await engine.dispose()
+
+    import asyncio
+
+    try:
+        cfg = load_config(config)
+        asyncio.run(_go())
+    except _typed_errors() as error:
+        raise SystemExit(f"ccat db-dedupe-raw failed: {error}") from error
+
+
 def _worker_cmd(config: str = DEFAULT_CONFIG) -> None:
     """Run the durable-job worker loop (plan §6.1, decision D7).
 
@@ -531,6 +583,7 @@ def main() -> None:
             "clarify-export": _clarify_export_cmd,
             "db-import": _db_import_cmd,
             "workbook-export": _workbook_export_cmd,
+            "db-dedupe-raw": _db_dedupe_raw_cmd,
             "serve": _serve_cmd,
             "worker": _worker_cmd,
             "db-upgrade": _db_upgrade_cmd,

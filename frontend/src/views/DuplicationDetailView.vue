@@ -442,6 +442,12 @@ function decisionOf(member: DuplicationMember): DuplicationDecision | null {
   return stored === 'not_duplicate' || stored === 'ignore' ? stored : null
 }
 
+/** The member's stored decision, when it has one. */
+function storedDecisionOf(member: DuplicationMember): DuplicationDecision | null {
+  const stored = member.decision
+  return stored === 'not_duplicate' || stored === 'ignore' ? stored : null
+}
+
 /** The effective state of a member from its effective decision. */
 function effectiveState(
   member: DuplicationMember,
@@ -472,14 +478,26 @@ function rowLinkText(member: DuplicationMember): string {
   return 'Open its own row — still needs its own audit'
 }
 
-/** Toggle one member's decision; the change is applied when saving. */
+/** Toggle one member's decision; the change is applied when saving.
+
+    Un-checking a decision that is already saved on the server queues a
+    "clear" so saving undoes the stored decision; un-checking a merely
+    pending choice simply drops it. */
 function toggleDecision(
   member: DuplicationMember,
   decision: DuplicationDecision,
 ): void {
   const next = new Map(pending.value)
-  if (decisionOf(member) === decision) {
-    next.delete(member.zite_record_id)
+  const chosen = pending.value.get(member.zite_record_id)
+  if (chosen === decision) {
+    if (storedDecisionOf(member) === decision) {
+      next.set(member.zite_record_id, 'clear')
+    } else {
+      next.delete(member.zite_record_id)
+    }
+  } else if (chosen === undefined && storedDecisionOf(member) === decision) {
+    // A stored decision being re-clicked means "deselect it".
+    next.set(member.zite_record_id, 'clear')
   } else {
     next.set(member.zite_record_id, decision)
   }

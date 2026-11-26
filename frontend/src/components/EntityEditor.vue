@@ -4,6 +4,7 @@ import { RouterLink } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { getEntity, patchEntity, setIgnored, SEGMENT, type Entity, type EntityDetail, type EntityPatch } from '../api/audit'
+import { markManualDuplicate } from '../api/duplications'
 import { useSessionStore } from '../stores/session'
 import { useAuditNav } from '../composables/useAuditNav'
 import { useDirtyGuard } from '../composables/useDirtyGuard'
@@ -73,9 +74,41 @@ const isAdmin = computed(() => session.hasRole('admin'))
 const auditConfirm = ref(false)
 /** Status control sent with the next save (null = plain field save). */
 const pendingStatus = ref<'audited' | 'new' | null>(null)
-const submissions = computed<Record<string, unknown>[]>(
-  () => (detail.value?.submissions ?? []) as Record<string, unknown>[],
-)
+
+// Manual duplicate marking (issue 5): pair this row with another row of
+// the same entity so both join the Duplications queue.
+const dupPartner = ref('')
+const dupBusy = ref(false)
+const dupMessage = ref<string | null>(null)
+const dupConfirm = ref(false)
+
+function askMarkDuplicate(): void {
+  dupMessage.value = null
+  dupConfirm.value = true
+}
+
+async function confirmMarkDuplicate(): Promise<void> {
+  dupConfirm.value = false
+  const partner = dupPartner.value.trim()
+  if (!partner) return
+  dupBusy.value = true
+  try {
+    await markManualDuplicate(
+      seasonName.value,
+      props.entity,
+      props.entityKey,
+      partner,
+    )
+    dupMessage.value = `Marked as a duplicate of ${partner} — adjudicate the pair in the Duplications queue.`
+    dupPartner.value = ''
+  } catch (failure) {
+    dupMessage.value =
+      failure instanceof Error ? failure.message : 'mark failed'
+  } finally {
+    dupBusy.value = false
+  }
+}
+
 const title = computed(
   () => `${ENTITY_LABEL[props.entity]} ${detail.value?.key ?? props.entityKey}`,
 )
@@ -692,37 +725,6 @@ onMounted(() => void load())
         <span v-else class="chip muted" data-testid="next-entry">Next →</span>
       </div>
 
-      <section
-        v-if="submissions.length"
-        class="card"
-        style="margin-top: 1rem"
-        data-testid="submissions"
-      >
-        <h2 style="margin-top: 0">Duplicate submissions</h2>
-        <table class="data">
-          <thead>
-            <tr>
-              <th>Record id</th>
-              <th>Name</th>
-              <th>Email</th>
-              <th>DOB</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(row, index) in submissions" :key="index">
-              <td>{{ row.zite_record_id ?? '—' }}</td>
-              <td>
-                {{ [row.first_name, row.last_name].filter(Boolean).join(' ') || '—' }}
-              </td>
-              <td>{{ row.primary_email ?? row.email ?? '—' }}</td>
-              <td>{{ row.dob ?? '—' }}</td>
-              <td>{{ row.created ?? '—' }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
       <section class="card" style="margin-top: 1rem">
         <h2 style="margin-top: 0">Ignore controls</h2>
         <p class="muted">
@@ -745,6 +747,46 @@ onMounted(() => void load())
           }}
         </button>
       </section>
+
+      <section class="card" style="margin-top: 1rem">
+        <h2 style="margin-top: 0">Mark as duplicate</h2>
+        <p class="muted">
+          Suspect this {{ entity }} is the same person as another row the
+          screening missed? Enter that row's key (its id on its own audit
+          page) to queue the pair in the Duplications section, where the
+          two are merged or separated deliberately.
+        </p>
+        <div class="filters">
+          <input
+            v-model="dupPartner"
+            type="text"
+            name="partner"
+            :placeholder="`Other ${entity} key`"
+            aria-label="Duplicate partner key"
+            data-testid="dup-partner"
+          />
+          <button
+            type="button"
+            :disabled="dupBusy || !dupPartner.trim()"
+            data-testid="mark-duplicate"
+            @click="askMarkDuplicate"
+          >
+            Mark as duplicate
+          </button>
+        </div>
+        <p v-if="dupMessage" class="muted" data-testid="dup-message">
+          {{ dupMessage }}
+        </p>
+      </section>
+
+      <ConfirmDialog
+        :open="dupConfirm"
+        title="Mark as duplicate?"
+        :message="`Queue this ${entity} and ${dupPartner.trim() || 'the other row'} as one duplicate pair for the Duplications audit? Nothing is merged until you decide there.`"
+        confirm-label="Queue the pair"
+        @confirm="confirmMarkDuplicate"
+        @cancel="dupConfirm = false"
+      />
 
       <ConfirmDialog
         :open="confirmAction !== null"

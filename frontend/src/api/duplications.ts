@@ -44,7 +44,7 @@ export type DuplicationMember = Schemas['DuplicationMember'] & {
 }
 
 export type DuplicationListPage = Schemas['DuplicationListPage']
-export type DuplicationDecision = 'not_duplicate' | 'ignore'
+export type DuplicationDecision = 'not_duplicate' | 'ignore' | 'clear'
 export type DuplicationFilters = {
   q?: string
   entity?: string | null
@@ -94,6 +94,19 @@ export function getDuplication(
   const suffix = query.size ? `?${query.toString()}` : ''
   return api.get(
     `/api/v1/seasons/${seasonPath(season)}/duplications/${encodeURIComponent(groupId)}${suffix}`,
+  )
+}
+
+/** Mark one entity row as a manual duplicate of another. */
+export function markManualDuplicate(
+  season: string,
+  entity: 'child' | 'family' | 'sponsor',
+  recordId: string,
+  partnerId: string,
+): Promise<{ id: string }> {
+  return api.post(
+    `/api/v1/seasons/${seasonPath(season)}/duplications/manual`,
+    { entity, record_id: recordId, partner_id: partnerId },
   )
 }
 

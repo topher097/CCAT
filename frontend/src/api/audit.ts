@@ -29,6 +29,12 @@ export type ListParams = {
   status?: string | null
   /** Exact family filter; the search query only matches a substring. */
   family_id?: number | null
+  /** Ignore-flag filter; undefined omits the param. */
+  ignore?: boolean | null
+  /** Children/families: has any sponsor; sponsors: fully matched. */
+  sponsored?: boolean | null
+  /** Unresolved duplicate-group filter. */
+  duplicate_pending?: boolean | null
 }
 
 /** GET one server-paginated entity list page. */
@@ -46,13 +52,18 @@ export function listEntities(
     query.set('status', params.status)
   if (params.family_id !== undefined && params.family_id !== null)
     query.set('family_id', String(params.family_id))
+  for (const name of ['ignore', 'sponsored', 'duplicate_pending'] as const) {
+    const value = params[name]
+    if (value !== undefined && value !== null)
+      query.set(name, value ? 'true' : 'false')
+  }
   const suffix = query.size ? `?${query.toString()}` : ''
   return api.get(
     `/api/v1/seasons/${seasonPath(season)}/${SEGMENT[entity]}${suffix}`,
   )
 }
 
-/** GET one entity's full detail (baseline + submissions + version). */
+/** GET one entity's full detail (baseline + version). */
 export function getEntity(
   season: string,
   entity: Entity,

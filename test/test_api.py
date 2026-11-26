@@ -775,6 +775,105 @@ async def test_family_list_computes_child_count(app: Any) -> None:
     await client.close()
 
 
+async def test_child_list_sponsored_filter_and_indicator(app: Any) -> None:
+    """Child list rows carry ``sponsored`` and honor the sponsored filter."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                children=[
+                    child_row("c1", assigned_sponsor_id=7),
+                    child_row("c2", family_id=2),
+                ],
+                families=[family_row(1), family_row(2)],
+            )
+    finally:
+        await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get(
+        "/api/v1/seasons/2026/children?sponsored=true"
+    )
+    assert [row["zite_record_id"] for row in response.json()["items"]] == ["c1"]
+    response = await client.client.get(
+        "/api/v1/seasons/2026/children?sponsored=false"
+    )
+    assert [row["zite_record_id"] for row in response.json()["items"]] == ["c2"]
+    response = await client.client.get("/api/v1/seasons/2026/children")
+    rows = {row["zite_record_id"]: row for row in response.json()["items"]}
+    assert rows["c1"]["sponsored"] is True
+    assert rows["c2"]["sponsored"] is False
+    await client.close()
+
+
+async def test_family_list_assignment_state_indicators(app: Any) -> None:
+    """Family list rows carry assignment_state and sponsored-child counts."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                children=[
+                    child_row("c1", assigned_sponsor_id=7),
+                    child_row("c2", family_id=1, first_name="Second"),
+                    child_row("c3", family_id=2, first_name="Only"),
+                ],
+                families=[family_row(1), family_row(2)],
+            )
+    finally:
+        await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get("/api/v1/seasons/2026/families")
+    rows = {row["family_id"]: row for row in response.json()["items"]}
+    assert rows[1]["assignment_state"] == "partial"
+    assert rows[1]["sponsored_children"] == 1
+    assert rows[1]["total_children"] == 2
+    assert rows[2]["assignment_state"] == "unassigned"
+    # sponsored filter: has any sponsored child
+    response = await client.client.get(
+        "/api/v1/seasons/2026/families?sponsored=true"
+    )
+    assert [row["family_id"] for row in response.json()["items"]] == [1]
+    await client.close()
+
+
+async def test_sponsor_list_match_indicators(app: Any) -> None:
+    """Sponsor list rows carry fully_matched + remaining quota."""
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            await _seed(
+                repo,
+                raw=_DEFAULT_RAW,
+                sponsors=[
+                    sponsor_row(7, num_angels_assigned=1),
+                    sponsor_row(8, num_children=1, num_angels_assigned=1),
+                    sponsor_row(9, num_children=None),
+                ],
+            )
+    finally:
+        await engine.dispose()
+    client = await _logged_in(app, "lmboswell")
+    response = await client.client.get("/api/v1/seasons/2026/sponsors")
+    rows = {row["sponsor_id"]: row for row in response.json()["items"]}
+    assert rows[7]["fully_matched"] is False
+    assert rows[7]["remaining"] == 1
+    assert rows[8]["fully_matched"] is True
+    assert rows[8]["remaining"] == 0
+    assert rows[9]["fully_matched"] is False
+    assert rows[9]["remaining"] is None
+    response = await client.client.get(
+        "/api/v1/seasons/2026/sponsors?sponsored=true"
+    )
+    assert [row["sponsor_id"] for row in response.json()["items"]] == [8]
+    await client.close()
+
+
 async def test_child_list_flags_raw_missing(app: Any) -> None:
     """Child list rows carry raw_missing for absent raw records (§5.2)."""
     cfg = app.state.cfg
@@ -902,7 +1001,7 @@ async def test_family_and_sponsor_lists_carry_validation_status(
 
 
 async def test_detail_includes_baseline_version_attribution(app: Any) -> None:
-    """Detail: row + baseline + submissions + version + attribution."""
+    """Detail: row + baseline + version + attribution (no submissions)."""
     await _seed_default(app)
     client = await _logged_in(app, "lmboswell")
     response = await client.client.get("/api/v1/seasons/2026/children/c1")
@@ -916,7 +1015,8 @@ async def test_detail_includes_baseline_version_attribution(app: Any) -> None:
     assert "baseline" in body
     assert body["row_version"] >= 1
     assert body["last_updated_by"] == "migration"
-    assert body["submissions"]  # raw duplicate-group submissions
+    # duplicate-submission cards removed from the detail payload (§5.2)
+    assert "submissions" not in body
 
 
 async def test_patch_tri_state(app: Any) -> None:

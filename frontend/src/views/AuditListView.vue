@@ -39,8 +39,16 @@ const page = ref(1)
 const pageSize = ref(50)
 const query = ref('')
 const status = ref<string>('all')
+const ignore = ref<string>('any')
+const sponsored = ref<string>('any')
+const dupPending = ref<string>('any')
 const loading = ref(false)
 const error = ref<string | null>(null)
+
+/** Tri-state chip values -> API boolean (any = omit the param). */
+function triState(value: string): boolean | undefined {
+  return value === 'any' ? undefined : value === 'yes'
+}
 
 const totalPages = computed(() =>
   Math.max(1, Math.ceil(total.value / pageSize.value)),
@@ -80,10 +88,32 @@ function isOrphan(row: Record<string, unknown>): boolean {
   return entity.value === 'child' && row.family_id === null
 }
 
+/** Family badge text: state plus sponsored/total children counts. */
+function familyStateBadge(row: Record<string, unknown>): string {
+  const state = String(row.assignment_state ?? 'unassigned')
+  const counts = `${Number(row.sponsored_children ?? 0)}/${Number(row.total_children ?? 0)}`
+  if (state === 'split') return `split (${counts} sponsored)`
+  if (state === 'partial') return `partial (${counts} sponsored)`
+  if (state === 'assigned') return `all sponsored (${counts})`
+  return `unassigned (${counts})`
+}
+
+/** Sponsor badge text: match state plus remaining quota. */
+function sponsorMatchBadge(row: Record<string, unknown>): string {
+  if (row.fully_matched === true) return 'fully matched'
+  const remaining = row.remaining
+  return remaining === null || remaining === undefined
+    ? 'unmatched'
+    : `${Number(remaining)} remaining`
+}
+
 /** Read the list's filters and page back out of the URL. */
 function readUrl(): void {
   query.value = String(route.query.q ?? '')
   status.value = String(route.query.status ?? 'all')
+  ignore.value = String(route.query.ignore ?? 'any')
+  sponsored.value = String(route.query.sponsored ?? 'any')
+  dupPending.value = String(route.query.duplicate_pending ?? 'any')
   page.value = Math.max(1, Number(route.query.page ?? 1) || 1)
   pageSize.value = Math.max(1, Number(route.query.page_size ?? 50) || 50)
 }
@@ -93,6 +123,9 @@ function writeUrl(): void {
   const next: Record<string, string> = {}
   if (query.value) next.q = query.value
   if (status.value !== 'all') next.status = status.value
+  if (ignore.value !== 'any') next.ignore = ignore.value
+  if (sponsored.value !== 'any') next.sponsored = sponsored.value
+  if (dupPending.value !== 'any') next.duplicate_pending = dupPending.value
   if (page.value > 1) next.page = String(page.value)
   if (pageSize.value !== 50) next.page_size = String(pageSize.value)
   void router.replace({ path: route.path, query: next })
@@ -111,6 +144,9 @@ async function load(): Promise<void> {
       page_size: pageSize.value,
       q: query.value,
       status: status.value,
+      ignore: triState(ignore.value),
+      sponsored: triState(sponsored.value),
+      duplicate_pending: triState(dupPending.value),
     })
     rows.value = result.items as Record<string, unknown>[]
     total.value = result.total
@@ -129,6 +165,14 @@ function submitSearch(): void {
 
 function setStatus(next: string): void {
   status.value = next
+  page.value = 1
+  writeUrl()
+}
+
+function setFilter(field: 'ignore' | 'sponsored' | 'dupPending', next: string): void {
+  if (field === 'ignore') ignore.value = next
+  else if (field === 'sponsored') sponsored.value = next
+  else dupPending.value = next
   page.value = 1
   writeUrl()
 }
@@ -166,7 +210,7 @@ onMounted(() => {
         v-model="query"
         type="search"
         name="q"
-        placeholder="Search name, email, or id"
+        placeholder="Search all fields (fuzzy)"
         aria-label="Search"
       />
       <button type="submit">Search</button>
@@ -192,6 +236,36 @@ onMounted(() => {
       >
         {{ option.replaceAll('_', ' ') }}
       </button>
+    </div>
+
+    <div class="filters" role="group" aria-label="Row filters">
+      <span
+        v-for="filter in [
+          { field: 'ignore', label: 'ignored', value: ignore },
+          {
+            field: 'sponsored',
+            label: entity === 'sponsor' ? 'fully matched' : 'sponsored',
+            value: sponsored,
+          },
+          { field: 'dupPending', label: 'dup pending', value: dupPending },
+        ]"
+        :key="filter.field"
+        class="filters"
+        role="group"
+        :aria-label="filter.label"
+      >
+        <span class="muted">{{ filter.label }}</span>
+        <button
+          v-for="option in ['any', 'yes', 'no']"
+          :key="option"
+          type="button"
+          class="chip"
+          :aria-pressed="filter.value === option"
+          @click="setFilter(filter.field as 'ignore' | 'sponsored' | 'dupPending', option)"
+        >
+          {{ option }}
+        </button>
+      </span>
     </div>
 
     <p v-if="loading" role="status">Loading {{ props.segment }}…</p>
@@ -269,6 +343,30 @@ onMounted(() => {
               data-testid="duplicate-pending"
             >
               duplicate pending audit
+            </span>
+            <!-- sponsorship indicators (issue 3) -->
+            <span
+              v-if="entity === 'child'"
+              class="badge"
+              :class="row.sponsored === true ? 'ok' : 'muted'"
+              data-testid="sponsored-indicator"
+            >
+              {{ row.sponsored === true ? 'sponsored' : 'unsponsored' }}
+            </span>
+            <span
+              v-if="entity === 'family' && row.assignment_state"
+              class="badge"
+              data-testid="family-state-indicator"
+            >
+              {{ familyStateBadge(row) }}
+            </span>
+            <span
+              v-if="entity === 'sponsor' && row.fully_matched !== undefined"
+              class="badge"
+              :class="row.fully_matched === true ? 'ok' : 'muted'"
+              data-testid="sponsor-match-indicator"
+            >
+              {{ sponsorMatchBadge(row) }}
             </span>
           </td>
           <td class="muted">

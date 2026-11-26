@@ -77,8 +77,10 @@ _SHEET_KIND = {
 DECISION_NOT_DUPLICATE = "not_duplicate"
 #: The member is ignored, exactly like the audit tool's ignore action.
 DECISION_IGNORE = "ignore"
+#: The member's standing decision is undone; the member is undecided again.
+DECISION_CLEAR = "clear"
 
-_DECISIONS = (DECISION_NOT_DUPLICATE, DECISION_IGNORE)
+_DECISIONS = (DECISION_NOT_DUPLICATE, DECISION_IGNORE, DECISION_CLEAR)
 
 
 def group_id(sheet: str, group_key: str) -> str:
@@ -498,7 +500,8 @@ async def decide(
         cfg: Pipeline configuration.
         wanted_id: The group's id.
         record_id: The audited group member.
-        decision: ``not_duplicate`` or ``ignore``.
+        decision: ``not_duplicate``, ``ignore``, or ``clear`` (undoes
+            the member's standing decision).
         actor: Requesting user identity.
         confirm: Must be True; anything else refuses the action.
         expected_version: The caller's expected ``row_version``.
@@ -532,17 +535,25 @@ async def decide(
         )
     decisions = await _decisions(repo)
     standing = _decision_for(decisions, group, member)
-    if standing is not None and standing["decision"] == decision:
+    assigned_id: str | None = None
+    if decision == DECISION_CLEAR:
+        if standing is None:
+            # Nothing stands: the clear is already effective (a retry
+            # after a lost response changes nothing).
+            detail = await group_detail(repo, wanted_id)
+            assert detail is not None
+            return detail
+        await _clear_member(repo, cfg, group, member, standing, actor)
+    elif standing is not None and standing["decision"] == decision:
         # The same decision already stands: a retry after a lost response
         # changes nothing and adds no trail row.
         detail = await group_detail(repo, wanted_id)
         assert detail is not None
         return detail
-    if decision == DECISION_IGNORE:
+    elif decision == DECISION_IGNORE:
         await _ignore_member(
             repo, cfg, group, member, actor, expected_version, decisions
         )
-        assigned_id = None
     else:
         assigned_id = await _release_member(
             repo, cfg, group, member, actor, expected_version, decisions
@@ -555,6 +566,10 @@ async def decide(
         actor,
         assigned_id,
     )
+    if decision == DECISION_CLEAR:
+        # The member is undecided again: a pending child re-joins its
+        # group's shared angel letter.
+        await sync_pending_angel_letters(repo, actor)
     detail = await group_detail(repo, wanted_id)
     assert detail is not None
     return detail
@@ -706,6 +721,9 @@ async def mark_audited(
                 else target_row.get("_row_version")
             ),
         )
+    # The group is resolved: its rows are no longer pending duplicates,
+    # so the match pool stops refusing them.
+    await _clear_duplicate_flags(repo, entity, list(rows), actor)
     await _refresh_angel_columns(
         repo, actor, [_as_int(row.get("family_id")) for row, _ in rows.values()]
     )
@@ -780,6 +798,99 @@ async def assign_group_children(
     detail = await group_detail(repo, wanted_id)
     assert detail is not None
     return detail
+
+
+#: Sheet label per entity (inverse of ``_SHEET_ENTITY``).
+_ENTITY_SHEET = {
+    "child": "child_submissions",
+    "family": "family_submissions",
+    "sponsor": "sponsor_submissions",
+}
+
+
+async def mark_manual_duplicate(
+    repo: SeasonStoreRepository,
+    entity: str,
+    record_id: str,
+    partner_id: str,
+    actor: str,
+) -> str:
+    """Create (or re-create) a duplicate group for two same-entity rows.
+
+    The pair joins the Duplications queue as a pending group keyed
+    ``manual:<smaller id>|<larger id>``, so re-marking the same pair is
+    idempotent.  Both rows must exist, be live, and be distinct; a row
+    already in a pending group cannot join another.
+
+    Args:
+        repo: The season-bound repository.
+        entity: "child", "family", or "sponsor".
+        record_id: The marked row's audit key.
+        partner_id: The suspected duplicate's audit key.
+        actor: Requesting user identity.
+
+    Returns:
+        The group's id.
+
+    Raises:
+        AuditError: For an unknown entity or row, a self-pair, an
+            ignored row, or a row already pending in another group.
+    """
+    if entity not in _ENTITIES:
+        raise AuditError(f"unknown entity {entity!r}")
+    if str(record_id) == str(partner_id):
+        raise AuditError("a row cannot be marked as its own duplicate")
+    rows = await repo.final_rows(entity)
+    key_column = ENTITY_SPECS[entity]["key"]
+    pair = []
+    for wanted in (str(record_id), str(partner_id)):
+        row = next(
+            (item for item in rows if str(item.get(key_column)) == wanted),
+            None,
+        )
+        if row is None:
+            raise AuditError(f"unknown {entity} {wanted!r}")
+        if as_bool(row.get("ignore")):
+            raise AuditError(
+                f"{entity} {wanted!r} is ignored and cannot join a"
+                " duplicate group"
+            )
+        pair.append(row)
+    pending = (await pending_groups_by_row(repo))[entity]
+    sheet = _ENTITY_SHEET[entity]
+    pair_ids = sorted(str(item.get(key_column)) for item in pair)
+    group_key = f"manual:{pair_ids[0]}|{pair_ids[1]}"
+    existing = {
+        str(row.get("group_key") or "")
+        for row in await repo.duplicate_log_rows()
+        if str(row.get("sheet") or "") == sheet
+    }
+    if group_key in existing:
+        # Re-marking the same pair is idempotent, even while pending.
+        return group_id(sheet, group_key)
+    for row in pair:
+        entry = pending.get(str(row.get(key_column)))
+        if entry is not None:
+            raise AuditError(
+                f"{entity} {row.get(key_column)!r} is already in pending"
+                f" duplicate group {entry['id']!r}"
+            )
+    log_rows = []
+    for row in pair:
+        log_rows.append(
+            {
+                "sheet": sheet,
+                "group_key": group_key,
+                "zite_record_id": str(row.get("zite_record_id") or ""),
+                "created": _as_text(row.get("created")),
+                "survivor": None,
+                "conflict_columns": "manual",
+                "conflict_details": f"marked manually by {actor}",
+                "record": json.dumps(row, default=str),
+            }
+        )
+    await repo.append_manual_duplicates(log_rows, actor)
+    return group_id(sheet, group_key)
 
 
 async def sync_pending_angel_letters(
@@ -1133,6 +1244,38 @@ async def _release_family(
     return str(new_family_id)
 
 
+async def _clear_duplicate_flags(
+    repo: SeasonStoreRepository,
+    entity: str,
+    keys: Iterable[str],
+    actor: str,
+) -> None:
+    """Clear the pending-duplicate flag on a finalized group's rows.
+
+    The audit resolved the group, so its rows are no longer pending
+    duplicates; the match pool keys eligibility off this flag.  Written
+    through the duplication module, which owns the column.
+
+    Args:
+        repo: The season-bound repository.
+        entity: "child", "family", or "sponsor".
+        keys: The group's stored row keys.
+        actor: Requesting user identity.
+    """
+    wanted = {str(key) for key in keys}
+    key_column = ENTITY_SPECS[entity]["key"]
+    rows = await repo.final_rows(entity)
+    cleared = False
+    for row in rows:
+        if str(row.get(key_column)) in wanted and as_bool(
+            row.get("potential_duplicate")
+        ):
+            row["potential_duplicate"] = False
+            cleared = True
+    if cleared:
+        await repo.commit_finals("duplication", entity, rows, actor)
+
+
 async def _override_status(
     repo: SeasonStoreRepository,
     entity: str,
@@ -1335,13 +1478,134 @@ def _decision_for(
     group: _Group,
     member: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Return one member's latest decision, when it has one."""
+    """Return one member's latest decision, when it has one.
+
+    A latest ``clear`` row means the member's earlier decision was
+    undone: the member counts as undecided.
+
+    Args:
+        decisions: The member decisions.
+        group: The member's duplicate group.
+        member: The group member.
+
+    Returns:
+        The latest decision row, or None when the member is undecided.
+    """
     key = (
         group.sheet,
         group.group_key,
         str(member.get("zite_record_id") or ""),
     )
-    return decisions.get(key)
+    decision = decisions.get(key)
+    if decision is not None and decision.get("decision") == DECISION_CLEAR:
+        return None
+    return decision
+
+
+async def _clear_member(
+    repo: SeasonStoreRepository,
+    cfg: Config,
+    group: _Group,
+    member: dict[str, Any],
+    standing: dict[str, Any],
+    actor: str,
+) -> None:
+    """Undo one member's standing duplication decision.
+
+    A discarded member is un-ignored back to its raw baseline; a
+    released member's pending-duplicate flag is restored (a released
+    family submission's created row is deleted when it is still
+    childless), and the group's audited-state row is removed so the
+    group re-enters the pending queue.  The angel letters follow
+    through the shared sync after the clear decision is recorded.
+
+    Args:
+        repo: The season-bound repository.
+        cfg: Pipeline configuration.
+        group: The member's duplicate group.
+        member: The group member.
+        standing: The member's standing decision row.
+        actor: Requesting user identity.
+
+    Raises:
+        AuditError: When a released family's created row has children.
+    """
+    entity = group.entity
+    key_column = ENTITY_SPECS[entity]["key"]
+    record_id = str(member.get("zite_record_id") or "")
+    if standing.get("decision") == DECISION_IGNORE:
+        finals = await _final_rows(repo)
+        family_row = _group_family_row(group, finals["family"], {})
+        row = _member_row(group, member, finals, family_row, {})
+        if row is None:
+            raise AuditError(f"no stored row to restore for {record_id!r}")
+        if _is_group_shared_row(entity, key_column, row, family_row):
+            # The shared row belongs to the surviving entry; the
+            # discard only recorded a decision, so there is nothing to
+            # restore.
+            await repo.clear_duplication_state(group.sheet, group.group_key)
+            return
+        await db_audit.unignore_entity_db(
+            repo, cfg, entity, row[key_column], actor, confirm=True
+        )
+    elif entity == "family" and standing.get("assigned_id") is not None:
+        await _undo_release_family(repo, str(standing["assigned_id"]))
+    # Restore the pending-duplicate flag on the member's own row (each
+    # child and sponsor submission owns one; a family member owns a row
+    # only when the pair is two distinct family rows).
+    rows = await repo.final_rows(entity)
+    target = next(
+        (
+            item
+            for item in rows
+            if str(item.get("zite_record_id") or "") == record_id
+        ),
+        None,
+    )
+    if target is not None and not as_bool(target.get("potential_duplicate")):
+        target["potential_duplicate"] = True
+        await repo.commit_finals("duplication", entity, rows, actor)
+    await repo.clear_duplication_state(group.sheet, group.group_key)
+
+
+async def _undo_release_family(
+    repo: SeasonStoreRepository,
+    assigned_id: str,
+) -> None:
+    """Delete the family row a release created, when it is still childless.
+
+    Args:
+        repo: The season-bound repository.
+        assigned_id: The family id the release assigned.
+
+    Raises:
+        AuditError: When children were moved onto the created row.
+    """
+    family_rows = await repo.final_rows("family")
+    created = next(
+        (
+            row
+            for row in family_rows
+            if str(row.get("family_id")) == str(assigned_id)
+        ),
+        None,
+    )
+    if created is None:
+        return
+    children = await repo.final_rows("child")
+    moved = [
+        child
+        for child in children
+        if str(child.get("family_id") or "") == str(assigned_id)
+        and not as_bool(child.get("ignore"))
+    ]
+    if moved:
+        raise AuditError(
+            f"family {assigned_id} has {len(moved)} child(ren) attached;"
+            " move them back to the original family before clearing"
+        )
+    family_rows.remove(created)
+    await repo.commit_finals("duplication", "family", family_rows, "system")
 
 
 async def _final_rows(
@@ -1395,6 +1659,22 @@ def _member_row(
                     ),
                     None,
                 )
+        # A manually marked pair can be two DISTINCT family rows: a
+        # member whose own row differs from the group's shared row owns
+        # that row, so discarding it ignores the right family.
+        own = next(
+            (
+                row
+                for row in finals["family"]
+                if str(row.get("zite_record_id") or "") == record_id
+                and family_row is not None
+                and _as_int(row.get("family_id"))
+                != _as_int(family_row.get("family_id"))
+            ),
+            None,
+        )
+        if own is not None:
+            return own
         return family_row
     return next(
         (

@@ -22,12 +22,13 @@ from ccat.api.dto import (
     DuplicationDetail,
     DuplicationListPage,
     DuplicationMember,
+    ManualDuplicateRequest,
     NeighbourView,
     canonicalize,
     decanonicalize_patch,
 )
 from ccat.api.errors import ApiError
-from ccat.audit import RowAuditedError
+from ccat.audit import AuditError, RowAuditedError
 from ccat.db.errors import StaleRowVersionError
 from ccat.db.repositories import SeasonStoreRepository
 from ccat.services import db_duplications
@@ -203,6 +204,41 @@ async def get_duplication(
         repo, group_id, q, entity, kind
     )
     return _detail_dto(detail, previous, next_row)
+
+
+@router.post("/manual", dependencies=[Depends(require_csrf)])
+async def mark_manual_duplicate(
+    body: ManualDuplicateRequest,
+    request: Request,
+    repo: SeasonStoreRepository = Depends(season_repo),
+    user: AuthUser = Depends(require_roles("auditor")),
+) -> Any:
+    """Mark one entity row as a manual duplicate of another (auditor).
+
+    Args:
+        body: The entity and the two rows' audit keys.
+        request: The current request.
+        repo: The season-bound repository.
+        user: The authenticated identity.
+
+    Returns:
+        The created group's id and group key.
+
+    Raises:
+        ApiError: 422 for an unknown row, a self-pair, an ignored row,
+            or a row already pending in another group.
+    """
+    try:
+        wanted_id = await db_duplications.mark_manual_duplicate(
+            repo,
+            body.entity,
+            body.record_id,
+            body.partner_id,
+            user.username,
+        )
+    except AuditError as error:
+        raise ApiError(422, "invalid_input", str(error)) from error
+    return {"id": wanted_id}
 
 
 @router.post(
