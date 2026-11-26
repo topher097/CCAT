@@ -372,3 +372,14 @@ because every member row still carries `potential_duplicate=1` (stale flags —
 ## Lane
 
 - Orchestrator direct (fixer lanes 0-for-6 malformed this session).
+
+---
+
+# Merged to main (2026-11-26)
+
+- `feature/audit-pipeline-fixes` merged into `main` (merge commit `63c596f`);
+  rounds 1-5 complete, all tasks done.
+- Live DB carried: worktree `output/ccat.sqlite3` (schema at
+  `20261123_0010`, family-42 repairs) copied over main's
+  `output/ccat.sqlite3`; previous copy kept as
+  `output/ccat.sqlite3.bak-20261126`.
