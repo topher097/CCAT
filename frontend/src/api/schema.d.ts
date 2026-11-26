@@ -3004,9 +3004,12 @@ export interface components {
          *         survivor_count: Members left undecided (candidates to survive).
          *         children: The group's children (family groups).
          *         current: The group's merged editable fields, folded from every
-         *             submission in the group.
+         *             submission in the group. Locked to the stored row when an
+         *             audited child is matched to a sponsor.
          *         current_row_key: The key of the row the merged entry is
          *             written to.
+         *         current_locked: The current values are a final audited row;
+         *             the new submission never overwrites them.
          *         previous: The group before this one in the list's order.
          *         next: The group after this one in the list's order.
          */
@@ -3019,6 +3022,11 @@ export interface components {
             current?: {
                 [key: string]: unknown;
             };
+            /**
+             * Current Locked
+             * @default false
+             */
+            current_locked: boolean;
             /**
              * Current Row Key
              * @default

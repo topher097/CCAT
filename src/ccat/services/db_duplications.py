@@ -370,6 +370,28 @@ async def group_detail(
     state = states.get((group.sheet, group.group_key))
     bound = _bound_row(group, classified, finals, family_row, decisions)
     entry_key = str((state or {}).get("entry_key") or "")
+    current_row_key = entry_key or (
+        str(bound.get(ENTITY_SPECS[group.entity]["key"]))
+        if bound is not None
+        else ""
+    )
+    locked = _locked_current_row(
+        group.entity,
+        [member["screened"] for member in members],
+        finals["sponsor"],
+    )
+    current: dict[str, Any]
+    if locked is not None:
+        # An audited child matched to a sponsor is the authority: the
+        # new submission is recorded as a duplicate, never folded over it.
+        current = {
+            column: locked.get(column)
+            for column in ENTITY_SPECS[group.entity]["editable"]
+        }
+        if not entry_key:
+            current_row_key = str(locked.get(ENTITY_SPECS[group.entity]["key"]))
+    else:
+        current = _merged_current(group.entity, group.members)
     return {
         "id": group.id,
         "sheet": group.sheet,
@@ -381,14 +403,88 @@ async def group_detail(
         "audited_at": (state or {}).get("audited_at"),
         "members": members,
         "children": _group_children(group, decisions, finals),
-        "current": _merged_current(group.entity, group.members),
-        "current_row_key": entry_key
-        or (
-            str(bound.get(ENTITY_SPECS[group.entity]["key"]))
-            if bound is not None
-            else ""
-        ),
+        "current": current,
+        "current_locked": locked is not None,
+        "current_row_key": current_row_key,
     }
+
+
+def _locked_current_row(
+    entity: str,
+    rows: Sequence[dict[str, Any] | None],
+    sponsors: Sequence[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the audited, dispatched child row whose values are final.
+
+    When the first submission of a duplicate group is already audited
+    and its assigned sponsor's packet is dispatched, its final row is
+    the "Current (editable)" authority: a newer submission never
+    overwrites it.  Matching alone is not enough — the match can change
+    up until the packet is dispatched — so undispatched children keep
+    the newest-wins fold (the merge may proceed).
+
+    Args:
+        entity: The group's entity name.
+        rows: The group's stored member rows.
+        sponsors: Every final sponsor row (dispatch state).
+
+    Returns:
+        The locked row, or None when the fold stays in charge.
+    """
+    if entity != "child":
+        return None
+    dispatched = {
+        _as_int(sponsor.get("sponsor_id"))
+        for sponsor in sponsors
+        if sponsor.get("packets_dispatched_at") is not None
+    }
+    return next(
+        (
+            row
+            for row in rows
+            if row is not None
+            and row.get("status") == STATUS_AUDITED
+            and _as_int(row.get("assigned_sponsor_id")) in dispatched
+        ),
+        None,
+    )
+
+
+def _dispatched_sponsor_id(
+    entity: str,
+    row: dict[str, Any],
+    sponsors: Sequence[dict[str, Any]],
+) -> int | None:
+    """Return the row's assigned sponsor id when that packet is dispatched.
+
+    Families and sponsors carry the assignment themselves; children
+    point at their sponsor.  Dispatch state lives on the sponsor row.
+
+    Args:
+        entity: The entity name.
+        row: The stored final row.
+        sponsors: Every final sponsor row (dispatch state).
+
+    Returns:
+        The dispatched sponsor id, or None when not yet dispatched.
+    """
+    if entity == "sponsor":
+        assigned: Any = row.get("sponsor_id")
+    elif entity == "family":
+        assigned = row.get("assigned_sponsor_id")
+    else:
+        assigned = row.get("assigned_sponsor_id")
+    sponsor_id = _as_int(assigned)
+    if sponsor_id is None:
+        return None
+    for sponsor in sponsors:
+        if _as_int(sponsor.get("sponsor_id")) == sponsor_id:
+            return (
+                sponsor_id
+                if sponsor.get("packets_dispatched_at") is not None
+                else None
+            )
+    return None
 
 
 def _bound_row(
@@ -683,9 +779,35 @@ async def mark_audited(
                 " become this group's entry"
             )
     target_key = str(target_row.get(key_column))
-    if carried and target_row.get("status") == STATUS_AUDITED:
+    # A locked (audited + sponsored) child row anchors the group: the
+    # entry cannot move onto a newer submission's row, and its audited
+    # values are final.  Unsponsored audited rows may still absorb the
+    # merge (the user's exception).
+    locked = _locked_current_row(
+        entity,
+        [
+            _member_row(group, member, finals, family_row, decisions)
+            for member in group.members
+        ],
+        finals["sponsor"],
+    )
+    if locked is not None and entity == "child":
+        locked_key = str(locked.get(key_column))
+        if target_key != locked_key:
+            raise RowAuditedError(
+                f"the audited entry's packet is dispatched; this group's"
+                f" entry stays row {locked_key} and the new submission is"
+                " only recorded as a duplicate"
+            )
+    if (
+        carried
+        and target_row.get("status") == STATUS_AUDITED
+        and _dispatched_sponsor_id(entity, target_row, finals["sponsor"])
+        is not None
+    ):
         raise RowAuditedError(
-            "the surviving entry is already audited; its values are final"
+            "the surviving entry is already audited and its sponsor's"
+            " packet is dispatched; its values are final"
         )
     # A family group's members share one row, so resolve every member
     # first and close each distinct row out once.

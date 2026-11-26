@@ -213,3 +213,55 @@ Pass 3 (orchestrator): reconcile writers → full pytest, frontend build + vites
   vite) ok; vitest 277 passed; `ruff check src/` clean; `ty` 0 errors on
   the three touched backend files (pyproject unknown-rule warning pre-exists);
   openapi.json + schema.d.ts regenerated.
+
+---
+
+# Round 3 — duplication: audited+dispatched children never overwritten
+
+User request (2026-11-25, tightened 2026-11-26): "For duplications, if the
+first submission is already audited AND dispatched to a sponsor, then use the
+final_child row as the 'Current (editable)'. The new submission should never
+overwrite what has been audited before, unless the child has not been matched
+with a sponsor yet." Tightening: the guard keys on DISPATCH
+(`final_sponsor.packets_dispatched_at`), because matching can change up until
+the packet goes out. Entries' own statuses must be clearly displayed in the
+duplication columns.
+
+## Tasks
+
+- [x] 18. Duplication detail: when a child row in the group is audited AND its
+  assigned sponsor's packet is dispatched, `current` = that stored final_child
+  row's editable values (locked, `current_locked: true`, entry key pinned to
+  it); carried-value audits against a dispatched audited entry are refused
+  (`row_audited`); audited-but-undispatched children still absorb the merge.
+- [x] 19. Duplication detail shows each entry's own row status (audit
+  StatusBadge) and its assigned sponsor in the member columns.
+
+## Design (explorer-mapped, implemented directly)
+
+- The exposure was the display/merge layer: `detail.current` is a newest-wins
+  fold of the submissions (`_merged_current` → `_merge_submissions`,
+  db_duplications.py:435-482; child duplicates are latest-wins,
+  preparation.py:250-282), so after an audit a NEW submission took over the
+  "Current (editable)" column. Nothing silently overwrote the final row
+  (screen never re-derives editables; PATCH/audit 409 on audited) — the UI
+  invited a merge that then 409'd, or overwrote when unsponsored.
+- `db_duplications._locked_current_row(entity, rows, sponsors)`: child rows
+  only; audited + `_as_int(assigned_sponsor_id)` in the dispatched set
+  (`packets_dispatched_at` set). `group_detail` returns the locked row's
+  editable values as `current`, pins `current_row_key` to it (entry_key
+  first), adds `current_locked` (DTO `DuplicationDetail.current_locked`).
+- `mark_audited`: when a locked row exists the entry cannot move
+  (`RowAuditedError` if the resolved target differs); carried values are
+  refused only when the target is audited AND dispatched
+  (`_dispatched_sponsor_id` — child/family via `assigned_sponsor_id`,
+  sponsor via its own id). Undispatched audited rows accept carried values
+  (save already forces `status=audited`).
+- UI: `currentLocked` computed → explainer copy says the audited entry's
+  values are final; `currentReadonly` also honors `current_locked`; each
+  member column shows `StatusBadge(row_status)` + a sponsor badge.
+- Tests: service-level locked-detail/refusal/unsponsored-accepts trio +
+  dispatched fixtures; API reaudit test updated (unsponsored carried → 200,
+  dispatched carried → 409); vitest locked-current + entry-status case.
+- Delegation: fixer failed again (6th malformed output, zero writes);
+  implemented directly.

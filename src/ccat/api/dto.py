@@ -323,9 +323,12 @@ class DuplicationDetail(StrictModel):
         survivor_count: Members left undecided (candidates to survive).
         children: The group's children (family groups).
         current: The group's merged editable fields, folded from every
-            submission in the group.
+            submission in the group. Locked to the stored row when an
+            audited child is matched to a sponsor.
         current_row_key: The key of the row the merged entry is
             written to.
+        current_locked: The current values are a final audited row;
+            the new submission never overwrites them.
         previous: The group before this one in the list's order.
         next: The group after this one in the list's order.
     """
@@ -342,6 +345,7 @@ class DuplicationDetail(StrictModel):
     children: list[DuplicationChild] = Field(default_factory=list)
     current: dict[str, Any] = Field(default_factory=dict)
     current_row_key: str = ""
+    current_locked: bool = False
     previous: NeighbourView | None = None
     next: NeighbourView | None = None
 

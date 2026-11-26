@@ -1544,6 +1544,73 @@ describe('duplication merged current column', () => {
     )
   })
 
+  it('locks the current column to the audited, dispatched entry and shows each entry status', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail(
+                [
+                  member({
+                    zite_record_id: 'r1',
+                    survivor: true,
+                    raw: { first_name: 'Ann' },
+                    screened: {
+                      zite_record_id: 'r1',
+                      first_name: 'Ann',
+                      status: 'audited',
+                      assigned_sponsor_id: 7,
+                    },
+                    row_status: 'audited',
+                  }),
+                  member({
+                    zite_record_id: 'r2',
+                    survivor: false,
+                    raw: { first_name: 'Maxine' },
+                    screened: null,
+                    row_version: null,
+                    row_key: '',
+                    row_status: null,
+                  }),
+                ],
+                {
+                  current: { first_name: 'Ann' },
+                  current_row_key: 'r1',
+                  current_locked: true,
+                },
+              ),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    // The locked explainer names the finality, not the fold.
+    expect(wrapper.get('[data-testid="current-explainer"]').text()).toContain(
+      'values are final',
+    )
+    // The audited entry's stored value wins over the new submission's.
+    expect(
+      (wrapper.get('input[name="first_name"]').element as HTMLInputElement)
+        .value,
+    ).toBe('Ann')
+    expect(
+      wrapper.get('input[name="first_name"]').attributes('readonly'),
+    ).toBeDefined()
+    // Each entry's own row status is visible in its column.
+    const statuses = wrapper
+      .findAll('[data-testid="member-row-status"]')
+      .map((cell) => cell.text())
+    expect(statuses[0]).toContain('audited')
+    const sponsored = wrapper.findAll('[data-testid="member-sponsored"]')
+    expect(sponsored).toHaveLength(1)
+    expect(sponsored[0]!.text()).toContain('7')
+  })
+
   const sponsorMembers = (decisionOfS2: Record<string, unknown> = {}) => [
     member({
       zite_record_id: 's1',

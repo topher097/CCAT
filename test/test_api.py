@@ -2728,7 +2728,13 @@ async def test_duplication_audit_stale_version_is_412(
 async def test_duplication_reaudit_of_an_audited_entry(
     app: Any, auditor: Client
 ) -> None:
-    """An audited surviving entry is re-affirmed but never re-valued."""
+    """Audited entries re-affirm; carried values need no dispatched packet.
+
+    Task 18: an audited child whose assigned sponsor's packet is
+    dispatched never takes carried values; an unsponsored audited
+    child still absorbs the merge (matching can change up until
+    dispatch).
+    """
     await _seed_duplicates(app)
     listing = await auditor.client.get("/api/v1/seasons/2026/duplications")
     group = listing.json()["items"][0]
@@ -2738,23 +2744,46 @@ async def test_duplication_reaudit_of_an_audited_entry(
         headers=auditor.headers(),
     )
     assert decided.status_code == 200, decided.text
-    for _ in range(2):
-        audited = await auditor.client.post(
-            f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
-            headers=auditor.headers(),
-        )
-        assert audited.status_code == 200, audited.text
+    audited = await auditor.client.post(
+        f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
+        json={"values": {"first_name": "Marcus"}},
+        headers=auditor.headers(),
+    )
+    assert audited.status_code == 200, audited.text
+
+    # Now give the audited child a dispatched sponsor.
+    cfg = app.state.cfg
+    engine = create_async_engine(cfg.storage.database_url)
+    try:
+        async with UnitOfWork(engine).store(cfg, "migration") as repo:
+            children = await repo.final_rows("child")
+            for row in children:
+                if row["zite_record_id"] == "c1b":
+                    row["assigned_sponsor_id"] = 1
+                    row["assignment_source"] = "manual"
+            await repo.commit_finals(
+                "manual_match", "child", children, "coordinator"
+            )
+            sponsors = await repo.final_rows("sponsor")
+            for row in sponsors:
+                if row["sponsor_id"] == 1:
+                    row["packets_dispatched_at"] = "2026-11-01T09:00:00+00:00"
+            await repo.commit_finals(
+                "migrate", "sponsor", sponsors, "migration"
+            )
+    finally:
+        await engine.dispose()
 
     changed = await auditor.client.post(
         f"/api/v1/seasons/2026/duplications/{group['id']}/audit",
-        json={"values": {"first_name": "Marcus"}},
+        json={"values": {"first_name": "Other"}},
         headers=auditor.headers(),
     )
     assert changed.status_code == 409, changed.text
     assert changed.json()["detail"]["code"] == "row_audited"
 
     stored = await auditor.client.get("/api/v1/seasons/2026/children/c1b")
-    assert stored.json()["row"]["first_name"] == "Kiddo"
+    assert stored.json()["row"]["first_name"] == "Marcus"
 
 
 async def test_duplication_reports_survivor_state(

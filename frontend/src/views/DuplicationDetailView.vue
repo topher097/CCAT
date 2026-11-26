@@ -144,7 +144,13 @@ const currentRow = computed<Record<string, unknown> | null>(() => {
 })
 const currentKey = computed<string>(() => boundMember.value?.row_key ?? '')
 const currentReadonly = computed(
-  () => boundMember.value?.row_status === 'audited',
+  () =>
+    boundMember.value?.row_status === 'audited' ||
+    detail.value?.current_locked === true,
+)
+/** The group's current column is pinned to a final audited row. */
+const currentLocked = computed(
+  () => detail.value?.current_locked === true,
 )
 const isDirty = computed(() => touched.value.size > 0 || pending.value.size > 0)
 /** The row can take a column write: it has a version and is not audited. */
@@ -472,6 +478,12 @@ function memberStateClass(member: DuplicationMember): string {
   if (state === 'surviving') return 'status-audited'
   if (state === 'released') return 'status-new'
   return 'status-ignored'
+}
+
+/** The member's assigned sponsor id, when its row carries one. */
+function memberSponsored(member: DuplicationMember): number | null {
+  const id = member.screened?.assigned_sponsor_id
+  return id === null || id === undefined ? null : Number(id)
 }
 
 /** Link to a released member's own row page. */
@@ -834,6 +846,16 @@ onMounted(() => {
                     >{{ stateLabel(member) }}</span
                   >
                 </div>
+                <div data-testid="member-row-status">
+                  <StatusBadge :status="member.row_status" />
+                  <span
+                    v-if="memberSponsored(member)"
+                    class="badge check-ok"
+                    data-testid="member-sponsored"
+                  >
+                    sponsor {{ memberSponsored(member) }}
+                  </span>
+                </div>
                 <span
                   v-if="member.survivor"
                   class="badge check-ok"
@@ -905,8 +927,15 @@ onMounted(() => {
               <th>
                 <div>Current (editable)</div>
                 <div class="muted" data-testid="current-explainer">
-                  The group's merged entry: the newest submission's values, with
-                  older submissions filling the blanks.
+                  <template v-if="currentLocked">
+                    This entry is audited and matched to a sponsor — its
+                    values are final. The new submission is only recorded
+                    as a duplicate; it never overwrites the audited data.
+                  </template>
+                  <template v-else>
+                    The group's merged entry: the newest submission's
+                    values, with older submissions filling the blanks.
+                  </template>
                 </div>
                 <div v-if="boundMember" data-testid="current-binding">
                   {{ currentBindingText }}

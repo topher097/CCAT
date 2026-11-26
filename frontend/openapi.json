@@ -1364,7 +1364,7 @@
       },
       "DuplicationDetail": {
         "additionalProperties": true,
-        "description": "One duplicate group's raw and screened results.\n\nAttributes:\n    id: The group's stable, URL-safe id.\n    sheet: The duplicate-log sheet label.\n    entity: \"child\", \"family\", or \"sponsor\".\n    kind: \"duplicate_submission\" or \"angel_claim_conflict\".\n    group_key: The duplicate group's key.\n    status: \"pending\", \"resolved\", or \"audited\".\n    audited_at: When the group was marked audited.\n    members: The group's submissions.\n    survivor_count: Members left undecided (candidates to survive).\n    children: The group's children (family groups).\n    current: The group's merged editable fields, folded from every\n        submission in the group.\n    current_row_key: The key of the row the merged entry is\n        written to.\n    previous: The group before this one in the list's order.\n    next: The group after this one in the list's order.",
+        "description": "One duplicate group's raw and screened results.\n\nAttributes:\n    id: The group's stable, URL-safe id.\n    sheet: The duplicate-log sheet label.\n    entity: \"child\", \"family\", or \"sponsor\".\n    kind: \"duplicate_submission\" or \"angel_claim_conflict\".\n    group_key: The duplicate group's key.\n    status: \"pending\", \"resolved\", or \"audited\".\n    audited_at: When the group was marked audited.\n    members: The group's submissions.\n    survivor_count: Members left undecided (candidates to survive).\n    children: The group's children (family groups).\n    current: The group's merged editable fields, folded from every\n        submission in the group. Locked to the stored row when an\n        audited child is matched to a sponsor.\n    current_row_key: The key of the row the merged entry is\n        written to.\n    current_locked: The current values are a final audited row;\n        the new submission never overwrites them.\n    previous: The group before this one in the list's order.\n    next: The group after this one in the list's order.",
         "properties": {
           "audited_at": {
             "anyOf": [
@@ -1388,6 +1388,11 @@
             "additionalProperties": true,
             "title": "Current",
             "type": "object"
+          },
+          "current_locked": {
+            "default": false,
+            "title": "Current Locked",
+            "type": "boolean"
           },
           "current_row_key": {
             "default": "",

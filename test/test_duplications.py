@@ -1068,7 +1068,12 @@ def test_mark_audited_refuses_a_stale_expected_version(
 def test_audited_surviving_entry_is_reaffirmed_but_values_are_final(
     tmp_path: Path,
 ) -> None:
-    """No values re-affirms an audited entry; a value change is refused."""
+    """No values re-affirms an audited entry; a value change is refused.
+
+    The audited child here is matched to a sponsor, so its audited
+    values are final (task 18); an unsponsored audited child still
+    accepts carried values (see the test after next).
+    """
     cfg = _cfg(tmp_path)
     run_migrations(cfg.storage.database_url)
 
@@ -1077,6 +1082,23 @@ def test_audited_surviving_entry_is_reaffirmed_but_values_are_final(
         try:
             async with uow.store(cfg, "migration") as repo:
                 await _seed(repo)
+                children = await repo.final_rows("child")
+                for row in children:
+                    if row["zite_record_id"] == "c1b":
+                        row["assigned_sponsor_id"] = 1
+                        row["assignment_source"] = "manual"
+                await repo.commit_finals(
+                    "manual_match", "child", children, "coordinator"
+                )
+                sponsors = await repo.final_rows("sponsor")
+                for row in sponsors:
+                    if row["sponsor_id"] == 1:
+                        row["packets_dispatched_at"] = (
+                            "2026-11-01T09:00:00+00:00"
+                        )
+                await repo.commit_finals(
+                    "migrate", "sponsor", sponsors, "migration"
+                )
                 group = await _group(repo, "child")
                 await db_duplications.decide(
                     repo,
@@ -1108,6 +1130,173 @@ def test_audited_surviving_entry_is_reaffirmed_but_values_are_final(
                 children = await _rows(repo, "child")
             assert detail["status"] == "audited"
             assert children["c1b"]["first_name"] == "Marcus"
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_new_submission_never_overwrites_audited_sponsored_child(
+    tmp_path: Path,
+) -> None:
+    """An audited child matched to a sponsor anchors its duplicate group.
+
+    The Current column shows the audited final row's values (never the
+    newest-wins fold), the group's entry stays on that row, carried
+    value changes are refused, and the newer submission keeps its own
+    unaudited row.
+    """
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                children = await repo.final_rows("child")
+                for row in children:
+                    if row["zite_record_id"] == "c1b":
+                        row["assigned_sponsor_id"] = 1
+                        row["assignment_source"] = "manual"
+                await repo.commit_finals(
+                    "manual_match", "child", children, "coordinator"
+                )
+                sponsors = await repo.final_rows("sponsor")
+                for row in sponsors:
+                    if row["sponsor_id"] == 1:
+                        row["packets_dispatched_at"] = (
+                            "2026-11-01T09:00:00+00:00"
+                        )
+                await repo.commit_finals(
+                    "migrate", "sponsor", sponsors, "migration"
+                )
+                group = await _group(repo, "child")
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "c1",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                await db_duplications.mark_audited(
+                    repo, cfg, group["id"], "auditor"
+                )
+                # A newer duplicate submission arrives: latest-wins makes
+                # it the flagged survivor in a fresh screening run.
+                rows = await repo.duplicate_log_rows()
+                rows.append(
+                    _log_row(
+                        "child_submissions",
+                        "fam@example.com|Kiddo",
+                        "c1c",
+                        "2026-02-03T09:00:00+00:00",
+                        True,
+                        _raw_child(
+                            "c1c",
+                            "2026-02-03T09:00:00+00:00",
+                            first_name="Maxine",
+                            interests="legos",
+                        ),
+                    )
+                )
+                await repo.replace_screen_diagnostics(rows, [], "screen")
+                finals = await repo.final_rows("child")
+                await repo.commit_finals(
+                    "migrate",
+                    "child",
+                    [
+                        *finals,
+                        child_row(
+                            "c1c", first_name="Maxine", interests="legos"
+                        ),
+                    ],
+                    "migration",
+                )
+
+                detail = await db_duplications.group_detail(repo, group["id"])
+                assert detail["current_locked"] is True
+                assert detail["current_row_key"] == "c1b"
+                assert detail["current"]["first_name"] == "Kiddo"
+                assert "interests" not in detail["current"] or (
+                    detail["current"]["interests"] is None
+                )
+
+                # The auditor discards the newer submission as a
+                # duplicate first; a carried value change on the audited
+                # row is then refused...
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "c1c",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                with pytest.raises(RowAuditedError):
+                    await db_duplications.mark_audited(
+                        repo,
+                        cfg,
+                        group["id"],
+                        "auditor",
+                        values={"first_name": "Override"},
+                    )
+                # ...and a value-free re-affirmation keeps the entry on
+                # the audited row.
+                detail = await db_duplications.mark_audited(
+                    repo, cfg, group["id"], "auditor"
+                )
+                children = await _rows(repo, "child")
+                states = await repo.duplication_state_rows()
+            assert detail["current_locked"] is True
+            assert detail["current_row_key"] == "c1b"
+            assert children["c1b"]["first_name"] == "Kiddo"
+            assert children["c1b"]["status"] == "audited"
+            assert children["c1c"]["first_name"] == "Maxine"
+            assert children["c1c"]["status"] == "ignored"
+            assert states and states[0]["entry_key"] == "c1b"
+        finally:
+            await uow.engine.dispose()
+
+    _run(main())
+
+
+def test_audited_unsponsored_child_still_accepts_the_merge(
+    tmp_path: Path,
+) -> None:
+    """The exception: an audited child with no sponsor may absorb values."""
+    cfg = _cfg(tmp_path)
+    run_migrations(cfg.storage.database_url)
+
+    async def main() -> None:
+        uow = _store(cfg)
+        try:
+            async with uow.store(cfg, "migration") as repo:
+                await _seed(repo)
+                group = await _group(repo, "child")
+                await db_duplications.decide(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "c1",
+                    db_duplications.DECISION_IGNORE,
+                    "auditor",
+                    confirm=True,
+                )
+                detail = await db_duplications.mark_audited(
+                    repo,
+                    cfg,
+                    group["id"],
+                    "auditor",
+                    values={"first_name": "Marcus"},
+                )
+                children = await _rows(repo, "child")
+            assert detail["current_locked"] is False
+            assert children["c1b"]["first_name"] == "Marcus"
+            assert children["c1b"]["status"] == "audited"
         finally:
             await uow.engine.dispose()
 
