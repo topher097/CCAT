@@ -215,7 +215,13 @@ const rawFields = computed<string[]>(() => {
       fields.push(key)
     }
   }
-  return fields
+  // Row order matches the individual audit pages: the editor's field
+  // order first, then raw-only fields in submission order.
+  const order = ENTITY_FIELDS[entity.value].map((spec) => spec.field)
+  return [
+    ...order.filter((field) => fields.includes(field)),
+    ...fields.filter((field) => !order.includes(field)),
+  ]
 })
 /** The editable cells of the Current column: every one is written on save. */
 const editableColumnFields = computed<string[]>(() =>

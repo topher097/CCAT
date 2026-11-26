@@ -5,6 +5,7 @@ import { flushPromises } from '@vue/test-utils'
 import DuplicationListView from '../src/views/DuplicationListView.vue'
 import DuplicationDetailView from '../src/views/DuplicationDetailView.vue'
 import { useSessionStore } from '../src/stores/session'
+import { ENTITY_FIELDS } from '../src/utils/format'
 import { bodyOf, jsonResponse, mockRoutes, mountRouted } from './helpers'
 
 const GROUPS = [
@@ -1609,6 +1610,51 @@ describe('duplication merged current column', () => {
     const sponsored = wrapper.findAll('[data-testid="member-sponsored"]')
     expect(sponsored).toHaveLength(1)
     expect(sponsored[0]!.text()).toContain('7')
+  })
+
+  it('orders the field rows like the individual audit pages', async () => {
+    // Raw keys arrive in a deliberately different order than the
+    // editor's field order.
+    mockRoutes([
+      (url) =>
+        url.includes('/duplications/g1')
+          ? jsonResponse(
+              200,
+              detail([
+                member({
+                  raw: {
+                    dob: '2018-01-01',
+                    primary_email: 'ann@example.org',
+                    first_name: 'Ann',
+                    gender: 'F',
+                  },
+                  screened: {
+                    zite_record_id: 'r1',
+                    first_name: 'Ann',
+                    status: 'new',
+                  },
+                }),
+              ]),
+            )
+          : undefined,
+    ])
+    const { wrapper } = await mountRouted(DuplicationDetailView, {
+      path: '/audit/duplications/g1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const order = wrapper
+      .findAll('tr[data-field]')
+      .map((row) => row.attributes('data-field') ?? '')
+    const editorOrder = ENTITY_FIELDS.child.map((spec) => spec.field)
+    const expected = [
+      ...editorOrder.filter((field) => order.includes(field)),
+      ...order.filter((field) => !editorOrder.includes(field)),
+    ]
+    expect(order).toEqual(expected)
+    // Concretely: the editor's first fields lead the table.
+    expect(order.slice(0, 3)).toEqual(['first_name', 'primary_email', 'dob'])
   })
 
   const sponsorMembers = (decisionOfS2: Record<string, unknown> = {}) => [

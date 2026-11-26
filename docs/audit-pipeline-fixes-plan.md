@@ -265,3 +265,44 @@ duplication columns.
   dispatched carried → 409); vitest locked-current + entry-status case.
 - Delegation: fixer failed again (6th malformed output, zero writes);
   implemented directly.
+
+---
+
+# Round 4 — consistent field order in duplications; match pool numeric order
+
+User request (2026-11-26): (1) duplication resolution pages must list row
+fields in the same order as the individual audit pages (EntityEditor's
+ENTITY_FIELDS order per sponsor/child/family); (2) match-pool cards sorted by
+family number, left-to-right / top-to-bottom.
+
+## Tasks
+
+- [x] 20. Duplication detail field rows ordered by `ENTITY_FIELDS[entity]`
+  (the audit editor's order); raw-only fields (not editable) keep their
+  existing relative order after them.
+- [x] 21. MatchView pool grid renders cards sorted by numeric `family_id`
+  (client-side sort; backend pool order untouched).
+
+## Round-4 evidence
+
+- vitest 280 passed (incl. new order + numeric-sort cases); `npm run build`
+  (vue-tsc) ok. Backend untouched (no backend edits this round; full suite
+  971 passed at the round-3 commit).
+
+## Design
+
+- 20: `rawFields` (DuplicationDetailView.vue:210-219) currently follows raw
+  JSON key insertion order. Reorder: ENTITY_FIELDS-ordered fields first, then
+  the remaining raw fields in their existing order. `ENTITY_FIELDS` is
+  already imported (:20). One computed change; draft/save/save loops
+  (editableColumnFields) keep working — order only affects display rows.
+- 21: MatchView grid `v-for="card in items"` (:1195) → sort a computed copy
+  by `Number(family_id)`; backend pool ordering (fit/family_id) unchanged —
+  this is a display sort within the page.
+- Tests: vitest — duplication field-row order matches ENTITY_FIELDS even when
+  raw JSON keys arrive reversed; match cards render in numeric family order
+  when the pool returns unsorted.
+
+## Lane
+
+- Orchestrator direct (fixer lanes 0-for-6 malformed this session).

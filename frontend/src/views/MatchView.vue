@@ -94,6 +94,12 @@ const pageSize = ref(PAGE_SIZE)
 
 /** Pool data. */
 const items = ref<ManualMatchFamilyCard[]>([])
+/** Display order: numeric family number, left to right, top to bottom. */
+const sortedItems = computed(() =>
+  [...items.value].sort(
+    (a, b) => (Number(a.family_id) || 0) - (Number(b.family_id) || 0),
+  ),
+)
 const total = ref(0)
 const sponsors = ref<ManualMatchSponsor[]>([])
 const automaticRun = ref<ManualMatchAutomaticRun>({
@@ -1192,7 +1198,7 @@ onBeforeUnmount(() => {
 
     <div v-else class="grid grid--families" role="list">
       <FamilyCard
-        v-for="card in items"
+        v-for="card in sortedItems"
         :key="card.family_id"
         role="listitem"
         :card="card"

@@ -641,6 +641,31 @@ describe('match page', () => {
     expect(wrapper.get('[data-testid="assign-blocked"]').text()).not.toBe('')
   })
 
+  it('renders the pool cards in numeric family order', async () => {
+    mockRoutes([
+      poolHandler(() =>
+        pool([
+          family({ family_id: 12, first_name: 'Carol' }),
+          family({ family_id: 3, first_name: 'Ann' }),
+          family({ family_id: 7, first_name: 'Bob' }),
+        ]),
+      ),
+      sponsorsHandler([sponsor()]),
+    ])
+    const { wrapper } = await mountRouted(MatchView, {
+      path: '/match',
+      setup: withSeason,
+    })
+    await flushPromises()
+
+    const names = wrapper
+      .findAll('[data-testid="family-card"]')
+      .map((card) => card.text())
+    expect(names[0]).toContain('Ann')
+    expect(names[1]).toContain('Bob')
+    expect(names[2]).toContain('Carol')
+  })
+
   it('fetches the pool with sponsor_id once a sponsor is picked', async () => {
     const fetchMock = mockRoutes([
       poolHandler(() => pool([family()])),
