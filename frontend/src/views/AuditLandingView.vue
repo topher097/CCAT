@@ -254,8 +254,18 @@ watch(
         style="grid-template-columns: minmax(0, 1fr)"
         data-testid="registry-pipeline-runs"
       >
-        <PipelineRunForm command="acquire" submit-label="Run acquire" />
-        <PipelineRunForm command="screen" submit-label="Run screen" />
+        <PipelineRunForm
+          command="acquire"
+          submit-label="Run acquire"
+          heading="Acquire data"
+          collapsible
+        />
+        <PipelineRunForm
+          command="screen"
+          submit-label="Run screen"
+          heading="Screen data"
+          collapsible
+        />
       </div>
     </section>
 

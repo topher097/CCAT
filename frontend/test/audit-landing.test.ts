@@ -128,11 +128,22 @@ describe('audit landing', () => {
     expect(
       coordinatorView.wrapper.find('[data-testid="registry-pipeline"]').exists(),
     ).toBe(true)
-    const pipelineText = coordinatorView.wrapper.get(
-      '[data-testid="registry-pipeline"]',
+    // Collapsed to their titles until the user opens a card.
+    const toggles = coordinatorView.wrapper.findAll(
+      '[data-testid="run-toggle"]',
     )
-    expect(pipelineText.text()).toContain('Acquire run')
-    expect(pipelineText.text()).toContain('Screen run')
+    // The chevron glyph rides along with the title text.
+    expect(toggles.map((toggle) => toggle.text().replace(/[▸▾]$/, '').trim())).toEqual(
+      ['Acquire data', 'Screen data'],
+    )
+    expect(
+      coordinatorView.wrapper.find('input[name="test"]').exists(),
+    ).toBe(false)
+    // The screen card carries the test-mode option; uncollapse it.
+    await toggles[1]!.trigger('click')
+    expect(
+      coordinatorView.wrapper.find('input[name="test"]').exists(),
+    ).toBe(true)
 
     const adminView = await mountLanding(['admin'])
     await flushPromises()

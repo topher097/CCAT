@@ -270,4 +270,34 @@ describe('pipeline run forms', () => {
       },
     })
   })
+
+  it('folds a collapsible card to its title until it is opened', async () => {
+    mockRoutes([])
+    const { wrapper } = await mountRouted(PipelineRunForm, {
+      path: '/screen',
+      props: { command: 'screen', heading: 'Screen data', collapsible: true },
+      setup: withSeason,
+    })
+
+    const toggle = wrapper.get('[data-testid="run-toggle"]')
+    expect(toggle.text()).toContain('Screen data')
+    expect(wrapper.get('[data-testid="run-toggle"]').attributes('aria-expanded')).toBe(
+      'false',
+    )
+    expect(wrapper.find('input[name="test"]').exists()).toBe(false)
+
+    await toggle.trigger('click')
+    expect(wrapper.get('[data-testid="run-toggle"]').attributes('aria-expanded')).toBe(
+      'true',
+    )
+    expect(wrapper.find('input[name="test"]').exists()).toBe(true)
+  })
+
+  it('keeps the plain "<Command> run" heading when not collapsible', async () => {
+    mockRoutes([])
+    const { wrapper } = await mountForm('screen')
+    expect(wrapper.get('h2').text()).toBe('Screen run')
+    expect(wrapper.find('[data-testid="run-toggle"]').exists()).toBe(false)
+    expect(wrapper.find('input[name="test"]').exists()).toBe(true)
+  })
 })
