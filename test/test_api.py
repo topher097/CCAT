@@ -3002,6 +3002,45 @@ async def test_children_list_filters_one_family_exactly(
     ]
 
 
+async def test_children_list_names_their_sponsor_and_filter_by_one(
+    app: Any, auditor: Client
+) -> None:
+    """Child rows name their sponsor and the sponsor filter is exact."""
+    await _seed_default(app)
+    await _seed_children(
+        app,
+        [
+            child_row("c1", assigned_sponsor_id=1),
+            child_row("c2", assigned_sponsor_id=1),
+            child_row("c3", assigned_sponsor_id=2),
+            child_row("other"),
+        ],
+    )
+    response = await auditor.client.get("/api/v1/seasons/2026/children")
+    assert response.status_code == 200, response.text
+    rows = {row["zite_record_id"]: row for row in response.json()["items"]}
+    # The seeded sponsor is Mary Sponsor; an unknown sponsor id has no name.
+    assert rows["c1"]["assigned_sponsor_name"] == "Mary Sponsor"
+    assert rows["other"]["assigned_sponsor_name"] is None
+
+    response = await auditor.client.get(
+        "/api/v1/seasons/2026/children?sponsor_id=1"
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 2
+    assert sorted(row["zite_record_id"] for row in body["items"]) == [
+        "c1",
+        "c2",
+    ]
+
+    response = await auditor.client.get(
+        "/api/v1/seasons/2026/children?sponsor_id=11"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 0
+
+
 async def test_child_detail_reports_family_child_count(
     app: Any, auditor: Client
 ) -> None:

@@ -70,8 +70,6 @@ describe('router map', () => {
       expect.arrayContaining([
         '/',
         '/login',
-        '/acquire',
-        '/screen',
         '/audit',
         '/audit/sponsors',
         '/audit/sponsors/:id',
@@ -90,6 +88,18 @@ describe('router map', () => {
         '/admin',
       ]),
     )
+    expect(
+      paths.filter((path) => path === '/acquire' || path === '/screen'),
+    ).toEqual(['/acquire', '/screen'])
+  })
+
+  it('redirects the old acquire and screen addresses to the registry', async () => {
+    authenticated()
+    const router = createAppRouter()
+    await router.push('/acquire')
+    expect(router.currentRoute.value.path).toBe('/audit')
+    await router.push('/screen')
+    expect(router.currentRoute.value.path).toBe('/audit')
   })
 
   it('redirects the old manual matching address to the match page', async () => {

@@ -9,6 +9,7 @@ import { statusLabel } from '../utils/format'
 import { SEGMENT, searchRegistry, type Entity } from '../api/audit'
 import AuditBackLink from '../components/AuditBackLink.vue'
 import AuditNavCard from '../components/AuditNavCard.vue'
+import PipelineRunForm from '../components/PipelineRunForm.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 
 /** The duplicate group's own status vocabulary. */
@@ -42,10 +43,8 @@ const session = useSessionStore()
 const overview = useOverviewStore()
 
 const seasonName = computed(() => session.season?.name ?? '')
-const matchReportUrl = computed(
-  () =>
-    `/api/v1/seasons/${encodeURIComponent(seasonName.value)}/diagnostics/match-report`,
-)
+/** The acquire and screen runs replace the old dedicated pages. */
+const canRunPipeline = computed(() => session.hasRole('coordinator', 'admin'))
 const counts = computed(
   () =>
     (overview.data?.entities ?? {}) as Record<string, EntityCounts | undefined>,
@@ -243,6 +242,37 @@ watch(
       <h1>Registry</h1>
     </div>
 
+    <section
+      v-if="canRunPipeline"
+      style="margin-bottom: 1rem"
+      data-testid="registry-pipeline"
+    >
+      <h2 style="margin-top: 0">Data pipeline</h2>
+      <p class="muted">
+        Pull the Zite forms into the raw snapshot, then screen them into the
+        final registry. Each run enqueues a durable job; open it for live
+        progress and cancellation.
+      </p>
+      <div
+        class="grid"
+        style="grid-template-columns: minmax(0, 1fr)"
+        data-testid="registry-pipeline-runs"
+      >
+        <PipelineRunForm
+          command="acquire"
+          submit-label="Run acquire"
+          heading="Acquire data"
+          collapsible
+        />
+        <PipelineRunForm
+          command="screen"
+          submit-label="Run screen"
+          heading="Screen data"
+          collapsible
+        />
+      </div>
+    </section>
+
     <div class="grid" data-testid="audit-sections">
       <AuditNavCard
         v-for="card in cards"
@@ -256,12 +286,6 @@ watch(
         :note="card.note"
       />
     </div>
-
-    <p class="muted">
-      <a :href="matchReportUrl" target="_blank" rel="noopener">
-        Match report (JSON)
-      </a>
-    </p>
 
     <h2 data-testid="registry-search">Search the registry</h2>
     <form class="filters" @submit.prevent="applySearch">

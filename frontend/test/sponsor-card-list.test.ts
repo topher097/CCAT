@@ -163,6 +163,25 @@ describe('SponsorCardList rows', () => {
     expect(wrapper.emitted('dispatch')).toBeUndefined()
   })
 
+  it('colors the matched state: full green, partial yellow, empty red, uncapped none', () => {
+    const full = mountList([sponsor({ remaining: 0, assigned_count: 3 })])
+    expect(full.get('[data-testid="sponsor-row-full"]').classes()).toContain('check-ok')
+    expect(full.get('[data-testid="sponsor-row-full"]').text()).toBe('full')
+
+    const partial = mountList([sponsor({ remaining: 2, assigned_count: 1 })])
+    expect(partial.get('[data-testid="sponsor-row-partial"]').classes()).toContain('check-warn')
+    expect(partial.get('[data-testid="sponsor-row-partial"]').text()).toBe('1 of 3')
+
+    const empty = mountList([sponsor({ remaining: 3, assigned_count: 0 })])
+    expect(empty.get('[data-testid="sponsor-row-empty"]').classes()).toContain('check-bad')
+    expect(empty.get('[data-testid="sponsor-row-empty"]').text()).toBe('3 open')
+
+    const uncapped = mountList([sponsor({ num_children: null, remaining: null })])
+    expect(uncapped.find('[data-testid="sponsor-row-full"]').exists()).toBe(false)
+    expect(uncapped.find('[data-testid="sponsor-row-partial"]').exists()).toBe(false)
+    expect(uncapped.find('[data-testid="sponsor-row-empty"]').exists()).toBe(false)
+  })
+
   it('disables selection for an already dispatched sponsor and still links to dispatch', () => {
     const wrapper = mountList([sponsor({ remaining: 0, packets_dispatched: true })])
     expect(wrapper.find('[data-testid="sponsor-row-dispatched"]').exists()).toBe(true)

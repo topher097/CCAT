@@ -136,3 +136,94 @@ def test_the_note_is_appended_once() -> None:
     assert sponsors[0]["clarification_notes"] == ANGEL_CLAIM_NOTE.format(
         angel_id="99Z"
     )
+
+
+def test_a_specific_claimant_takes_the_angel_over_from_a_placeholder() -> None:
+    """The person who signed up at the store gets the claimed child.
+
+    A generic Walmart sponsor holds the store's angel id; the specific
+    sponsor claiming the same id takes the slot over (angel_claims_plan
+    §1), even though the placeholder was placed first.
+    """
+    sponsors = [
+        _sponsor(39, "100A", sponsor_type="Walmart"),
+        _sponsor(47, "100A", sponsor_type="Individual"),
+    ]
+    children = [
+        _child("100A", assigned_sponsor_id=39, assignment_source="auto")
+    ]
+    apply_angel_claims(sponsors, children)
+    assert children[0]["assigned_sponsor_id"] == 47
+    assert children[0]["assignment_source"] == "auto"
+
+
+def test_a_takeover_from_an_unplaced_child_places_it() -> None:
+    """A contested angel nobody placed yet goes to the specific claimant."""
+    sponsors = [
+        _sponsor(39, "100A", sponsor_type="Walmart"),
+        _sponsor(47, "100A", sponsor_type="Individual"),
+    ]
+    children = [_child("100A")]
+    apply_angel_claims(sponsors, children)
+    assert children[0]["assigned_sponsor_id"] == 47
+    assert children[0]["assignment_source"] == "auto"
+
+
+def test_a_specific_sponsor_keeps_its_child_from_a_placeholder_claim() -> None:
+    """A store placeholder cannot take an angel back from a person."""
+    sponsors = [
+        _sponsor(35, "36A", sponsor_type="Individual"),
+        _sponsor(55, "36A", sponsor_type="Walmart"),
+    ]
+    children = [_child("36A", assigned_sponsor_id=35, assignment_source="auto")]
+    apply_angel_claims(sponsors, children)
+    assert children[0]["assigned_sponsor_id"] == 35
+
+
+def test_a_placeholder_only_contest_stays_a_contest() -> None:
+    """Two stores claiming one angel wait for the Duplications section."""
+    sponsors = [
+        _sponsor(1, "12A", sponsor_type="Walmart"),
+        _sponsor(2, "12A", sponsor_type="Walmart"),
+    ]
+    children = [_child("12A")]
+    apply_angel_claims(sponsors, children)
+    assert children[0]["assigned_sponsor_id"] is None
+
+
+def test_two_specific_claimants_stay_a_contest() -> None:
+    """The takeover rule only settles placeholder contests."""
+    sponsors = [
+        _sponsor(1, "12A", sponsor_type="Individual"),
+        _sponsor(2, "12A", sponsor_type="Organization"),
+    ]
+    children = [_child("12A")]
+    apply_angel_claims(sponsors, children)
+    assert children[0]["assigned_sponsor_id"] is None
+
+
+def test_a_manual_placement_survives_a_takeover() -> None:
+    """A hand-placed child is never moved, even off a placeholder."""
+    sponsors = [
+        _sponsor(39, "100A", sponsor_type="Walmart"),
+        _sponsor(47, "100A", sponsor_type="Individual"),
+    ]
+    children = [
+        _child("100A", assigned_sponsor_id=39, assignment_source="manual")
+    ]
+    apply_angel_claims(sponsors, children)
+    assert children[0]["assigned_sponsor_id"] == 39
+    assert children[0]["assignment_source"] == "manual"
+
+
+def test_the_takeover_is_idempotent() -> None:
+    """Re-applying the claims leaves the settled placement alone."""
+    sponsors = [
+        _sponsor(39, "100A", sponsor_type="Walmart"),
+        _sponsor(47, "100A", sponsor_type="Individual"),
+    ]
+    children = [
+        _child("100A", assigned_sponsor_id=47, assignment_source="auto")
+    ]
+    apply_angel_claims(sponsors, children)
+    assert children[0]["assigned_sponsor_id"] == 47

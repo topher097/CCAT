@@ -73,7 +73,7 @@ include = [
     "test/test_services.py",
     "test/test_sponsor_claims.py",
 ]
-rules = { import-not-found = "ignore" }
+rules = { unresolved-import = "ignore" }
 
 [tool.pytest.ini_options]
 # Every pytest run is parallel: pytest-xdist spreads tests over worker

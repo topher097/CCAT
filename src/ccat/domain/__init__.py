@@ -233,6 +233,12 @@ def angel_sort_key(angel_id: str) -> tuple[int, str]:
 #: Duplicate-log sheet label for sponsors that claim the same angel id.
 SPONSOR_CLAIM_SHEET = "sponsor_angel_claims"
 
+#: The generic store sponsor affiliation: these sponsors hold the angel
+#: ids allocated to a store until a person signs up there and claims the
+#: same id to take the slot over (angel_claims_plan §1).  A placeholder's
+#: claim always loses to a specific sponsor's claim.
+PLACEHOLDER_SPONSOR_TYPE = "Walmart"
+
 
 def parse_prior_assigned(value: str) -> list[str]:
     """Parse the Assigned Angel ID Code free text (§8.5).

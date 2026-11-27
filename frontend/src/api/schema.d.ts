@@ -568,6 +568,7 @@ export interface paths {
          *         status: Stored-status filter.
          *         family_id: Exact family filter; the search query only ever
          *             matches a family id as a substring.
+         *         sponsor_id: Exact assigned-sponsor filter (children only).
          *         ignore: Ignore-flag filter.
          *         sponsored: Assigned-sponsor filter.
          *         duplicate_pending: Unresolved-duplicate filter.
@@ -1455,6 +1456,49 @@ export interface paths {
          *             member; 412 when the stored row changed since the read.
          */
         post: operations["decide_duplication_api_v1_seasons__season__duplications__group_id__members__record_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/seasons/{season}/duplications/{group_id}/unaudit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Unaudit Duplication
+         * @description Undo a duplication audit (admin).
+         *
+         *     The bound entry row returns to ``new`` and the group's audited
+         *     state row is removed, so the group is pending again and can be
+         *     changed and re-audited — mirroring the individual audit pages'
+         *     undo.  An entry whose sponsor's packet is dispatched refuses.
+         *
+         *     Args:
+         *         group_id: The group's id.
+         *         request: The current request.
+         *         repo: The season-bound repository.
+         *         q: The list's search query (for the neighbours).
+         *         entity: Restrict to "child", "family", or "sponsor" (for the
+         *             neighbours).
+         *         kind: Restrict to "duplicate_submission" or "angel_claim_conflict"
+         *             (for the neighbours).
+         *         user: The authenticated identity.
+         *
+         *     Returns:
+         *         The updated group detail.
+         *
+         *     Raises:
+         *         ApiError: 404 for an unknown group; 409 when the entry's packet
+         *             is dispatched.
+         */
+        post: operations["unaudit_duplication_api_v1_seasons__season__duplications__group_id__unaudit_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4977,6 +5021,7 @@ export interface operations {
                 q?: string;
                 status?: string | null;
                 family_id?: number | null;
+                sponsor_id?: number | null;
                 ignore?: boolean | null;
                 sponsored?: boolean | null;
                 duplicate_pending?: boolean | null;
@@ -5960,6 +6005,42 @@ export interface operations {
                 "application/json": components["schemas"]["DuplicationDecisionRequest"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DuplicationDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unaudit_duplication_api_v1_seasons__season__duplications__group_id__unaudit_post: {
+        parameters: {
+            query?: {
+                q?: string;
+                entity?: string | null;
+                kind?: string | null;
+            };
+            header?: never;
+            path: {
+                group_id: string;
+                season: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

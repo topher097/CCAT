@@ -14,6 +14,10 @@ const props = withDefaults(
   defineProps<{
     command: 'acquire' | 'screen' | 'generate' | 'stats'
     submitLabel?: string
+    /** Card title; defaults to "<Command> run". */
+    heading?: string
+    /** Collapse to the title until the user opens the card. */
+    collapsible?: boolean
   }>(),
   { submitLabel: 'Enqueue run' },
 )
@@ -62,6 +66,12 @@ function textOf(value: unknown): string {
 const title = computed(
   () => props.command.charAt(0).toUpperCase() + props.command.slice(1),
 )
+
+/** The card title; the default keeps the old "<Command> run" wording. */
+const heading = computed(() => props.heading ?? `${title.value} run`)
+
+/** A collapsible card starts folded to its title. */
+const open = ref(false)
 
 /** Whether this command carries the global AI screening flag. */
 const hasGlobalAiFlag = computed(() => props.command === 'screen')
@@ -210,8 +220,22 @@ async function enqueue(): Promise<void> {
 
 <template>
   <form class="card" data-testid="run-form" @submit.prevent="submit">
-    <h2 style="margin-top: 0">{{ title }} run</h2>
-    <p class="muted">{{ SCOPE[props.command] }}</p>
+    <button
+      v-if="props.collapsible"
+      type="button"
+      class="run-toggle"
+      :aria-expanded="open"
+      data-testid="run-toggle"
+      @click="open = !open"
+    >
+      <span>{{ heading }}</span>
+      <span class="run-toggle-chevron" aria-hidden="true">{{
+        open ? '▾' : '▸'
+      }}</span>
+    </button>
+    <h2 v-else style="margin-top: 0">{{ heading }}</h2>
+    <div v-if="!props.collapsible || open">
+      <p class="muted">{{ SCOPE[props.command] }}</p>
 
     <fieldset
       v-if="props.command !== 'acquire'"
@@ -336,12 +360,36 @@ async function enqueue(): Promise<void> {
 
     <ConfirmDialog
       :open="confirmOpen"
-      :title="`${title} run`"
+      :title="heading"
       :message="confirmMessage"
       :confirm-label="props.submitLabel"
       :dangerous="true"
       @confirm="enqueue"
       @cancel="confirmOpen = false"
     />
+    </div>
   </form>
 </template>
+
+<style scoped>
+/* The collapsed card shows only its title; the chevron signals state. */
+.run-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 1.25rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.run-toggle-chevron {
+  font-size: 0.9rem;
+  color: #6b7a88;
+}
+</style>

@@ -94,6 +94,35 @@ function remainingText(sponsor: SponsorCard): string {
   return remaining === 0 ? 'full' : String(remaining)
 }
 
+/**
+ * Matched-state indicator: full is good (green), a partial match is okay
+ * (yellow), an empty sponsor still needs children (red). Uncapped sponsors
+ * (no quota) carry no state.
+ */
+function matchBadge(
+  sponsor: SponsorCard,
+): { cls: string; text: string; testid: string } | null {
+  if (sponsor.num_children === null || sponsor.num_children === undefined) {
+    return null
+  }
+  if (isFull(sponsor)) {
+    return { cls: 'check-ok', text: 'full', testid: 'sponsor-row-full' }
+  }
+  const assigned = sponsor.assigned_count ?? 0
+  if (assigned > 0) {
+    return {
+      cls: 'check-warn',
+      text: `${assigned} of ${sponsor.num_children}`,
+      testid: 'sponsor-row-partial',
+    }
+  }
+  return {
+    cls: 'check-bad',
+    text: `${sponsor.num_children} open`,
+    testid: 'sponsor-row-empty',
+  }
+}
+
 function radioLabel(sponsor: SponsorCard): string {
   const remaining = remainingOf(sponsor)
   const capacity =
@@ -358,8 +387,13 @@ const visible = computed(() => props.sponsors.filter(matches).sort(compare))
             >
               Dispatched
             </span>
-            <span v-if="isFull(sponsor)" class="badge status-ignored" data-testid="sponsor-row-full">
-              full
+            <span
+              v-if="matchBadge(sponsor)"
+              class="badge"
+              :class="matchBadge(sponsor)!.cls"
+              :data-testid="matchBadge(sponsor)!.testid"
+            >
+              {{ matchBadge(sponsor)!.text }}
             </span>
             <span v-if="sponsor.elevated_budget" class="flag check-warn" data-testid="sponsor-row-elevated">
               elevated budget

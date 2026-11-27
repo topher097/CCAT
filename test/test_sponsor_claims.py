@@ -397,7 +397,66 @@ ZITE_SPONSOR = {
 
 
 def test_the_zite_column_reaches_the_duplicate_log(cfg: Config) -> None:
-    """The live form's "Assigned Angel ID Code" becomes the contest."""
+    """A specific-vs-specific claim contest becomes the duplicate log row."""
+    frame = pl.DataFrame(
+        [
+            {
+                **ZITE_SPONSOR,
+                "id": "rec_s1",
+                "Email": "one@example.com",
+                "Assigned Angel ID Code": "1A",
+            },
+            {
+                **ZITE_SPONSOR,
+                "id": "rec_s2",
+                "createdAt": "2026-02-01T10:00:00Z",
+                "Email": "two@example.com",
+                "Assigned Angel ID Code": "1A",
+            },
+        ]
+    )
+    raw_sponsors = import_table(frame, "sponsor", cfg)
+    assert [row["prior_assigned_angel_ids"] for row in raw_sponsors] == [
+        "1A",
+        "1A",
+    ]
+    raw = {
+        "sponsor": raw_sponsors,
+        "family": [
+            {
+                "zite_record_id": "rec_f1",
+                "zite_created_at": "2026-01-05T10:00:00Z",
+                "created": "2026-01-05T10:00:00Z",
+                "primary_email": "fam@example.com",
+                "first_name": "jane",
+            }
+        ],
+        "child": [
+            {
+                "zite_record_id": "c1",
+                "zite_created_at": "2026-02-01T09:00:00+00:00",
+                "created": "2026-02-01T09:00:00+00:00",
+                "first_name": "kiddo",
+                "primary_email": "fam@example.com",
+                "dob": "2018-05-10",
+            }
+        ],
+    }
+    preparation = prepare_rows(raw, cfg)
+    contests = [
+        row
+        for row in preparation.duplicate_log
+        if row["sheet"] == "sponsor_angel_claims"
+    ]
+    assert {row["group_key"] for row in contests} == {"1A"}
+    assert {row["zite_record_id"] for row in contests} == {"rec_s1", "rec_s2"}
+    # The record is what the detail page shows for each claimant.
+    record = json.loads(contests[0]["record"])
+    assert record["prior_assigned_angel_ids"] == "1A"
+
+
+def test_a_walmart_contest_settles_itself_and_logs_nothing(cfg: Config) -> None:
+    """A person claiming a store's angel takes it over; no audit owed."""
     frame = pl.DataFrame(
         [
             {
@@ -449,11 +508,7 @@ def test_the_zite_column_reaches_the_duplicate_log(cfg: Config) -> None:
         for row in preparation.duplicate_log
         if row["sheet"] == "sponsor_angel_claims"
     ]
-    assert {row["group_key"] for row in contests} == {"1A"}
-    assert {row["zite_record_id"] for row in contests} == {"rec_s1", "rec_s2"}
-    # The record is what the detail page shows for each claimant.
-    record = json.loads(contests[0]["record"])
-    assert record["prior_assigned_angel_ids"] == "1A"
+    assert contests == []
 
 
 # ---------------------------------------------------------------------------
