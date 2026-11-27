@@ -15,7 +15,8 @@
     "frogmouth@latest",
     "pandoc@latest",
     "ugrep@latest",
-    "mdterm@latest"
+    "mdterm@latest",
+    "busybox@latest"
   ],
   "env": {
     "PATH": "$PWD/frontend/node_modules/.bin:$PATH"
