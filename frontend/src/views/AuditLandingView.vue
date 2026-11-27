@@ -249,7 +249,11 @@ watch(
         final registry. Each run enqueues a durable job; open it for live
         progress and cancellation.
       </p>
-      <div class="grid">
+      <div
+        class="grid"
+        style="grid-template-columns: minmax(0, 1fr)"
+        data-testid="registry-pipeline-runs"
+      >
         <PipelineRunForm command="acquire" submit-label="Run acquire" />
         <PipelineRunForm command="screen" submit-label="Run screen" />
       </div>
