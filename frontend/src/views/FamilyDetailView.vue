@@ -62,6 +62,7 @@ onMounted(() => void loadChildren())
             <th>Angel ID</th>
             <th>Children in family</th>
             <th>Name</th>
+            <th>Sponsor</th>
             <th>DOB</th>
           </tr>
         </thead>
@@ -78,6 +79,22 @@ onMounted(() => void loadChildren())
             <td>{{ child.angel_id || '—' }}</td>
             <td>{{ Number(child.family_child_count ?? 0) }}</td>
             <td>{{ child.first_name ?? '—' }}</td>
+            <td>
+              <template v-if="child.assigned_sponsor_id != null">
+                <span class="badge check-ok" data-testid="family-child-sponsored">
+                  matched
+                </span>
+                <RouterLink
+                  :to="`/audit/sponsors/${child.assigned_sponsor_id}`"
+                  data-testid="family-child-sponsor-link"
+                >
+                  {{ child.assigned_sponsor_name ?? `Sponsor ${child.assigned_sponsor_id}` }}
+                </RouterLink>
+              </template>
+              <span v-else class="badge check-unchecked" data-testid="family-child-sponsored">
+                unmatched
+              </span>
+            </td>
             <td>{{ child.dob ?? '—' }}</td>
           </tr>
         </tbody>

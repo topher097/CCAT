@@ -78,6 +78,24 @@ def _entity(segment: str) -> str:
         ) from None
 
 
+def _sponsor_display_name(row: dict[str, Any]) -> str:
+    """Name a sponsor row for links: the organization, else the person.
+
+    Args:
+        row: One final sponsor row.
+
+    Returns:
+        The display name (never empty).
+    """
+    organization = str(row.get("organization_name") or "").strip()
+    if organization:
+        return organization
+    person = f"{str(row.get('first_name') or '').strip()} {str(row.get('last_name') or '').strip()}".strip()
+    if person:
+        return person
+    return f"Sponsor {row.get('sponsor_id')}"
+
+
 def _public_row(entity: str, row: dict[str, Any]) -> dict[str, Any]:
     """Render one final row for the wire (canonical names, no cache).
 
@@ -269,6 +287,7 @@ async def list_children(
     q: str = "",
     status: str | None = None,
     family_id: int | None = None,
+    sponsor_id: int | None = None,
     ignore: bool | None = None,
     sponsored: bool | None = None,
     duplicate_pending: bool | None = None,
@@ -284,6 +303,7 @@ async def list_children(
         status: Stored-status filter.
         family_id: Exact family filter; the search query only ever
             matches a family id as a substring.
+        sponsor_id: Exact assigned-sponsor filter (children only).
         ignore: Ignore-flag filter.
         sponsored: Assigned-sponsor filter.
         duplicate_pending: Unresolved-duplicate filter.
@@ -299,6 +319,7 @@ async def list_children(
         q,
         status,
         family_id,
+        sponsor_id=sponsor_id,
         ignore=ignore,
         sponsored=sponsored,
         duplicate_pending=duplicate_pending,
@@ -378,6 +399,7 @@ async def _list(
     q: str,
     status: str | None,
     family_id: int | None = None,
+    sponsor_id: int | None = None,
     ignore: bool | None = None,
     sponsored: bool | None = None,
     duplicate_pending: bool | None = None,
@@ -392,6 +414,7 @@ async def _list(
         q: Search query (all-text substring, fuzzy fallback).
         status: Stored-status filter.
         family_id: Exact family filter (children only).
+        sponsor_id: Exact assigned-sponsor filter (children only).
         ignore: Filter on the ignore flag.
         sponsored: Children/families: has any sponsor; sponsors: fully
             matched.
@@ -407,6 +430,12 @@ async def _list(
             row
             for row in rows
             if str(row.get("family_id") or "") == str(family_id)
+        ]
+    if sponsor_id is not None:
+        rows = [
+            row
+            for row in rows
+            if str(row.get("assigned_sponsor_id") or "") == str(sponsor_id)
         ]
     if ignore is not None:
         rows = [row for row in rows if as_bool(row.get("ignore")) == ignore]
@@ -468,6 +497,12 @@ async def _list(
             str(row.get("zite_record_id") or "")
             for row in await repo.raw_rows("child")
         }
+        # The sponsor column on the family audit page names the child's
+        # sponsor; the manual picker uses the same display rule.
+        sponsor_names = {
+            str(row.get("sponsor_id")): _sponsor_display_name(row)
+            for row in await repo.final_rows("sponsor")
+        }
         for item in items:
             item["raw_missing"] = (
                 str(item.get("zite_record_id") or "") not in raw_ids
@@ -477,6 +512,9 @@ async def _list(
                 counts.get(int(family_id), 0) if family_id is not None else 0
             )
             item["sponsored"] = item.get("assigned_sponsor_id") is not None
+            item["assigned_sponsor_name"] = sponsor_names.get(
+                str(item.get("assigned_sponsor_id"))
+            )
     else:
         for item in items:
             item["fully_matched"] = sponsor_fully_matched(item)

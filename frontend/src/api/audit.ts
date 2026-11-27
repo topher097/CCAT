@@ -29,6 +29,8 @@ export type ListParams = {
   status?: string | null
   /** Exact family filter; the search query only matches a substring. */
   family_id?: number | null
+  /** Exact assigned-sponsor filter (children only). */
+  sponsor_id?: number | null
   /** Ignore-flag filter; undefined omits the param. */
   ignore?: boolean | null
   /** Children/families: has any sponsor; sponsors: fully matched. */
@@ -52,6 +54,8 @@ export function listEntities(
     query.set('status', params.status)
   if (params.family_id !== undefined && params.family_id !== null)
     query.set('family_id', String(params.family_id))
+  if (params.sponsor_id !== undefined && params.sponsor_id !== null)
+    query.set('sponsor_id', String(params.sponsor_id))
   for (const name of ['ignore', 'sponsored', 'duplicate_pending'] as const) {
     const value = params[name]
     if (value !== undefined && value !== null)

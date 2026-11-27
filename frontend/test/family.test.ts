@@ -75,4 +75,63 @@ describe('family detail', () => {
     expect(cells).toContain('2B')
     expect(cells).toContain('4')
   })
+
+  it('names the sponsor of a matched child and links to the sponsor page', async () => {
+    mockRoutes([
+      (url) =>
+        url.includes('/children?')
+          ? jsonResponse(200, {
+              items: [
+                {
+                  zite_record_id: 'c1',
+                  family_id: 1,
+                  first_name: 'Kid',
+                  angel_id: '2B',
+                  family_child_count: 4,
+                  status: 'new',
+                  assigned_sponsor_id: 47,
+                  assigned_sponsor_name: 'Peyton Pakkala',
+                },
+                {
+                  zite_record_id: 'c2',
+                  family_id: 1,
+                  first_name: 'Other',
+                  angel_id: '2C',
+                  family_child_count: 4,
+                  status: 'new',
+                },
+              ],
+              total: 2,
+              page: 1,
+              page_size: 200,
+            })
+          : url.includes('/families/1')
+            ? jsonResponse(200, familyDetail())
+            : undefined,
+    ])
+    const { wrapper } = await mountRouted(FamilyDetailView, {
+      path: '/audit/families/1',
+      setup: seedSeason,
+    })
+    await flushPromises()
+
+    const rows = wrapper.get('[data-testid="family-children"]').findAll('tbody tr')
+    const sponsored = rows[0]!.get('[data-testid="family-child-sponsored"]')
+    expect(sponsored.classes()).toContain('check-ok')
+    expect(sponsored.text()).toBe('matched')
+    const link = rows[0]!.get('[data-testid="family-child-sponsor-link"]')
+    expect(link.text()).toBe('Peyton Pakkala')
+
+    const targets = wrapper
+      .findAllComponents({ name: 'RouterLinkStub' })
+      .map((row) => row.props('to'))
+    expect(targets).toContain('/audit/sponsors/47')
+
+    const unmatched = rows[1]!.get('[data-testid="family-child-sponsored"]')
+    expect(unmatched.classes()).toContain('check-unchecked')
+    expect(unmatched.text()).toBe('unmatched')
+    expect(
+      rows[1]!.find('[data-testid="family-child-sponsor-link"]').exists(),
+    ).toBe(false)
+  })
 })

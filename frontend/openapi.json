@@ -5145,7 +5145,7 @@
     },
     "/api/v1/seasons/{season}/children": {
       "get": {
-        "description": "List children \u2014 ignored/orphan/raw-missing rows included (\u00a75.2).\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: All-text search with fuzzy fallback.\n    status: Stored-status filter.\n    family_id: Exact family filter; the search query only ever\n        matches a family id as a substring.\n    ignore: Ignore-flag filter.\n    sponsored: Assigned-sponsor filter.\n    duplicate_pending: Unresolved-duplicate filter.\n\nReturns:\n    One page of rows.",
+        "description": "List children \u2014 ignored/orphan/raw-missing rows included (\u00a75.2).\n\nArgs:\n    request: The current request.\n    repo: The season-bound repository.\n    page: 1-based page number.\n    page_size: Page size (max 200).\n    q: All-text search with fuzzy fallback.\n    status: Stored-status filter.\n    family_id: Exact family filter; the search query only ever\n        matches a family id as a substring.\n    sponsor_id: Exact assigned-sponsor filter (children only).\n    ignore: Ignore-flag filter.\n    sponsored: Assigned-sponsor filter.\n    duplicate_pending: Unresolved-duplicate filter.\n\nReturns:\n    One page of rows.",
         "operationId": "list_children_api_v1_seasons__season__children_get",
         "parameters": [
           {
@@ -5220,6 +5220,22 @@
                 }
               ],
               "title": "Family Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sponsor_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sponsor Id"
             }
           },
           {
@@ -7124,6 +7140,100 @@
           }
         },
         "summary": "Decide Duplication",
+        "tags": [
+          "duplications"
+        ]
+      }
+    },
+    "/api/v1/seasons/{season}/duplications/{group_id}/unaudit": {
+      "post": {
+        "description": "Undo a duplication audit (admin).\n\nThe bound entry row returns to ``new`` and the group's audited\nstate row is removed, so the group is pending again and can be\nchanged and re-audited \u2014 mirroring the individual audit pages'\nundo.  An entry whose sponsor's packet is dispatched refuses.\n\nArgs:\n    group_id: The group's id.\n    request: The current request.\n    repo: The season-bound repository.\n    q: The list's search query (for the neighbours).\n    entity: Restrict to \"child\", \"family\", or \"sponsor\" (for the\n        neighbours).\n    kind: Restrict to \"duplicate_submission\" or \"angel_claim_conflict\"\n        (for the neighbours).\n    user: The authenticated identity.\n\nReturns:\n    The updated group detail.\n\nRaises:\n    ApiError: 404 for an unknown group; 409 when the entry's packet\n        is dispatched.",
+        "operationId": "unaudit_duplication_api_v1_seasons__season__duplications__group_id__unaudit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "title": "Group Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "season",
+            "required": true,
+            "schema": {
+              "title": "Season",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "entity",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Entity"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DuplicationDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unaudit Duplication",
         "tags": [
           "duplications"
         ]
