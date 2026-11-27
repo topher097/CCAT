@@ -242,7 +242,11 @@ watch(
       <h1>Registry</h1>
     </div>
 
-    <section v-if="canRunPipeline" data-testid="registry-pipeline">
+    <section
+      v-if="canRunPipeline"
+      style="margin-bottom: 1rem"
+      data-testid="registry-pipeline"
+    >
       <h2 style="margin-top: 0">Data pipeline</h2>
       <p class="muted">
         Pull the Zite forms into the raw snapshot, then screen them into the
