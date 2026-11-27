@@ -18,7 +18,6 @@ import ChildDetailView from '../views/ChildDetailView.vue'
 import DuplicationListView from '../views/DuplicationListView.vue'
 import DuplicationDetailView from '../views/DuplicationDetailView.vue'
 
-import PipelineCommandView from '../views/PipelineCommandView.vue'
 import MatchView from '../views/MatchView.vue'
 import DispatchView from '../views/DispatchView.vue'
 import StatsView from '../views/StatsView.vue'
@@ -55,18 +54,14 @@ export const routes: RouteRecordRaw[] = [
     meta: { public: true, title: 'Login' },
   },
   {
+    // The acquire and screen runs moved onto the Registry page; the old
+    // addresses keep working for bookmarks.
     path: '/acquire',
-    name: 'acquire',
-    component: PipelineCommandView,
-    props: { command: 'acquire' },
-    meta: { title: 'Acquire' },
+    redirect: '/audit',
   },
   {
     path: '/screen',
-    name: 'screen',
-    component: PipelineCommandView,
-    props: { command: 'screen' },
-    meta: { title: 'Screen' },
+    redirect: '/audit',
   },
   {
     path: '/audit',

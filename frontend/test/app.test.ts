@@ -29,6 +29,9 @@ describe('app shell', () => {
 
     expect(wrapper.find('nav.app-nav').exists()).toBe(true)
     expect(wrapper.get('nav.app-nav').text()).toContain('Dispatch')
+    // Acquire and Screen moved onto the Registry page (§ role-limited).
+    expect(wrapper.get('nav.app-nav').text()).not.toContain('Acquire')
+    expect(wrapper.get('nav.app-nav').text()).not.toContain('Screen')
     expect(wrapper.find('header.app-header').exists()).toBe(true)
     expect(wrapper.get('[data-testid="header-user"]').text()).toBe('coordinator')
   })

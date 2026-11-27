@@ -14,8 +14,6 @@ const online = ref(typeof navigator === 'undefined' ? true : navigator.onLine)
 
 const nav = [
   { to: '/', label: 'Overview' },
-  { to: '/acquire', label: 'Acquire' },
-  { to: '/screen', label: 'Screen' },
   { to: '/audit', label: 'Registry' },
   { to: '/match', label: 'Match' },
   { to: '/dispatch', label: 'Dispatch' },

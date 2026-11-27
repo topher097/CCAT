@@ -61,11 +61,14 @@ const OVERVIEW = {
   data_revision: '2026-11-01T10:00:00Z',
 }
 
-async function mountLanding() {
+async function mountLanding(roles?: string[]) {
   return mountRouted(AuditLandingView, {
     path: '/audit',
     setup: () => {
       useSessionStore().season = { id: 1, name: '2026', xmas_date: '2026-12-25' }
+      if (roles) {
+        useSessionStore().me = { username: 'u', roles, csrf_token: 'csrf' }
+      }
     },
   })
 }
@@ -115,6 +118,39 @@ describe('audit landing', () => {
     expect(targets).toContain('/audit/families')
     expect(targets).toContain('/audit/sponsors')
     expect(targets).toContain('/audit/duplications')
+  })
+
+  it('offers the acquire and screen runs to coordinators and admins only', async () => {
+    mockOverview()
+
+    const coordinatorView = await mountLanding(['coordinator'])
+    await flushPromises()
+    expect(
+      coordinatorView.wrapper.find('[data-testid="registry-pipeline"]').exists(),
+    ).toBe(true)
+    const pipelineText = coordinatorView.wrapper.get(
+      '[data-testid="registry-pipeline"]',
+    )
+    expect(pipelineText.text()).toContain('Acquire run')
+    expect(pipelineText.text()).toContain('Screen run')
+
+    const adminView = await mountLanding(['admin'])
+    await flushPromises()
+    expect(
+      adminView.wrapper.find('[data-testid="registry-pipeline"]').exists(),
+    ).toBe(true)
+
+    const auditorView = await mountLanding(['auditor'])
+    await flushPromises()
+    expect(
+      auditorView.wrapper.find('[data-testid="registry-pipeline"]').exists(),
+    ).toBe(false)
+
+    const readOnlyView = await mountLanding(['read_only'])
+    await flushPromises()
+    expect(
+      readOnlyView.wrapper.find('[data-testid="registry-pipeline"]').exists(),
+    ).toBe(false)
   })
 })
 
