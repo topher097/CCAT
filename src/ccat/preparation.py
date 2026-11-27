@@ -19,6 +19,7 @@ from ccat.acquire import PL_DTYPES
 from ccat.config import Config
 from ccat.domain import (
     DERIVED_COLUMNS,
+    PLACEHOLDER_SPONSOR_TYPE,
     SPONSOR_CLAIM_SHEET,
     _created_value,
     _cross_check_created,
@@ -330,9 +331,11 @@ def detect_sponsor_claim_contests(
 
     A sponsor's ``prior_assigned_angel_ids`` is the free-text list of
     children it claims (the Zite "Assigned Angel ID Code").  When two
-    sponsors claim the same angel id, only one of them can hold that
-    child, so the claim is a contest the audit has to settle: the
-    surviving sponsor keeps the claim and the loser is ignored.
+    specific sponsors claim the same angel id, only one of them can
+    hold that child, so the claim is a contest the audit has to settle:
+    the surviving sponsor keeps the claim and the loser is ignored.  A
+    contest a specific sponsor wins over generic store placeholders
+    settles itself (the takeover rule), so it is not reported.
 
     Claims that name no known child are left alone (the matcher already
     drops them), and claimants that all share one email are the same
@@ -359,6 +362,16 @@ def detect_sponsor_claim_contests(
     log_rows: list[dict[str, Any]] = []
     for angel_id, group in sorted(claimants.items()):
         if len(group) < 2:
+            continue
+        specific = [
+            row
+            for row in group
+            if row.get("sponsor_type") != PLACEHOLDER_SPONSOR_TYPE
+        ]
+        if len(specific) == 1:
+            # The specific sponsor takes the angel over from the generic
+            # store placeholders (db_assignments._claim_takeover), so
+            # this contest settles itself; the audit owes no decision.
             continue
         emails = {str(row.get("email") or "").strip().lower() for row in group}
         if len(emails) < 2:

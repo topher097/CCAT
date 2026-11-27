@@ -289,6 +289,34 @@ def test_reconcile_pre_assignments_duplicate_earlier_sponsor_wins() -> None:
     } == {"1", "2"}
 
 
+def test_reconcile_pre_assignments_takeover_from_placeholder() -> None:
+    """A specific claimant takes the angel over from a Walmart sponsor."""
+    sponsors = [
+        sponsor_row(39, num_children=1, sponsor_type="Walmart", prior="100A"),
+        sponsor_row(47, num_children=1, prior="100A"),
+    ]
+    children = [child_row("100A", 1, 8)]
+    plans, report = reconcile_pre_assignments(sponsors, children)
+    assert plans[47].assigned_angel_ids == ["100A"]
+    assert plans[39].assigned_angel_ids == []
+    assert any(
+        "taken over from the placeholder" in entry["reason"] for entry in report
+    )
+
+
+def test_reconcile_pre_assignments_placeholder_cannot_take_back() -> None:
+    """A store placeholder claiming later loses to the specific holder."""
+    sponsors = [
+        sponsor_row(35, num_children=1, prior="36A"),
+        sponsor_row(55, num_children=1, sponsor_type="Walmart", prior="36A"),
+    ]
+    children = [child_row("36A", 1, 8)]
+    plans, report = reconcile_pre_assignments(sponsors, children)
+    assert plans[35].assigned_angel_ids == ["36A"]
+    assert plans[55].assigned_angel_ids == []
+    assert any("kept by earlier sponsor" in entry["reason"] for entry in report)
+
+
 def test_reconcile_pre_assignments_split_family_flagged() -> None:
     """Siblings beyond num_children flag a split family (§8.5)."""
     sponsors = [sponsor_row(1, num_children=1, prior="1A")]
@@ -1253,6 +1281,30 @@ def test_run_skip_match_duplicate_prior_angels_raise(cfg: Config) -> None:
     _seed_match_workbook(cfg, sponsors, families, children)
     with pytest.raises(MatchError, match="duplicate angel"):
         run(cfg, skip_match=True)
+
+
+def test_run_skip_match_walmart_contest_resolves_to_specific(
+    cfg: Config,
+) -> None:
+    """A specific claimant takes the store's angel over; no raise."""
+    sponsors = [
+        sponsor_row(39, num_children=1, sponsor_type="Walmart", prior="1A"),
+        sponsor_row(47, num_children=1, prior="1A"),
+    ]
+    families = [family_row(1)]
+    children = [child_row("1A", 1, 8)]
+    _seed_match_workbook(cfg, sponsors, families, children)
+
+    run(cfg, skip_match=True)
+
+    final_child = read_final(cfg, "child")
+    by_angel = {child["angel_id"]: child for child in final_child}
+    assert by_angel["1A"]["assigned_sponsor_id"] == 47
+    final_sponsor = read_sheet(cfg.excel_file, "final_sponsor")
+    assert final_sponsor is not None
+    by_id = {r["sponsor_id"]: r for r in final_sponsor.to_dicts()}
+    assert by_id[47]["assigned_angel_ids"] == "1A"
+    assert by_id[39]["assigned_angel_ids"] is None
 
 
 def test_run_skip_match_prior_split_family_keeps_existing(

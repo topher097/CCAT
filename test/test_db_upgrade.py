@@ -130,6 +130,101 @@ def test_db_upgrade_retires_cmendres400_account(tmp_path: Path) -> None:
     assert events == 0
 
 
+def test_db_upgrade_settles_walmart_claim_takeovers(tmp_path: Path) -> None:
+    """Contested claims move the child to the specific claimant (0011)."""
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+
+    from ccat.db.engine import ALEMBIC_DIR
+
+    url = f"sqlite:///{tmp_path / 'ccat.sqlite3'}"
+    config = AlembicConfig()
+    config.set_main_option("script_location", str(ALEMBIC_DIR))
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "20261123_0010")
+    connection = sqlite3.connect(tmp_path / "ccat.sqlite3")
+    # The live shape: a Walmart placeholder holds the child; an
+    # individual claims the same angel; a manual placement nearby must
+    # survive untouched.
+    connection.executescript(
+        """
+        INSERT INTO final_family
+            (season_id, family_id, zite_record_id, ignore, status,
+             row_version, created_by, last_updated_by)
+        VALUES (1, 36, 'rec_f36', 0, 'audited', 1, 'migration', 'migration'),
+               (1, 100, 'rec_f100', 0, 'audited', 1, 'migration', 'migration');
+
+        INSERT INTO final_sponsor
+            (season_id, sponsor_id, zite_record_id, sponsor_type,
+             prior_assigned_angel_ids, num_children,
+             num_angels_assigned, ignore, status,
+             row_version, created_by, last_updated_by)
+        VALUES (1, 35, 'rec_s35', 'Walmart', '36A', 1, 1, 0, 'new',
+                1, 'migration', 'migration'),
+               (1, 39, 'rec_s39', 'Walmart', '100A', 1, 1, 0, 'new',
+                1, 'migration', 'migration'),
+               (1, 47, 'rec_s47', 'Individual', '100A', 1, 0, 0, 'new',
+                1, 'migration', 'migration'),
+               (1, 55, 'rec_s55', 'Individual', '36A', 1, 0, 0, 'new',
+                1, 'migration', 'migration');
+
+        INSERT INTO final_child
+            (season_id, zite_record_id, family_id, angel_id,
+             assigned_sponsor_id, assignment_source, ignore, status,
+             row_version, created_by, last_updated_by)
+        VALUES (1, 'rec_c36a', 36, '36A', 35, 'auto', 0, 'audited',
+                1, 'migration', 'migration'),
+               (1, 'rec_c100a', 100, '100A', 39, 'auto', 0, 'audited',
+                1, 'migration', 'migration'),
+               (1, 'rec_cmanual', 100, '100B', 39, 'manual', 0, 'audited',
+                1, 'migration', 'migration');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    command.upgrade(config, "head")
+
+    connection = sqlite3.connect(tmp_path / "ccat.sqlite3")
+    children = {
+        row[0]: (row[1], row[2])
+        for row in connection.execute(
+            "SELECT angel_id, assigned_sponsor_id, assignment_source"
+            " FROM final_child"
+        )
+    }
+    sponsors = {
+        row[0]: (row[1], row[2])
+        for row in connection.execute(
+            "SELECT sponsor_id, assigned_angel_ids, num_angels_assigned"
+            " FROM final_sponsor"
+        )
+    }
+    families = {
+        row[0]: (row[1], row[2])
+        for row in connection.execute(
+            "SELECT family_id, assigned_sponsor_id, assigned_angel_ids"
+            " FROM final_family"
+        )
+    }
+    connection.close()
+
+    # The specific claimants take the angels over from the placeholders.
+    assert children["100A"] == (47, "auto")
+    assert children["36A"] == (55, "auto")
+    # A manual placement is never moved.
+    assert children["100B"] == (39, "manual")
+    # The derived summaries follow the children.
+    assert sponsors[47] == ("100A", 1)
+    assert sponsors[55] == ("36A", 1)
+    assert sponsors[39] == ("100B", 1)
+    assert sponsors[35] == (None, 0)
+    # Family 100 spans both the taken-over child and the manual one, so
+    # it is a split family: no single sponsor, both angels named.
+    assert families[100] == (None, "100A,100B")
+    assert families[36] == (55, "36A")
+
+
 def test_cli_exposes_db_upgrade_command() -> None:
     """The Fire dispatch advertises the new command."""
     import ccat

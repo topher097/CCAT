@@ -381,7 +381,7 @@ def test_migration_tolerates_an_already_migrated_column(
     finally:
         engine.dispose()
     assert "entry_key" in columns
-    assert version == "20261123_0010"
+    assert version == "20261126_0011"
 
 
 def test_async_engine_pragmas(tmp_path: Path) -> None:

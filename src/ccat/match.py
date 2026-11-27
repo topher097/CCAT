@@ -36,6 +36,7 @@ from ccat.audit.store import (
 )
 from ccat.config import Config
 from ccat.domain import (
+    PLACEHOLDER_SPONSOR_TYPE,
     SPECIAL_NEEDS_LABEL,
     angel_sort_key,
     parse_prior_assigned,
@@ -350,15 +351,29 @@ def _participating_children(
     ]
 
 
+def _is_placeholder(row: dict[str, Any]) -> bool:
+    """Report whether the sponsor row is a generic store placeholder.
+
+    Args:
+        row: One sponsor row.
+
+    Returns:
+        True when the row's affiliation is the placeholder type.
+    """
+    return row.get("sponsor_type") == PLACEHOLDER_SPONSOR_TYPE
+
+
 def reconcile_pre_assignments(
     sponsor_rows: list[dict[str, Any]],
     children: list[dict[str, Any]],
 ) -> tuple[dict[int, SponsorPlan], list[dict[str, str]]]:
     """Parse and reconcile prior_assigned_angel_ids (§8.5).
 
-    Honors manual assignments verbatim after checking existence, duplicates
-    (earlier sponsor_id wins), and family integrity (siblings added when
-    the sponsor's num_children allows).
+    Honors manual assignments verbatim after checking existence,
+    duplicates (a specific sponsor's claim takes a generic store
+    placeholder's angel over; otherwise the earlier sponsor_id wins),
+    and family integrity (siblings added when the sponsor's
+    num_children allows).
 
     Args:
         sponsor_rows: Non-ignored persistent-final sponsor pool rows.
@@ -372,6 +387,7 @@ def reconcile_pre_assignments(
     children_by_family: dict[int, list[dict[str, Any]]] = {}
     for child in children:
         children_by_family.setdefault(child["family_id"], []).append(child)
+    sponsor_by_id = {row["sponsor_id"]: row for row in sponsor_rows}
     ordered = sorted(sponsor_rows, key=lambda row: row["sponsor_id"])
     plans: dict[int, SponsorPlan] = {}
     report: list[dict[str, str]] = []
@@ -403,14 +419,51 @@ def reconcile_pre_assignments(
                 )
                 continue
             if angel_id in seen and seen[angel_id] != plan.sponsor_id:
-                for ref in (str(seen[angel_id]), str(plan.sponsor_id)):
+                holder_id = seen[angel_id]
+                holder_row = sponsor_by_id.get(holder_id)
+                if (
+                    holder_row is not None
+                    and _is_placeholder(holder_row)
+                    and not _is_placeholder(row)
+                ):
+                    # A specific sponsor takes the angel over from the
+                    # generic store placeholder that held it (§8.5).
+                    loser = plans.get(holder_id)
+                    if (
+                        loser is not None
+                        and angel_id in loser.assigned_angel_ids
+                    ):
+                        loser.assigned_angel_ids.remove(angel_id)
+                    seen[angel_id] = plan.sponsor_id
+                    plan.assigned_angel_ids.append(angel_id)
+                    report.append(
+                        {
+                            "kind": "pre_assignment",
+                            "ref": str(plan.sponsor_id),
+                            "reason": (
+                                f"duplicate angel_id {angel_id} claimed by"
+                                f" sponsors {holder_id} and"
+                                f" {plan.sponsor_id}; taken over from the"
+                                f" placeholder sponsor {holder_id}"
+                            ),
+                        }
+                    )
+                    logger.warning(
+                        "duplicate angel_id %s: sponsor %s takes it over"
+                        " from placeholder sponsor %s",
+                        angel_id,
+                        plan.sponsor_id,
+                        holder_id,
+                    )
+                    continue
+                for ref in (str(holder_id), str(plan.sponsor_id)):
                     report.append(
                         {
                             "kind": "pre_assignment",
                             "ref": ref,
                             "reason": (
                                 f"duplicate angel_id {angel_id} claimed by sponsors"
-                                f" {seen[angel_id]} and {plan.sponsor_id}; kept by"
+                                f" {holder_id} and {plan.sponsor_id}; kept by"
                                 " earlier sponsor, manual resolution needed"
                             ),
                         }
@@ -418,7 +471,7 @@ def reconcile_pre_assignments(
                 logger.warning(
                     "duplicate angel_id %s: sponsor %s keeps it, sponsor %s loses it",
                     angel_id,
-                    seen[angel_id],
+                    holder_id,
                     plan.sponsor_id,
                 )
                 continue
@@ -609,8 +662,10 @@ def _prior_child_assignments(
 
     The prior list is authoritative in ``--skip-match``: each named angel
     gets its sponsor, and no sibling carry-over happens (that rule belongs
-    to the full match). Unknown angel ids warn; two sponsors claiming the
-    same angel id raise.
+    to the full match). Unknown angel ids warn. A contested claim resolves
+    like the full match: a specific sponsor takes a generic store
+    placeholder's angel over, placeholders keep the earlier sponsor id,
+    and two specific sponsors claiming one angel raise.
 
     Args:
         sponsor_pool: Non-ignored persistent-final sponsor rows.
@@ -620,7 +675,8 @@ def _prior_child_assignments(
         Mapping of angel id -> sponsor id for the resolvable priors.
 
     Raises:
-        MatchError: When the same angel id is claimed by two sponsors.
+        MatchError: When the same angel id is claimed by two specific
+            sponsors.
     """
     known = {child["angel_id"] for child in participating}
     claims: dict[str, set[int]] = {}
@@ -638,24 +694,38 @@ def _prior_child_assignments(
                 )
                 continue
             claims.setdefault(angel_id, set()).add(sponsor_id)
-    duplicates = {
-        angel_id: sorted(sponsor_ids)
-        for angel_id, sponsor_ids in claims.items()
-        if len(sponsor_ids) > 1
-    }
-    if duplicates:
+    by_id = {row["sponsor_id"]: row for row in sponsor_pool}
+    resolved: dict[str, int] = {}
+    unresolvable: dict[str, list[int]] = {}
+    for angel_id, sponsor_ids in claims.items():
+        if len(sponsor_ids) == 1:
+            resolved[angel_id] = next(iter(sponsor_ids))
+            continue
+        specific = [
+            sponsor_id
+            for sponsor_id in sorted(sponsor_ids)
+            if not _is_placeholder(by_id[sponsor_id])
+        ]
+        if len(specific) == 1:
+            # A specific sponsor takes the angel over from the generic
+            # store placeholders.
+            resolved[angel_id] = specific[0]
+        elif not specific:
+            # Placeholders only: the earlier sponsor id keeps it, the
+            # same rule the full match applies.
+            resolved[angel_id] = min(sponsor_ids)
+        else:
+            unresolvable[angel_id] = sorted(sponsor_ids)
+    if unresolvable:
         detail = "; ".join(
             f"angel {angel_id} assigned to sponsors {sponsor_ids}"
-            for angel_id, sponsor_ids in sorted(duplicates.items())
+            for angel_id, sponsor_ids in sorted(unresolvable.items())
         )
         raise MatchError(
             "duplicate angel assignments in final_sponsor:"
             f" {detail}; resolve manually and rerun"
         )
-    return {
-        angel_id: next(iter(sponsor_ids))
-        for angel_id, sponsor_ids in claims.items()
-    }
+    return resolved
 
 
 def _manual_family_ids(final_child: list[dict[str, Any]]) -> set[Any]:

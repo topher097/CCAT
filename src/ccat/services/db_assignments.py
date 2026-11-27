@@ -35,7 +35,11 @@ from ccat.audit.store import (
     STATUS_NEW,
     as_bool,
 )
-from ccat.domain import angel_sort_key, parse_prior_assigned
+from ccat.domain import (
+    PLACEHOLDER_SPONSOR_TYPE as _PLACEHOLDER_SPONSOR_TYPE,
+    angel_sort_key,
+    parse_prior_assigned,
+)
 from ccat.preparation import append_note
 
 if TYPE_CHECKING:
@@ -52,6 +56,43 @@ STATE_SPLIT = "split"
 STATE_ASSIGNED = "assigned"
 
 
+def _is_placeholder(sponsor: dict[str, Any]) -> bool:
+    """Report whether the sponsor is a generic store placeholder.
+
+    Args:
+        sponsor: One sponsor row.
+
+    Returns:
+        True when the sponsor's type is the placeholder affiliation.
+    """
+    return sponsor.get("sponsor_type") == _PLACEHOLDER_SPONSOR_TYPE
+
+
+def _claim_takeover(
+    claimants: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Resolve a contested claim by sponsor specificity.
+
+    A generic store placeholder holds the angel id for the store; a
+    specific sponsor claiming the same id takes the slot over
+    (angel_claims_plan §1).  Two specific claimants (or placeholders
+    only) stay a contest the Duplications section settles.
+
+    Args:
+        claimants: The sponsors claiming one angel id (two or more).
+
+    Returns:
+        The sponsor that takes the angel over, or None when the rule
+        cannot settle the contest.
+    """
+    specific = [
+        sponsor for sponsor in claimants if not _is_placeholder(sponsor)
+    ]
+    if len(specific) == 1:
+        return specific[0]
+    return None
+
+
 def apply_angel_claims(
     sponsors: list[dict[str, Any]], children: list[dict[str, Any]]
 ) -> list[str]:
@@ -60,15 +101,19 @@ def apply_angel_claims(
     A sponsor's ``prior_assigned_angel_ids`` names the children it
     claims.  A claim on a child that exists and that no other sponsor
     claims is placed on that child, so the claim is visible before the
-    matcher runs.  A claim another sponsor also makes is a contest the
-    Duplications section settles, so nothing is placed: the child waits
-    for the audit.  A claim that names no child cannot be honoured at
+    matcher runs.  A claim that names no child cannot be honoured at
     all, so the sponsor gets a clarification note and the audit stage
     fixes it.
 
-    A child that is already placed keeps its placement: the claim is a
-    first placement, not a move, and the matcher re-applies every claim
-    afterwards.
+    A contested claim is settled by specificity: one specific sponsor
+    against generic store placeholders takes the child over, even from
+    a placeholder the child is already placed with.  Two specific
+    claimants (or placeholders only) stay a contest the Duplications
+    section settles, so nothing is placed.
+
+    A child that is already placed with a specific sponsor keeps its
+    placement, and a manual placement is never overwritten: the claim
+    is a first placement or a placeholder takeover, not a move.
 
     Args:
         sponsors: The final sponsor rows, updated in place.
@@ -86,6 +131,9 @@ def apply_angel_claims(
             continue
         for angel_id in parse_prior_assigned(str(raw)):
             claims.setdefault(angel_id, []).append(sponsor)
+    sponsors_by_id = {
+        sponsor.get("sponsor_id"): sponsor for sponsor in sponsors
+    }
     children_by_angel = {
         str(child["angel_id"]): child
         for child in children
@@ -94,8 +142,27 @@ def apply_angel_claims(
     unusable: list[str] = []
     for angel_id, claimants in claims.items():
         if len(claimants) > 1:
-            # A contest: the Duplications section decides who keeps the
-            # child, so nothing is placed here.
+            winner = _claim_takeover(claimants)
+            if winner is None:
+                # A contest the rule cannot settle: the Duplications
+                # section decides who keeps the child, so nothing is
+                # placed here.
+                continue
+            child = children_by_angel.get(angel_id)
+            if child is None:
+                continue
+            if child.get("assignment_source") == SOURCE_MANUAL:
+                continue
+            holder = child_sponsor(child)
+            holder_row = (
+                sponsors_by_id.get(holder) if holder is not None else None
+            )
+            if holder_row is not None and not _is_placeholder(holder_row):
+                # A specific sponsor keeps its child; only a
+                # placeholder's hold is taken over.
+                continue
+            child["assigned_sponsor_id"] = winner.get("sponsor_id")
+            child["assignment_source"] = SOURCE_AUTO
             continue
         sponsor = claimants[0]
         child = children_by_angel.get(angel_id)
